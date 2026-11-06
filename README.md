@@ -69,8 +69,11 @@ firmware also when you pause.
   load-multiples from the XBUS data port, before the video DMA (MiSTer's arbitration,
   unchanged). The same delay sometimes pushes the processing of the BIOS's VDL, which is
   in SDRAM-backed VRAM, past the first picture line, which then starts late too (8
-  frames between 2.9 and 4.2 s). Once the game runs (VDL in on-chip VRAM), no late lines
-  were seen.
+  frames between 2.9 and 4.2 s).
+* During the game's 3D intro (11–16 s of the Wolfenstein 3D boot, heavy CEL-engine
+  drawing) 119 of about 77,000 video lines started before their VRAM transfer while the
+  3DO was paused for the SDRAM. Not investigated yet. None during the game's animated
+  logo (7.7–11 s).
 * One controller. Buttons: Y/B/A = 3DO A/B/C, Start = P (play), Select/X = X (stop),
   L/R = L/R. They can be remapped in the Game Bub menu.
 

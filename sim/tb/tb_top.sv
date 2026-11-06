@@ -256,23 +256,42 @@ module tb_top;
 	// ------------------------------------------------------------------
 	// Video timing monitor (framework side)
 	// ------------------------------------------------------------------
+	// A CLIO software reset also resets the video encoder (VE), as on MiSTer,
+	// so the line and frame it interrupts are counted separately; every
+	// other line and frame must be exact.
 	int px_in_line = 0, lines_in_frame = 0, frames = 0, bad_lines = 0, bad_frames = 0;
-	reg vhbl_d = 0, vvbl_d = 0;
+	int srst_lines = 0, srst_frames = 0, soft_resets = 0;
+	realtime last_soft_reset = -1s;
+	reg vhbl_d = 0, vvbl_d = 0, clio_reset_n_d = 1;
 	always @(posedge clk_sys) begin
+		bit near_srst;
 		vhbl_d <= vhbl; vvbl_d <= vvbl;
+		clio_reset_n_d <= dut.p3do.RESET_N;
+		if (!dut.p3do.RESET_N && clio_reset_n_d && !dut.reset_3do) begin
+			soft_resets++;
+			last_soft_reset = $realtime;
+			$display("[%0t] CLIO software reset", $realtime);
+		end
+		near_srst = last_soft_reset >= 0 && $realtime - last_soft_reset < 20ms;
 		if (vde) px_in_line++;
 		if (vhbl && !vhbl_d) begin
 			if (px_in_line != 320) begin
-				bad_lines++;
-				if (bad_lines < 5) $display("[%0t] video: line %0d has %0d pixels", $realtime, lines_in_frame, px_in_line);
+				if (near_srst) begin
+					srst_lines++;
+					$display("[%0t] video: line %0d has %0d pixels (software reset)", $realtime, lines_in_frame, px_in_line);
+				end else begin
+					bad_lines++;
+					if (bad_lines < 5) $display("[%0t] video: line %0d has %0d pixels", $realtime, lines_in_frame, px_in_line);
+				end
 			end
 			px_in_line = 0;
 			lines_in_frame++;
 		end
 		if (vvbl && !vvbl_d) begin
 			if (frames > 0 && lines_in_frame != 240) begin
-				bad_frames++;
-				$display("[%0t] video: frame %0d has %0d lines", $realtime, frames, lines_in_frame);
+				if (near_srst) srst_frames++;
+				else bad_frames++;
+				$display("[%0t] video: frame %0d has %0d lines%s", $realtime, frames, lines_in_frame, near_srst ? " (software reset)" : "");
 			end
 			frames++;
 			lines_in_frame = 0;
@@ -286,9 +305,10 @@ module tb_top;
 	bit trace;
 	initial trace = $test$plusargs("trace");
 	always @(posedge clk_sys) begin
-		if (trace && dut.p3do.MCLK_PH2 && !dut.p3do.CPU_nMREQ)
-			$display("[%0t] CPU %s %08h %08h %s", $realtime, dut.p3do.CPU_nRW ? "W" : "R", dut.p3do.CPU_A,
-			         dut.p3do.CPU_nRW ? dut.p3do.CPU_DO : dut.p3do.CPU_DI, dut.p3do.CPU_nOPC ? "" : "op");
+		if (trace && dut.p3do.MCLK_PH2)
+			$display("[%0t] CPU %s %08h %08h %s nMREQ=%b SEQ=%b nRES=%b CLIO_RESET_N=%b BOOT_ROM=%b", $realtime, dut.p3do.CPU_nRW ? "W" : "R", dut.p3do.CPU_A,
+			         dut.p3do.CPU_nRW ? dut.p3do.CPU_DO : dut.p3do.CPU_DI, dut.p3do.CPU_nOPC ? "  " : "op",
+			         dut.p3do.CPU_nMREQ, dut.p3do.CPU_SEQ, dut.p3do.CPU_nRES, dut.p3do.RESET_N, dut.p3do.madam.BOOT_ROM);
 	end
 
 	initial if ($test$plusargs("state")) forever begin
@@ -388,15 +408,18 @@ module tb_top;
 			$display("[%0t] test ROM: %s test=%0d addr=%08h checks=%0d", $realtime,
 			         {nvram[256], nvram[257], nvram[258], nvram[259]}, test, addr, checks);
 			if ({nvram[256], nvram[257], nvram[258], nvram[259]} != "PASS") fail("test ROM reported FAIL");
-			if (checks != 64*4 + 1 + 64*5 + 2 + 16 + 1 + 2) fail($sformatf("unexpected number of checks %0d", checks));
+			if (checks != 64*4 + 1 + 64*5 + 2 + 16 + 1 + 2 + 4) fail($sformatf("unexpected number of checks %0d", checks));
 			for (int i = 0; i < 16; i++)
 				if (nvram[8'h80 + i] != 8'(8'hA5 + 8'h13 * i)) fail($sformatf("NVRAM byte %02h = %02h", 8'h80 + i, nvram[8'h80 + i]));
 		end
 
 		// video timing towards the framework
 		while (frames < n_frames + 1) @(posedge clk_sys);
-		$display("[%0t] video: %0d frames, bad lines %0d, bad frames %0d", $realtime, frames, bad_lines, bad_frames);
+		$display("[%0t] video: %0d frames, bad lines %0d, bad frames %0d; at the %0d software reset(s): %0d lines, %0d frames",
+		         $realtime, frames, bad_lines, bad_frames, soft_resets, srst_lines, srst_frames);
 		if (bad_lines || bad_frames) fail("video timing");
+		// one from CLIO's power-on state (CSTAT = 0x11), one by the test ROM
+		if (soft_resets != 2) fail($sformatf("%0d CLIO software resets, expected 2 (power-on and the test ROM's)", soft_resets));
 
 		if (stream_mode) begin
 			$display("tb_top: %0d disc sectors served by the firmware model", sectors_served);

@@ -10,6 +10,11 @@
 @   6. NVRAM byte writes/reads (0x03140000, one byte per word, low byte)
 @   7. CD-ROM through CLIO XBUS -> OSA -> 3DO_CDROM -> cdd_emu -> SDRAM:
 @      "read capacity" (disc-info block) and a 2-sector data read (NEXT)
+@   8. CLIO software reset (CSTAT bits 4 and 5, the BIOS's DIPIR reset): the
+@      ARM must start at 0 in SVC mode with IRQ and FIQ disabled (CPSR I and F
+@      set, flags kept), the interrupted CPSR in SPSR_svc and the interrupted
+@      PC in R14_svc (ARM60 datasheet, reset; Portfolio's DIPIR code returns
+@      through them). The power-on CPSR (0xD3) is checked too.
 @ Result record in NVRAM bytes 0x100..0x10F (read back by the testbench over
 @ the host interface, FileReadStart(3)):
 @   0x100: 'P','A','S','S' or 'F','A','I','L'
@@ -27,6 +32,12 @@
 
 	.equ ROM_BASE,   0x03000000
 	.equ NVRAM_BASE, 0x03140000
+	.equ CLIO_CSTAT, 0x03400028
+	.equ SRST_FLAG,  0x00001100	@ DRAM: magic while a software reset is expected
+	.equ SRST_MAGIC, 0x53525354	@ "SRST"
+	.equ PON_CPSR,   0x00001104	@ DRAM: CPSR found at power-on
+	.equ SRST_SAVE,  0x00001108	@ DRAM: checks performed before the reset
+	.equ SRST_STUB,  0x00001200	@ DRAM: code that triggers the software reset
 
 _start:
 	@ At reset the ROM is also visible at 0; jump to its real address (the
@@ -34,6 +45,18 @@ _start:
 	ldr	pc, =ROM_BASE + entry
 
 entry:
+	@ Reset state, before anything changes it (the jump above does not)
+	mrs	r8, cpsr
+	mrs	r9, spsr
+	mov	r10, lr
+	ldr	r0, =SRST_FLAG
+	ldr	r1, [r0]
+	ldr	r2, =SRST_MAGIC
+	cmp	r1, r2
+	beq	after_soft_reset
+	ldr	r0, =PON_CPSR
+	str	r8, [r0]
+
 	mov	r11, #0			@ checks performed
 	mov	r12, #0			@ current test number
 
@@ -203,6 +226,61 @@ entry:
 	cmp	r8, #3
 	bne	9b
 
+	@ ---- 8. CLIO software reset ----
+	mov	r12, #8
+	ldr	r0, =PON_CPSR		@ power-on: SVC mode, IRQ and FIQ disabled, flags clear
+	ldr	r6, [r0]
+	cmp	r6, #0xD3
+	movne	r2, r6
+	bne	fail
+	add	r11, r11, #1
+	ldr	r0, =SRST_SAVE
+	str	r11, [r0]
+	ldr	r0, =SRST_FLAG
+	ldr	r1, =SRST_MAGIC
+	str	r1, [r0]
+	@ The BIOS resets from its kernel in DRAM; do the same (from ROM, the
+	@ fetch still in flight at the reset would end MADAM's boot mapping).
+	ldr	r3, =SRST_STUB
+	adr	r4, srst_code
+	ldmia	r4, {r5, r6}
+	stmia	r3, {r5, r6}
+	ldr	r0, =CLIO_CSTAT
+	mov	r1, #0x30		@ software reset + clear DIPIR, as the BIOS writes it
+	ldr	r4, =0xA0000013		@ interrupted state: N and C set, SVC mode,
+	msr	cpsr_fc, r4		@ IRQ and FIQ enabled (register form: the
+	mov	pc, r3			@ core does not decode MSR #immediate)
+
+srst_code:				@ copied to SRST_STUB
+	str	r1, [r0]
+1:	b	1b			@ the reset lands here (or on the store)
+
+after_soft_reset:
+	mov	r1, #0
+	str	r1, [r0]		@ r0 = SRST_FLAG: not expected any more
+	ldr	r0, =SRST_SAVE
+	ldr	r11, [r0]
+	mov	r12, #8
+	ldr	r5, =0xA00000D3		@ CPSR: SVC, I and F set, flags kept
+	cmp	r8, r5
+	movne	r2, r8
+	bne	fail
+	add	r11, r11, #1
+	ldr	r5, =0xA0000013		@ SPSR_svc: the interrupted CPSR
+	cmp	r9, r5
+	movne	r2, r9
+	bne	fail
+	add	r11, r11, #1
+	ldr	r5, =SRST_STUB		@ R14_svc: the interrupted code
+	cmp	r10, r5
+	movcc	r2, r10
+	bcc	fail
+	add	r5, r5, #12
+	cmp	r10, r5
+	movhi	r2, r10
+	bhi	fail
+	add	r11, r11, #1
+
 	@ ---- all passed ----
 	mov	r12, #0
 	mov	r2, #0
@@ -213,15 +291,18 @@ fail:
 	ldr	r7, =0x4641494C		@ "FAIL"
 
 report:
-	ldr	r0, =NVRAM_BASE + 0x100 * 4
-	mov	r8, r7
-	bl	put_word		@ 0x100: PASS/FAIL
+	@ The status word goes last: the testbench reads the record as soon as
+	@ it sees PASS or FAIL.
+	ldr	r0, =NVRAM_BASE + 0x104 * 4
 	mov	r8, r12
 	bl	put_word		@ 0x104: test number
 	mov	r8, r2
 	bl	put_word		@ 0x108: address
 	mov	r8, r11
 	bl	put_word		@ 0x10C: checks
+	ldr	r0, =NVRAM_BASE + 0x100 * 4
+	mov	r8, r7
+	bl	put_word		@ 0x100: PASS/FAIL
 	ldr	r0, =0x00001000		@ also leave the record in DRAM
 	str	r7, [r0]
 	str	r12, [r0, #4]

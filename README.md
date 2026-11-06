@@ -30,23 +30,27 @@ Copy to the microSD card:
 /cores/apolkosnik.3DO/kanji.rom     <- optional (Japanese BIOS font ROM)
 ```
 
-The JSON files are in `metadata/`. Select an `.iso` disc image (2048-byte sectors)
-when starting the core. Most 3DO dumps are CUE/BIN (MODE1/2352). Convert them with
-`tools/cue2iso.py image.cue`, which also tells you whether the disc fits. The NVRAM (saves) is stored next to the image as `.sav`. If no
+The JSON files are in `metadata/`.
+
+**Discs.** With the disc-streaming firmware from the
+[neutralinsomniac/gamebub](https://github.com/neutralinsomniac/gamebub/blob/psx/docs/psx.md)
+fork (the one its PlayStation core needs), select a `.cue` (or a lone `.bin`). Discs of
+any size are read from the microSD card as the game needs them; see
+[docs/disc_streaming.md](docs/disc_streaming.md).
+
+With stock firmware, only `.iso` images (2048-byte sectors) of up to 22 MiB work: they
+are loaded into SDRAM at startup. `tools/cue2iso.py image.cue` converts a CUE/BIN and
+tells you whether it fits. The NVRAM (saves) is stored next to the image as `.sav`. If no
 save exists, a blank 3DO NVRAM is created.
 
 ### Limitations
 
-* **Disc size: at most 22 MiB.** The Game Bub firmware loads files into the core when
-  it starts, and cannot yet stream from the microSD card. So the whole ISO must fit into
-  the SDRAM space left over (bank 3 plus the unused rows of banks 0 and 1). This is
-  enough for homebrew, demos and small titles, but not for commercial games. For example,
-  Wolfenstein 3D keeps its boot files 87 MB into the disc. The framework already has the
-  command channel streaming needs; the firmware does not use it yet. See
-  [docs/disc_streaming.md](docs/disc_streaming.md) for the investigation and a proposed
-  protocol.
-* ISO images only (no CUE/BIN, no CD audio tracks).
-* NTSC only (PAL video modes are not supported).
+* **Stock firmware: discs of up to 22 MiB, as `.iso`.** Larger discs need the
+  disc-streaming firmware (see *Discs* above).
+* CD audio tracks are listed in the disc's table of contents, but not played (as in the
+  MiSTer core).
+* PAL games run at 50 Hz, but the handheld's LCD refreshes at 60 Hz, so every fifth frame
+  is shown twice.
 * Only the 64 KiB "BRAM1" VRAM block is on chip, because the framework's double
   framebuffer uses most of the block RAM. The rest of VRAM is in SDRAM, behind the
   original MiSTer DDR3 logic (`ddram.sv`). Video reads from it go through a prefetching
@@ -59,6 +63,9 @@ save exists, a blank 3DO NVRAM is created.
 
 * **CD Speed**: delay between sectors: real 2x drive (6.7 ms), MiSTer rate (3 ms,
   default), or fast (0.5 ms).
+* **Region**: NTSC or PAL video timing, either by BIOS (a PAL Panasonic FZ-1 BIOS is
+  recognised by its checksum, as on MiSTer) or set by hand. Takes effect at the next
+  reset.
 * **Reset**: resets the 3DO.
 
 ## How the port works
@@ -67,7 +74,7 @@ save exists, a blank 3DO NVRAM is created.
 |-----------------------------------------|-------------------------------------------------------------------|
 | SDRAM: 3DO DRAM (`sdram.sv`)            | `sdram_3do.sv`, same MCLK-locked TDM scheduling, banks 0/1        |
 | DDR3: VRAM overflow, BIOS, kanji, NVRAM | `ddram.sv` unchanged, on `ddr_bridge.sv` to SDRAM bank 2          |
-| HPS: CD image streaming                 | ISO preloaded into SDRAM, `cdd_emu.sv` emulates the drive back end |
+| HPS: CD image streaming                 | `cdd_emu.sv`: sectors on request from the firmware (fork), or an ISO preloaded into SDRAM |
 | HPS: BIOS/save loading                  | framework file transfers, `gb_host.sv`                            |
 | Altera megafunctions                    | `rtl/compat/altera_compat.sv`, Xilinx-inferable rewrites          |
 | combinational `lpm_divide` (MADAM)      | sequential divider, same results (`MADAM_mem.sv`)                 |
@@ -100,7 +107,16 @@ picture.
 Host file data is stored exactly as received. The byte order of the MCU's words is
 detected from the Opera volume header of the ISO (little-endian if no ISO is loaded).
 
-Upstream files that were modified are marked with `GameBub` comments.
+**ARM reset exception (fix to the MiSTer CPU).** The BIOS boots a disc through a
+software reset (CLIO `CSTAT` bit 4, the "DIPIR reset"). The ARM6 core entered it like a
+SWI: it set the I bit but left F (FIQ disable) as the interrupted code had it. As on the
+ARM60 (and in the Opera emulator), a reset now disables FIQ too. Without this, the
+pre-reset kernel's vertical-blank FIQ handler kept running through the reset. Once the
+BIOS loaded the disc's operating system over that kernel, the handler jumped into the new
+code and the CPU crashed (Wolfenstein 3D with the FZ-10 BIOS, 4.8 s after power-on).
+`tb_top` checks the CPU state after a CLIO software reset (test 8 of the test BIOS).
+
+Upstream files that were modified are marked with `GameBub` / `Game Bub port` comments.
 
 ## Building
 
@@ -134,6 +150,7 @@ sim/run_tb.sh tb_rtcache       # VRAM read-transfer cache: coherence vs. referen
 sim/build_testrom.sh           # assemble the test BIOS (sim/tb/testrom.S)
 sim/run_tb.sh tb_top           # whole core: boots the test BIOS
 sim/run_tb.sh tb_top +be       # same with a big-endian host
+sim/run_tb.sh tb_top +stream   # same, with the disc read through a model of the streaming firmware
 ```
 
 ```
@@ -141,8 +158,9 @@ VARGS="+define+TB_TOP=tb_boot" BUILD=build/sim_boot sim/run_tb.sh tb_boot \
     +bios=/path/to/panafz10.bin +iso=/path/to/disc.iso +run_ms=1000 +frame_every=6
 ```
 
-`tb_boot` boots a real BIOS (and optional ISO, converted with `tools/cue2iso.py`,
-truncated to 22 MiB if needed), writes framework video frames to `build/sim/frames/`
+`tb_boot` boots a real BIOS, with a disc either streamed from a raw `.bin`
+(`+disc_bin=`, served the way the streaming firmware does) or preloaded from an ISO
+(`+iso=`). It writes framework video frames to `build/sim/frames/`
 (PPM), logs every CD command, dumps VRAM as an image at the end and measures stale
 serial reads during VRAM read transfers. About 1 ms of 3DO time per second of wall time.
 

@@ -11,8 +11,14 @@
 //   * framework video frames as PPM files (build/sim/frames/frame_NNNN.ppm)
 //   * every CD controller command the BIOS sends and every sector delivered
 //   * CPU address samples, pause statistics, SDRAM model errors
+//   * streamed discs: every sector sent to the CD controller is checked
+//     against the image at the LBA the BIOS asked for
+//   * build/sim/cpu_trace.txt: the last 32768 CPU bus cycles (or, with
+//     +trace_from_ms=<n>, all from n ms on) before the CPU first runs outside
+//     the 3DO memory map (a crash), with CLIO's interrupt state at each FIQ
 //
-// Plusargs: +bios=<file> (required), +iso=<file>, +run_ms=<n> (default 1000),
+// Plusargs: +bios=<file> (required), +iso=<file> or +disc_bin=<file>,
+//           +disc_latency_us=<n> (default 800), +trace_from_ms=<n>, +run_ms=<n> (default 1000),
 //           +frame_every=<n> (default 10)
 //
 // Copyright (c) 2026 Adam Polkosnik
@@ -216,6 +222,163 @@ module tb_boot;
 		if (!dut.cdd_dien && cdd_dien_d)
 			$display("[%0t] CD disc-info block sent (id %08h, lead-out MSF %06h)", $realtime, dut.cdd.disc_id, dut.cdd.disc_msf[31:8]);
 	end
+	// ---------------- CD data check (streaming) ----------------
+	// Every sector the drive back end sends to the CD controller is compared
+	// with the image's user data (raw bytes 16..2063) at the LBA the BIOS
+	// asked for. The expected LBA is computed here from the READ commands
+	// (one sector per READ or NEXT), not taken from the core.
+	int       chk_fd = 0;
+	int       cd_exp_lba = 150;     // absolute LBA of the next sector to arrive
+	int       cd_ref_lba = 0;       // LBA of the sector being received
+	int       cd_widx = 0;
+	int       cd_sec_errs = 0;
+	int       cd_good = 0, cd_bad = 0;
+	bit [7:0] cd_ref [2352];
+	bit [15:0] cd_ref_sum;
+	always @(posedge clk_sys) begin
+		if (chk_fd != 0) begin
+			if (dut.cdd.cmd_new && dut.cdd.comm[0] == 8'h10) begin
+				int l;
+				l = (dut.cdd.comm[4] != 0) ? int'({dut.cdd.comm[1], dut.cdd.comm[2], dut.cdd.comm[3]})
+				                           : int'(dut.cdd.comm[1]) * 4500 + int'(dut.cdd.comm[2]) * 75 + int'(dut.cdd.comm[3]);
+				cd_exp_lba = (l < 150) ? 150 : l;
+			end
+			if (dut.cdd_dten && !cdd_dten_d) begin
+				cd_ref_lba = cd_exp_lba;
+				cd_exp_lba++;
+				foreach (cd_ref[i]) cd_ref[i] = 8'h00;
+				if (cd_ref_lba < 150 + bin_sectors) begin
+					int n;
+					void'($fseek(chk_fd, longint'(cd_ref_lba - 150) * 2352, 0));
+					n = $fread(cd_ref, chk_fd);
+				end
+				cd_widx = 0;
+				cd_sec_errs = 0;
+				cd_ref_sum = 16'h0000;
+			end
+			if (dut.cdd_dten && dut.cdd.CDD_WR) begin
+				if (cd_widx < 1024) begin
+					bit [15:0] e;
+					e = {cd_ref[16 + 2 * cd_widx + 1], cd_ref[16 + 2 * cd_widx]};
+					cd_ref_sum = cd_ref_sum + e[15:8] + e[7:0];
+					if (dut.cdd.CDD_DATA !== e) begin
+						if (cd_sec_errs < 4)
+							$display("[%0t] CD DATA MISMATCH abs lba %0d word %0d: got %04h, expected %04h",
+							         $realtime, cd_ref_lba, cd_widx, dut.cdd.CDD_DATA, e);
+						cd_sec_errs++;
+					end
+				end else if (cd_widx == 1024) begin
+					if (dut.cdd.CDD_DATA !== cd_ref_sum) begin
+						$display("[%0t] CD CHECKSUM MISMATCH abs lba %0d: got %04h, expected %04h",
+						         $realtime, cd_ref_lba, dut.cdd.CDD_DATA, cd_ref_sum);
+						cd_sec_errs++;
+					end
+				end
+				cd_widx++;
+			end
+			if (!dut.cdd_dten && cdd_dten_d) begin
+				if (cd_widx != 1025) begin
+					$display("[%0t] CD sector abs lba %0d: %0d words sent, expected 1025", $realtime, cd_ref_lba, cd_widx);
+					cd_sec_errs++;
+				end
+				if (cd_sec_errs) begin cd_bad++; errors++; end
+				else cd_good++;
+			end
+		end
+	end
+
+	// ---------------- system control events ----------------
+	// CPU writes to CLIO's CSTAT (software reset) and interrupt enable
+	// registers, and the ARM's reset input, over the whole run.
+	reg cpu_nres_d = 1;
+	bit [31:0] last_fetch = 0;
+	always @(posedge clk_sys) begin
+		if (dut.p3do.MCLK_PH2 && !dut.p3do.CPU_nOPC && !dut.p3do.CPU_nRW) last_fetch <= dut.p3do.CPU_A;
+		if (!dut.reset_3do) begin
+			cpu_nres_d <= dut.p3do.CPU_nRES;
+			if (dut.p3do.CPU_nRES != cpu_nres_d)
+				$display("[%0t] ARM reset input %s", $realtime, dut.p3do.CPU_nRES ? "released" : "asserted");
+			if (dut.p3do.MCLK_PH2 && dut.p3do.CPU_nRW)
+				case (dut.p3do.CPU_A)
+					32'h03400028: $display("[%0t] CLIO CSTAT <= %08h (code near %08h, BOOT_ROM %b)", $realtime, dut.p3do.CPU_DO, last_fetch, dut.p3do.madam.BOOT_ROM);
+					32'h03400048: $display("[%0t] CLIO INT0 enable set   %08h", $realtime, dut.p3do.CPU_DO);
+					32'h0340004C: $display("[%0t] CLIO INT0 enable clear %08h", $realtime, dut.p3do.CPU_DO);
+					32'h03400068: $display("[%0t] CLIO INT1 enable set   %08h", $realtime, dut.p3do.CPU_DO);
+					32'h0340006C: $display("[%0t] CLIO INT1 enable clear %08h", $realtime, dut.p3do.CPU_DO);
+					default: ;
+				endcase
+		end
+	end
+
+	// ---------------- CPU bus trace on a wild jump ----------------
+	// CPU bus cycles are sampled on MCLK_PH2 (the ARM6 core's CE_F, where
+	// MiSTer's own debug hooks pair CPU_A with CPU_DI). The last TR_N are kept
+	// in a ring buffer; with +trace_from_ms=<n> every cycle from n ms on is
+	// written instead. When the CPU has addressed outside the 3DO memory map
+	// for TR_WILD samples in a row, the trace goes to build/sim/cpu_trace.txt:
+	// time (ns), address, data (read: CPU_DI, write: CPU_DO), and the flags
+	// nMREQ SEQ nOPC nRW. Each fetch from the FIQ vector is preceded by a
+	// comment line with CLIO's pending-and-enabled interrupt bits and the CPSR.
+	localparam int TR_N = 32768;
+	localparam int TR_WILD = 8;
+	bit [31:0] tr_a [TR_N];
+	bit [31:0] tr_d [TR_N];
+	bit [ 3:0] tr_f [TR_N];
+	longint    tr_t [TR_N];
+	int        tr_i = 0, tr_wild = 0;
+	bit        tr_done = 0;
+	int        tr_fd = 0;
+	longint    trace_from_ms = -1;
+	int        fiq_count = 0;
+	function automatic bit cpu_addr_mapped(input [31:0] a);
+		return a <= 32'h002FFFFF || (a >= 32'h03000000 && a <= 32'h034FFFFF);
+	endfunction
+	always @(posedge clk_sys) begin
+		if (dut.p3do.MCLK_PH2 && !tr_done && !dut.reset_3do) begin
+			bit [31:0] d;
+			bit [ 3:0] f;
+			d = dut.p3do.CPU_nRW ? dut.p3do.CPU_DO : dut.p3do.CPU_DI;
+			f = {dut.p3do.CPU_nMREQ, dut.p3do.CPU_SEQ, dut.p3do.CPU_nOPC, dut.p3do.CPU_nRW};
+			if (!dut.p3do.CPU_nOPC && dut.p3do.CPU_A == 32'h0000001C) fiq_count++;
+			if (trace_from_ms >= 0 && $time >= trace_from_ms * 1000000 && tr_fd == 0) begin
+				tr_fd = $fopen("build/sim/cpu_trace.txt", "w");
+				$fdisplay(tr_fd, "# time_ns address data nMREQ SEQ nOPC nRW");
+				$display("[%0t] CPU bus trace started (build/sim/cpu_trace.txt)", $realtime);
+			end
+			if (tr_fd != 0) begin
+				if (!dut.p3do.CPU_nOPC && dut.p3do.CPU_A == 32'h0000001C)
+					$fdisplay(tr_fd, "# FIQ %0d: INT0 pend&en %08h  INT1 pend&en %08h  CPSR %08h",
+					          fiq_count, dut.p3do.clio.INT0_PEND & dut.p3do.clio.INT0_EN,
+					          dut.p3do.clio.INT1_PEND & dut.p3do.clio.INT1_EN, 32'(dut.p3do.cpu.CPSR));
+				$fdisplay(tr_fd, "%0d %08h %08h %b %b %b %b", $time, dut.p3do.CPU_A, d, f[3], f[2], f[1], f[0]);
+			end else begin
+				tr_a[tr_i] = dut.p3do.CPU_A;
+				tr_d[tr_i] = d;
+				tr_f[tr_i] = f;
+				tr_t[tr_i] = longint'($time);
+				tr_i = (tr_i + 1) % TR_N;
+			end
+			tr_wild = cpu_addr_mapped(dut.p3do.CPU_A) ? 0 : tr_wild + 1;
+			if (tr_wild == TR_WILD) begin
+				tr_done = 1;
+				if (tr_fd == 0) begin
+					tr_fd = $fopen("build/sim/cpu_trace.txt", "w");
+					$fdisplay(tr_fd, "# time_ns address data nMREQ SEQ nOPC nRW");
+					for (int k = 0; k < TR_N; k++) begin
+						int j;
+						j = (tr_i + k) % TR_N;
+						if (tr_t[j] != 0)
+							$fdisplay(tr_fd, "%0d %08h %08h %b %b %b %b", tr_t[j], tr_a[j], tr_d[j],
+							          tr_f[j][3], tr_f[j][2], tr_f[j][1], tr_f[j][0]);
+					end
+				end
+				$fclose(tr_fd);
+				$display("[%0t] CPU addressed outside the memory map (A=%08h) after %0d FIQs: trace in build/sim/cpu_trace.txt",
+				         $realtime, dut.p3do.CPU_A, fiq_count);
+			end
+		end
+	end
+
 	// command bytes the BIOS writes to the drive (CD bus write strobes)
 	reg cdhwr_d = 1;
 	always @(posedge clk_sys) begin
@@ -438,11 +601,13 @@ module tb_boot;
 		$display("tb_boot: BIOS %s (%0d bytes) placed", bios, bios_len);
 		iso_len = 0;
 		void'($value$plusargs("disc_latency_us=%d", disc_latency_us));
+		void'($value$plusargs("trace_from_ms=%d", trace_from_ms));
 		if ($value$plusargs("disc_bin=%s", iso)) begin
 			bin_fd = $fopen(iso, "rb");
 			if (bin_fd == 0) begin $display("cannot open %s", iso); $finish; end
 			void'($fseek(bin_fd, 0, 2));
 			bin_sectors = $ftell(bin_fd) / 2352;
+			chk_fd = $fopen(iso, "rb");
 			$display("tb_boot: streaming %s (%0d raw sectors), firmware latency %0d us", iso, bin_sectors, disc_latency_us);
 		end else if ($value$plusargs("iso=%s", iso)) begin
 			place_file(iso, 1, 23'h0, iso_len);
@@ -477,6 +642,8 @@ module tb_boot;
 		dump_vram_fb(32'h000000, 1638, "build/sim/frames/vram_all.ppm");
 		$display("tb_boot: %0d frames, %0d CD sectors (%0d served by the firmware model), SDRAM model errors %0d, TB errors %0d",
 		         frames, sectors_sent, served, sdram.errors, errors);
+		if (chk_fd != 0)
+			$display("tb_boot: CD data check: %0d sectors match the image, %0d differ", cd_good, cd_bad);
 		$display("tb_boot: RT cache hits %0d, misses %0d, prefetches %0d, invalidations %0d",
 		         dut.rtc_hits, dut.rtc_misses, dut.rtc_prefetches, dut.rtc_invalidations);
 		$finish;

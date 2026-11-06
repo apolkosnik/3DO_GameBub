@@ -70,6 +70,7 @@ module tb_rtcache;
 	wire [63:0] DDRAM_DOUT, DDRAM_DIN;
 	wire [31:0] st_hits, st_misses, st_pf, st_inv, st_hints;
 	// VDL frame buffer hint (MADAM_AG.sv in the core)
+	reg         frame = 0;   // start of a frame (MADAM SPORT LINE0)
 	reg         hint = 0, hint_curr_v = 0, hint_prev_v = 0;
 	reg  [17:0] hint_curr = 0, hint_prev = 0;
 
@@ -81,7 +82,7 @@ module tb_rtcache;
 		.d_braddr(ddr_braddr), .d_brrd(ddr_brrd), .d_brwr(ddr_brwr),
 		.d_blte(ddr_blte), .d_brte(ddr_brte), .d_bout(ddr_bout), .d_ba(ddr_ba), .d_bbusy(ddr_bbusy),
 		.ddr_we(DDRAM_WE && !DDRAM_BUSY), .ddr_addr(DDRAM_ADDR),
-		.hint(hint), .hint_curr(hint_curr), .hint_curr_v(hint_curr_v), .hint_prev(hint_prev), .hint_prev_v(hint_prev_v),
+		.frame(frame), .hint(hint), .hint_curr(hint_curr), .hint_curr_v(hint_curr_v), .hint_prev(hint_prev), .hint_prev_v(hint_prev_v),
 		.stat_hits(st_hits), .stat_misses(st_misses), .stat_prefetches(st_pf), .stat_invalidations(st_inv),
 		.stat_hints(st_hints)
 	);
@@ -634,6 +635,38 @@ module tb_rtcache;
 				join
 				wait_idle();
 				rt_read({rx, 9'h0}, 0, 64);
+			end
+			// start of a frame (vertical blanking): the first half-rows of
+			// the last two frame buffers are fetched again
+			begin
+				bit [8:0] fa, fb;
+				fa = 9'h0D0; fb = 9'h0D2;
+				for (int w = 0; w < 512; w += 11) begin
+					cpu_write({fa, 9'(w)}, $urandom(), $urandom());
+					cpu_write({fb, 9'(w)}, $urandom(), $urandom());
+				end
+				wait_idle();
+				vdl_hint({fa, 9'h0}, 1, '0, 0); mem_cycles(800);
+				vdl_hint({fb, 9'h0}, 1, '0, 0); mem_cycles(800);
+				if (!cache.find({fa, 1'b0})[4] || !cache.find({fb, 1'b0})[4])
+					fail("phase 10: frame buffer rows not fetched for their hints");
+				// other rows push them out of the cache
+				for (int k = 0; k < 12; k++) rt_read({9'(9'h0E0 + 2 * k), 9'h0}, 0, 16);
+				if (cache.find({fa, 1'b0})[4] || cache.find({fb, 1'b0})[4])
+					fail("phase 10: frame buffer rows still cached, the vertical-blank test cannot work");
+				// no requests for a while: no fetch without the frame start
+				mem_cycles(6000);
+				if (cache.find({fa, 1'b0})[4] || cache.find({fb, 1'b0})[4])
+					fail("phase 10: frame buffer rows fetched again without a frame start");
+				@(posedge clk_sys); frame <= 1;
+				@(posedge clk_sys); @(posedge clk_sys); frame <= 0;
+				mem_cycles(1400);           // two fills
+				if (!cache.find({fa, 1'b0})[4] || !cache.find({fb, 1'b0})[4])
+					fail("phase 10: frame buffer rows not fetched again at the frame start");
+				m0 = st_misses;
+				rt_read({fa, 9'h0}, 0, 32);
+				rt_read({fb, 9'h0}, 0, 32);
+				if (st_misses != m0) fail("phase 10: first line after the frame start missed");
 			end
 			$display("[%0t] phase 10: VDL frame buffer hints (%0d), errors=%0d", $realtime, st_hints, errors - errors0);
 		end

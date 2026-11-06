@@ -78,7 +78,9 @@ module P3DO
 	
 	output             FIELD,
 	
-	// Game Bub port: framebuffer addresses from the VDL (MADAM_AG.sv)
+	// Game Bub port: framebuffer addresses from the VDL (MADAM_AG.sv), and
+	// the start of a frame (vertical blanking)
+	output             VID_FRAME,
 	output             VID_FB_HINT,
 	output     [19: 2] VID_FB_CURR,
 	output             VID_FB_CURR_V,
@@ -318,7 +320,8 @@ module P3DO
 		
 		.FIELD(FIELD),
 		
-		.VID_FB_HINT(VID_FB_HINT),//Game Bub port
+		.VID_FRAME(VID_FRAME),//Game Bub port
+		.VID_FB_HINT(VID_FB_HINT),
 		.VID_FB_CURR(VID_FB_CURR),
 		.VID_FB_CURR_V(VID_FB_CURR_V),
 		.VID_FB_PREV(VID_FB_PREV),

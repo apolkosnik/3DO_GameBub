@@ -14,7 +14,8 @@
 //   * streamed discs: every sector sent to the CD controller is checked
 //     against the image at the LBA the BIOS asked for
 //   * every video line must have had its VRAM read transfers (both halves)
-//     before it starts shifting out (counted as TB errors)
+//     before it starts shifting out (TB errors if the 3DO was paused in
+//     between; MADAM's own arbitration delays are reported separately)
 //   * random VRAM writes to the SDRAM tier (CPU, CEL engine): none may be
 //     lost in ddram.sv's posted write port or completed with another
 //     address's flash-write state (counted as TB errors)
@@ -584,22 +585,33 @@ module tb_boot;
 	// Video lines must not start shifting before both VRAM halves have had
 	// their read transfer for the line (requested since the line's video DMA
 	// request). Otherwise the line shows the serial register's old contents,
-	// e.g. the VDL words of the CLUT transfer (counted as TB errors).
-	bit lt_req_d = 0, lt_exec_d = 0, lt_rtl_d = 0, lt_rtr_d = 0, lt_l = 0, lt_r = 0, lt_armed = 0;
-	int late_lines = 0, video_lines = 0;
+	// e.g. the VDL words of the CLUT transfer. A late line during which the
+	// 3DO was paused comes from the port's memory system (SDRAM, RT cache) and
+	// counts as a TB error. Without a pause it is MADAM's own arbitration
+	// (upstream logic: a CPU access to CLIO, e.g. an LDM from the XBUS data
+	// port while the BIOS reads the CD, goes before the video DMA): counted
+	// and reported separately.
+	bit lt_req_d = 0, lt_exec_d = 0, lt_rtl_d = 0, lt_rtr_d = 0, lt_l = 0, lt_r = 0, lt_armed = 0, lt_paused = 0;
+	int late_lines = 0, late_arb = 0, video_lines = 0;
 	always @(posedge clk_mem) begin
 		if (dut.reset_3do) lt_armed = 0;
 		else begin
-			if (dut.p3do.madam.SPORT.VIDOUT_REQ && !lt_req_d) begin lt_l = 0; lt_r = 0; lt_armed = 1; end
+			if (dut.p3do.madam.SPORT.VIDOUT_REQ && !lt_req_d) begin lt_l = 0; lt_r = 0; lt_armed = 1; lt_paused = 0; end
+			if (dut.pause) lt_paused = 1;
 			if (dut.vram_l.RT_REQ && !lt_rtl_d) lt_l = 1;
 			if (dut.vram_r.RT_REQ && !lt_rtr_d) lt_r = 1;
 			if (dut.p3do.madam.SPORT.VIDEO_TRANS_EXEC && !lt_exec_d && lt_armed) begin
 				video_lines++;
-				if (!lt_l || !lt_r) begin
+				if ((!lt_l || !lt_r) && lt_paused) begin
 					late_lines++;
 					errors++;
 					if (late_lines <= 10)
-						$display("[%0t] TB ERROR: video line %0d started before its read transfer (left %b right %b)",
+						$display("[%0t] TB ERROR: video line %0d started before its read transfer (left %b right %b), 3DO paused",
+						         $realtime, dut.p3do.madam.SPORT.VCOUNT, lt_l, lt_r);
+				end else if (!lt_l || !lt_r) begin
+					late_arb++;
+					if (late_arb <= 3)
+						$display("[%0t] video line %0d started before its read transfer (left %b right %b): MADAM bus arbitration, no pause",
 						         $realtime, dut.p3do.madam.SPORT.VCOUNT, lt_l, lt_r);
 				end
 			end
@@ -609,7 +621,8 @@ module tb_boot;
 		lt_rtl_d <= dut.vram_l.RT_REQ;
 		lt_rtr_d <= dut.vram_r.RT_REQ;
 	end
-	final $display("tb_boot: video lines %0d, %0d started before their read transfer", video_lines, late_lines);
+	final $display("tb_boot: video lines %0d, started before their read transfer: %0d with the 3DO paused (errors), %0d by MADAM's bus arbitration",
+	               video_lines, late_lines, late_arb);
 
 	// Video DMA sequence (+sport_ms=<start>, one frame): MADAM_SPORT's VDL
 	// (CLUT) and video transfer requests, their bus grants, the VRAM read

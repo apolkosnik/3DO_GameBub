@@ -26,6 +26,10 @@
 // paused MADAM past the start of the line, and the line showed the VDL
 // words left in the serial register.
 //
+// At the start of each frame (vertical blanking) the first half-rows of the
+// last two frame buffers are fetched again, so the first line hits even when
+// its VDL entry is processed late and the hint comes too close to the line.
+//
 // Prefetch fills start only once no transfer request has come for 1.28 us:
 // the video DMA issues a line's transfers (both VRAM halves) within ~0.3 us,
 // and a fill pauses the 3DO for ~6 us, which held the second of them back
@@ -85,6 +89,9 @@ module vram_rtcache #(
 	input              ddr_we,
 	input      [28: 0] ddr_addr,
 
+	// start of a frame (MADAM SPORT LINE0, in vertical blanking; clk_sys
+	// pulse, taken on its rising edge)
+	input              frame,
 	// framebuffer addresses a VDL entry has just loaded (MADAM_AG.sv; level
 	// from the clk_sys domain, new on its rising edge): prefetched first
 	input              hint,
@@ -186,6 +193,18 @@ module vram_rtcache #(
 	reg         hint_d, hint_pend, hint_q, hint_v2;
 	reg  [ 9:0] hint_h1, hint_h2;
 
+	// Frame start again at the start of each frame (vertical blanking, ~20
+	// lines before the picture): the first half-rows of the last two frame
+	// buffers the VDL pointed at (double buffering) are queued like a hint.
+	// The next frame's first line then hits even if its VDL entry is
+	// processed late, e.g. behind a CPU access to CLIO, when the hint itself
+	// comes too close to the line. (Detecting vertical blanking from idle
+	// time was tried: CPU accesses to CLIO can hold the video DMA back that
+	// long in the middle of a frame, and the fill then delayed a line.)
+	reg         frame_d, frame_pend;
+	reg  [ 9:0] last_h [2];
+	reg         last_v [2];
+
 	// registered snoops
 	reg         sn_we;
 	reg  [ 9:0] sn_h;
@@ -270,6 +289,8 @@ module vram_rtcache #(
 		req_d    <= req_v[0] | req_v[1];
 		if (l_esrd || r_esrd || req_v[0] || req_v[1]) req_age <= '0;
 		else if (!pf_quiet) req_age <= req_age + 1'd1;
+		frame_d <= frame;
+		if (frame && !frame_d && last_v[0]) frame_pend <= 1;
 		hint_d   <= hint;
 		hint_q   <= 0;
 		req_v[0] <= l_esrd; req_a[0] <= l_esaddr;
@@ -299,6 +320,8 @@ module vram_rtcache #(
 			stat_hints <= '0;
 			hint_pend <= 0;
 			req_age   <= '0;
+			last_v[0] <= 0; last_v[1] <= 0;
+			frame_pend <= 0;
 		end else begin
 			// ---------------- victim pointer ----------------
 			if (!v_ok) begin
@@ -353,16 +376,18 @@ module vram_rtcache #(
 			    !req_v[0] && !req_v[1] && !req_d && !hint_q && !l_esrd && !r_esrd && !dres0 && !dres1 && v_ok) begin
 				bit        go;
 				bit [9:0]  nh;
-				bit        from_pf;
-				go = 0; from_pf = 0; nh = '0;
+				bit        from_pf, from_hint;
+				go = 0; from_pf = 0; from_hint = 0; nh = '0;
 				if (dem_pend[0] && !hit_d[0]) begin go = 1; nh = dem_h[0]; end
 				else if (dem_pend[1] && !hit_d[1]) begin go = 1; nh = dem_h[1]; end
 				else if (pf_v[0] && (pf_quiet || pf_hint[0])) begin
 					from_pf = 1;
+					from_hint = pf_hint[0];
 					if (!hit_p[0]) begin go = 1; nh = pf_h[0]; end
 					pf_v[0] <= 0;
 				end else if (pf_v[1] && (pf_quiet || pf_hint[1])) begin
 					from_pf = 1;
+					from_hint = pf_hint[1];
 					if (!hit_p[1]) begin go = 1; nh = pf_h[1]; end
 					pf_v[1] <= 0;
 				end
@@ -371,7 +396,8 @@ module vram_rtcache #(
 					valid[vptr]  <= 1;
 					filled[vptr] <= '0;
 					dirty[vptr]  <= 0;
-					used[vptr]   <= !from_pf;   // unused prefetches are evicted first
+					used[vptr]   <= !from_pf || from_hint;   // unused prefetches are evicted first,
+					                                         // frame-start rows are kept
 					fill_e       <= vptr;
 					fill_h       <= nh;
 					fill_issue   <= 1;
@@ -400,12 +426,23 @@ module vram_rtcache #(
 				hint_h2   <= p;
 				hint_v2   <= p != c;
 				stat_hints <= stat_hints + 1'd1;
+				if (!last_v[0] || c != last_h[0]) begin
+					last_h[1] <= last_h[0]; last_v[1] <= last_v[0];
+					last_h[0] <= c;         last_v[0] <= 1;
+				end
 			end
 			else if (hint_pend && !req_v[0] && !req_v[1]) begin
 				hint_pend <= 0;
 				hint_q    <= 1;
 				pf_v[0] <= !is_internal(hint_h1); pf_h[0] <= hint_h1; pf_hint[0] <= 1;
 				if (hint_v2) begin pf_v[1] <= !is_internal(hint_h2); pf_h[1] <= hint_h2; pf_hint[1] <= 1; end
+			end
+			else if (frame_pend) begin
+				frame_pend <= 0;
+				hint_pend <= 1;
+				hint_h1   <= last_h[0];
+				hint_h2   <= last_h[1];
+				hint_v2   <= last_v[1];
 			end
 
 			// ---------------- fill progress ----------------

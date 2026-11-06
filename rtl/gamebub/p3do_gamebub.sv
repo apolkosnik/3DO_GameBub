@@ -277,6 +277,7 @@ module p3do_gamebub #(
 	reg PAL = 0;
 	always @(posedge clk_sys) if (reset_3do) PAL <= (region_sel == 2'd0) ? bios_pal : (region_sel == 2'd2);
 
+	wire        VID_FRAME;                                   // start of a frame (vertical blanking)
 	wire        VID_FB_HINT, VID_FB_CURR_V, VID_FB_PREV_V;   // frame buffer addresses from the VDL
 	wire [19:2] VID_FB_CURR, VID_FB_PREV;                   // (VRAM word addresses), for vram_rtcache
 
@@ -306,6 +307,7 @@ module p3do_gamebub #(
 		.VCE(VCE),
 		.S(VRAM_SQ),
 		.FIELD(P3DO_FIELD),
+		.VID_FRAME(VID_FRAME),
 		.VID_FB_HINT(VID_FB_HINT), .VID_FB_CURR(VID_FB_CURR), .VID_FB_CURR_V(VID_FB_CURR_V),
 		.VID_FB_PREV(VID_FB_PREV), .VID_FB_PREV_V(VID_FB_PREV_V),
 		.RGB({R,G,B}),
@@ -674,6 +676,7 @@ module p3do_gamebub #(
 		.d_braddr(ddr_braddr), .d_brrd(ddr_brrd), .d_brwr(ddr_brwr),
 		.d_blte(ddr_blte), .d_brte(ddr_brte), .d_bout(ddr_bout), .d_ba(ddr_ba), .d_bbusy(ddr_bbusy),
 		.ddr_we(DDRAM_WE && !DDRAM_BUSY), .ddr_addr(DDRAM_ADDR),
+		.frame(VID_FRAME),
 		.hint(VID_FB_HINT), .hint_curr(VID_FB_CURR), .hint_curr_v(VID_FB_CURR_V),
 		.hint_prev(VID_FB_PREV), .hint_prev_v(VID_FB_PREV_V),
 		.stat_hits(rtc_hits), .stat_misses(rtc_misses), .stat_prefetches(rtc_prefetches),

@@ -80,7 +80,9 @@ module MADAM
 	
 	output             FIELD,
 	
-	// Game Bub port: framebuffer addresses from the VDL (MADAM_AG.sv)
+	// Game Bub port: framebuffer addresses from the VDL (MADAM_AG.sv), and
+	// the start of a frame (SPORT LINE0, vertical blanking)
+	output             VID_FRAME,
 	output             VID_FB_HINT,
 	output     [19: 2] VID_FB_CURR,
 	output             VID_FB_CURR_V,
@@ -187,6 +189,7 @@ module MADAM
 	AddrGenCtl_t SPORT_AG_CTL;
 	bit          SPORT_GRANT;
 	bit          SPORT_LINE0;
+	assign VID_FRAME = SPORT_LINE0;//Game Bub port
 	bit          SPORT_LSC,SPORT_RSC;
 
 	//PLAYER BUS

@@ -502,7 +502,7 @@ module tb_boot;
 		// the edge before that.
 		issued = dut.ddram.state == 6 && dut.ddram.ram_write;
 		if (issued && !vw_issued_d) begin
-			wa = dut.ddram.ram_address[18:2];
+			wa = dut.ddram.ram_address[19:3];   // ram_address is [27:1]: {8'b0, addr[19:3], 2'b00}
 			if (vw_fw_a1_d != wa) begin
 				vw_fw_wrong++;
 				errors++;

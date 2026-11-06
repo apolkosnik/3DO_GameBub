@@ -35,21 +35,25 @@ Copy to the microSD card:
 
 The JSON files are in `metadata/`.
 
-**Discs.** With the disc-streaming firmware from the
+**Discs.** Use the disc-streaming firmware from the
 [neutralinsomniac/gamebub](https://github.com/neutralinsomniac/gamebub/blob/psx/docs/psx.md)
-fork (the one its PlayStation core needs), select a `.cue` (or a lone `.bin`). Discs of
-any size are read from the microSD card as the game needs them; see
-[docs/disc_streaming.md](docs/disc_streaming.md).
+fork (the one its PlayStation core needs) and select a `.cue` (or a lone `.bin`). Discs of
+any size are read from the microSD card as the game needs them, and the disc can be
+changed from the pause menu; see [docs/disc_streaming.md](docs/disc_streaming.md).
 
-With stock firmware, only `.iso` images (2048-byte sectors) of up to 22 MiB work: they
-are loaded into SDRAM at startup. `tools/cue2iso.py image.cue` converts a CUE/BIN and
-tells you whether it fits. The NVRAM (saves) is stored next to the image as `.sav`. If no
-save exists, a blank 3DO NVRAM is created.
+Stock firmware cannot stream: it loads the selected file into SDRAM at startup, so only
+`.iso` images (2048-byte sectors) of up to 22 MiB work there. `tools/cue2iso.py
+image.cue` converts a CUE/BIN and tells you whether it fits. Commercial discs (100–650 MB)
+do not.
+
+**Saves.** The NVRAM is stored next to the disc image as `.sav`. If none exists, a blank
+3DO NVRAM is created. It is written back when you leave the core, and with the fork's
+firmware also when you pause.
 
 ### Limitations
 
-* **Stock firmware: discs of up to 22 MiB, as `.iso`.** Larger discs need the
-  disc-streaming firmware (see *Discs* above).
+* **Commercial discs need the disc-streaming firmware.** Stock firmware only runs `.iso`
+  images of up to 22 MiB (see *Discs* above).
 * CD audio tracks are listed in the disc's table of contents, but not played (as in the
   MiSTer core).
 * PAL games run at 50 Hz, but the handheld's LCD refreshes at 60 Hz, so every fifth frame
@@ -78,7 +82,7 @@ save exists, a blank 3DO NVRAM is created.
 | MiSTer                                  | Game Bub                                                          |
 |-----------------------------------------|-------------------------------------------------------------------|
 | SDRAM: 3DO DRAM (`sdram.sv`)            | `sdram_3do.sv`, same MCLK-locked TDM scheduling, banks 0/1        |
-| DDR3: VRAM overflow, BIOS, kanji, NVRAM | `ddram.sv` unchanged, on `ddr_bridge.sv` to SDRAM bank 2          |
+| DDR3: VRAM overflow, BIOS, kanji, NVRAM | `ddram.sv` (two write fixes, below), on `ddr_bridge.sv` to SDRAM bank 2 |
 | HPS: CD image streaming                 | `cdd_emu.sv`: sectors on request from the firmware (fork), or an ISO preloaded into SDRAM |
 | HPS: BIOS/save loading                  | framework file transfers, `gb_host.sv`                            |
 | Altera megafunctions                    | `rtl/compat/altera_compat.sv`, Xilinx-inferable rewrites          |
@@ -128,7 +132,8 @@ keeps MADAM paused. `tb_rtcache` reproduces both with MADAM's write timing, and 
 checks every VRAM write during a boot.
 
 Host file data is stored exactly as received. The byte order of the MCU's words is
-detected from the Opera volume header of the ISO (little-endian if no ISO is loaded).
+detected from the Opera volume header of a preloaded ISO; otherwise little-endian is
+assumed. Streamed sectors always arrive as little-endian words (the fork's protocol).
 
 **ARM reset exception (fix to the MiSTer CPU).** The BIOS boots a disc through a
 software reset (CLIO `CSTAT` bit 4, the "DIPIR reset"). The ARM6 core entered it like a
@@ -179,7 +184,7 @@ sim/run_tb.sh tb_top +stream   # same, with the disc read through a model of the
 
 ```
 VARGS="+define+TB_TOP=tb_boot" BUILD=build/sim_boot sim/run_tb.sh tb_boot \
-    +bios=/path/to/panafz10.bin +iso=/path/to/disc.iso +run_ms=1000 +frame_every=6
+    +bios=/path/to/panafz10.bin "+disc_bin=/path/to/game.bin" +run_ms=16000 +frame_every=30
 ```
 
 `tb_boot` boots a real BIOS, with a disc either streamed from a raw `.bin`
@@ -201,6 +206,8 @@ ISO and BIOS, formats NVRAM, then sends SetupComplete and CoreRun. The test BIOS
 * ROM data
 * NVRAM
 * the CD drive through CLIO XBUS: read capacity, and a two-sector read
+* the CLIO software reset the BIOS uses to boot a disc: the CPU must restart in
+  supervisor mode with IRQ and FIQ disabled, the interrupted state in SPSR and R14
 
 It writes its result to NVRAM, and the testbench reads it back through the host
 interface while the core runs. Video timing to the framework (320x240) is also checked.

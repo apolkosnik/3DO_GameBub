@@ -64,9 +64,13 @@ firmware also when you pause.
   cache (below), but CPU and CEL-engine accesses outside the block are slower than on
   MiSTer.
 * While the BIOS reads the disc, a few video lines per second start before their VRAM
-  transfer (17 in the first 2.3 s of the Wolfenstein 3D boot, out of 12,295): MADAM
-  serves the CPU's accesses to CLIO, here load-multiples from the XBUS data port, before
-  the video DMA. This is MiSTer's arbitration, unchanged.
+  transfer, and show the previous serial-register contents (17 in the first 2.3 s of the
+  Wolfenstein 3D boot, out of 12,295): MADAM serves the CPU's accesses to CLIO, here
+  load-multiples from the XBUS data port, before the video DMA (MiSTer's arbitration,
+  unchanged). The same delay sometimes pushes the processing of the BIOS's VDL, which is
+  in SDRAM-backed VRAM, past the first picture line, which then starts late too (8
+  frames between 2.9 and 4.2 s). Once the game runs (VDL in on-chip VRAM), no late lines
+  were seen.
 * One controller. Buttons: Y/B/A = 3DO A/B/C, Start = P (play), Select/X = X (stop),
   L/R = L/R. They can be remapped in the Game Bub menu.
 

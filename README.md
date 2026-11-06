@@ -6,16 +6,19 @@ A port of the [MiSTer 3DO core](https://github.com/MiSTer-devel/3DO_MiSTer) (by 
 (XC7A100T FPGA, one 32 MiB SDRAM chip).
 
 **Status: experimental.** It has not yet been run on Game Bub hardware. In simulation,
-the core passes its test suite (see below) and the real Panasonic FZ-10 BIOS boots:
+the core passes its test suite (see below), and the real Panasonic FZ-10 BIOS boots a
+commercial disc (Wolfenstein 3D, streamed the way the disc-streaming firmware serves it):
 
-* It decompresses its kernel into DRAM and displays the 3DO logo correctly.
-* It brings up the CD drive: Read ID, Spin Up, Set Speed, Disc Info and Read TOC, all
-  answered by the core's drive emulation.
-* It reads the disc's volume and directory sectors.
+* The BIOS decompresses its kernel, displays the 3DO logo and brings up the CD drive
+  (Read ID, Spin Up, Set Speed, Disc Info, Read TOC), answered by the core's drive
+  emulation.
+* It loads the disc's boot code and operating system, and resets into them. Every
+  sector delivered is checked against the image (986 sectors in 16 s).
+* The game then runs: it shows its animated 3DO logo, fades it out and starts its
+  intro (CEL-engine 3D graphics over a starfield), 16 s after power-on.
 
-Commercial discs do not fit yet (see *Limitations*). The SDRAM read-capture timing
-(`READ_STAGE` in `rtl/gamebub/sdram_3do.sv`) follows the MiSTer design and may need
-tuning on real hardware.
+The SDRAM read-capture timing (`READ_STAGE` in `rtl/gamebub/sdram_3do.sv`) follows the
+MiSTer design and may need tuning on real hardware.
 
 ## Installing
 
@@ -56,6 +59,8 @@ save exists, a blank 3DO NVRAM is created.
   original MiSTer DDR3 logic (`ddram.sv`). Video reads from it go through a prefetching
   cache (below), but CPU and CEL-engine accesses outside the block are slower than on
   MiSTer.
+* In the Wolfenstein 3D boot, a few pixels at the left end of the top line are wrong
+  (a short cyan strip). Not investigated yet.
 * One controller. Buttons: Y/B/A = 3DO A/B/C, Start = P (play), Select/X = X (stop),
   L/R = L/R. They can be remapped in the Game Bub menu.
 

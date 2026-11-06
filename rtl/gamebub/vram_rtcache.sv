@@ -1,0 +1,380 @@
+// VRAM read-transfer cache with prefetch (Game Bub 3DO core).
+//
+// Why: on MiSTer, VRAM that is not in block RAM lives in DDR3. On Game Bub it
+// lives in the single 16-bit SDRAM, which the 3DO's own DRAM uses in lock
+// step; the SDRAM can only be used by other clients after the 3DO has been
+// paused, and a 128-beat transfer (one half VRAM row) takes ~5.5 us after
+// ~0.5 us of latency. MADAM's video DMA starts shifting a freshly loaded VRAM
+// row out after ~160 ns, and the video beam cannot be paused, so the display
+// showed stale shift-register data.
+//
+// What: every read transfer (RT) that the VRAM modules send to the external
+// path (ESRD) is served from this cache. Granularity is one half VRAM row
+// (256 words per side = 128 beats of 64 bits, the unit of a split transfer
+// and of a ddram.sv burst). On a hit the beats are delivered on chip within a
+// few cycles; on a miss an entry is allocated, filled through ddram.sv (both
+// sides in one burst) and delivered as the beats arrive. Every request for
+// half-row h prefetches h+1 and h+2: video DMA walks the framebuffer
+// sequentially, so displayed rows are normally in the cache before they are
+// needed, wherever the framebuffer is.
+//
+// Coherence: writes are snooped where they become visible to later reads,
+// i.e. at ddram.sv's DDRAM write commands for the VRAM area (random writes,
+// MWT write bursts) and at flash-writes (bfw, which ddram.sv applies through
+// its lazy-fill bitmap). Matching entries are invalidated; a write during a
+// fill marks the entry dirty so it is dropped after the fill. This keeps
+// ddram.sv's own read/write ordering.
+//
+// ddram.sv's burst interface is shared: fills use both sides' read inputs
+// (same address, so ddram.sv runs one combined burst), MWT write bursts and
+// flash writes from the VRAM modules pass through unchanged but are held off
+// while a fill owns the burst interface.
+//
+// Copyright (c) 2026 Adam Polkosnik
+// SPDX-License-Identifier: GPL-3.0-or-later
+
+module vram_rtcache #(
+	parameter int ENTRIES = 16          // power of two
+)(
+	input              clk,                // clk_mem
+	input              rst,
+
+	input      [ 3: 0] BRAM1_OFFS,         // on-chip VRAM block (never cached)
+
+	// VRAM modules, external path
+	input              l_esrd,
+	input      [17: 0] l_esaddr,
+	input              l_eswr,
+	input              l_esfw,
+	output             l_este,
+	output     [31: 0] l_esq,
+	input              r_esrd,
+	input      [17: 0] r_esaddr,
+	input              r_eswr,
+	output             r_este,
+	output     [31: 0] r_esq,
+
+	// ddram.sv burst interface
+	output     [17: 0] d_bladdr,
+	output reg         d_blrd,
+	output             d_blwr,
+	output             d_bfw,
+	output     [17: 0] d_braddr,
+	output reg         d_brrd,
+	output             d_brwr,
+	input              d_blte,
+	input              d_brte,
+	input      [63: 0] d_bout,
+	input      [ 9: 2] d_ba,
+	input              d_bbusy,
+
+	// snoop: ddram.sv DDRAM write commands
+	input              ddr_we,
+	input      [28: 0] ddr_addr,
+
+	// statistics (simulation / debug)
+	output reg [31: 0] stat_hits,
+	output reg [31: 0] stat_misses,
+	output reg [31: 0] stat_prefetches,
+	output reg [31: 0] stat_invalidations
+);
+	localparam int EW = $clog2(ENTRIES);
+
+	// Timing at 100 MHz: requests are registered before the tag lookup,
+	// the fill engine works from registered lookup results, snoops are
+	// registered, and replacement is a second-chance ("clock") pointer that
+	// advances one entry per cycle, so no path depends on ENTRIES serially.
+
+	// ------------------------------------------------------------------
+	// Entries
+	// ------------------------------------------------------------------
+	reg  [ 9:0] tag      [ENTRIES];   // half-row index (VRAM word address [17:8])
+	reg         valid    [ENTRIES];   // allocated (filled, or filling)
+	reg  [ 7:0] filled   [ENTRIES];   // beats available, 0..128
+	reg         dirty    [ENTRIES];   // written while filling: drop when the fill ends
+	reg         used     [ENTRIES];   // second-chance bit
+
+	(* ram_style = "block" *) reg [63:0] data [0:ENTRIES*128-1];
+
+	// on-chip VRAM regions (vram.sv USE_INT_RAM1) are never requested here,
+	// and must not be prefetched either
+	function automatic bit is_internal(input [9:0] h);
+		bit [17:0] w;
+		w = {h, 8'h00};
+		is_internal = (w >= ({BRAM1_OFFS, 16'h0000} >> 2) && w <= ({BRAM1_OFFS, 16'hBFFF} >> 2)) ||
+		              (w >= (20'hFC000 >> 2));
+	endfunction
+
+	// tag lookup: one-hot match, then encode (shallow)
+	function automatic [EW:0] find(input [9:0] h);
+		bit [ENTRIES-1:0] m;
+		bit [EW-1:0] e;
+		for (int i = 0; i < ENTRIES; i++) m[i] = valid[i] && tag[i] == h;
+		e = '0;
+		for (int i = 0; i < ENTRIES; i++) if (m[i]) e = e | EW'(i);
+		find = {|m, e};
+	endfunction
+
+	// ------------------------------------------------------------------
+	// State
+	// ------------------------------------------------------------------
+	reg         fill_busy;        // fill issued, ddram.sv burst in progress
+	reg         fill_issue;       // one-cycle request pulse to ddram.sv
+	reg [EW-1:0] fill_e;
+	reg  [ 9:0] fill_h;
+
+	reg         req_v    [2];     // registered new requests (ESRD)
+	reg  [17:0] req_a    [2];
+
+	reg         dem_pend [2];     // demand misses waiting for an entry
+	reg  [ 9:0] dem_h    [2];
+	reg  [ 7:0] dem_beat [2];
+
+	reg         pf_v [2];         // prefetch queue
+	reg  [ 9:0] pf_h [2];
+
+	reg         dl_act  [2];      // delivery per side
+	reg [EW-1:0] dl_e   [2];
+	reg  [ 7:0] dl_beat [2];
+
+	// registered lookups for the fill engine. They describe dem_h/pf_h of
+	// the previous cycle; those change only when a request is processed, so
+	// no fill starts in that cycle and the next one (req_d). A stale result
+	// would drop a prefetch or allocate a second entry for a cached tag.
+	reg         hit_d [2], hit_p [2];
+	reg         req_d;
+
+	// registered snoops
+	reg         sn_we;
+	reg  [ 9:0] sn_h;
+	reg         sn_fw;
+	reg  [ 8:0] sn_row;
+
+	// write bursts / flash writes from the VRAM pass when no fill owns ddram.sv
+	assign d_blwr = l_eswr & ~fill_busy & ~fill_issue;
+	assign d_brwr = r_eswr & ~fill_busy & ~fill_issue;
+	assign d_bfw  = l_esfw;
+	assign d_bladdr = fill_issue ? {fill_h, 8'h00} : l_esaddr;
+	assign d_braddr = fill_issue ? {fill_h, 8'h00} : r_esaddr;
+
+	function automatic bit entry_busy(input [EW-1:0] e);
+		entry_busy = (fill_busy && fill_e == e) || (dl_act[0] && dl_e[0] == e) || (dl_act[1] && dl_e[1] == e);
+	endfunction
+
+	// second-chance victim pointer: stops on an entry that is free, or valid
+	// and not recently used, and not busy; otherwise clears the used bit and
+	// moves on (one entry per cycle)
+	reg [EW-1:0] vptr;
+	wire         v_ok = !entry_busy(vptr) && (!valid[vptr] || !used[vptr]);
+
+	// cache-side ESTE/ESQ, merged with ddram.sv's write-burst steps
+	reg         c_l_este, c_r_este;
+	reg  [31:0] c_l_esq, c_r_esq;
+	assign l_este = c_l_este | (d_blte & l_eswr & ~fill_busy);
+	assign r_este = c_r_este | (d_brte & r_eswr & ~fill_busy);
+	assign l_esq  = c_l_esq;
+	assign r_esq  = c_r_esq;
+
+	// ------------------------------------------------------------------
+	// Delivery read port: one beat per cycle, alternating between sides
+	// ------------------------------------------------------------------
+	reg         rd_side;
+	reg         rd_v;
+	reg  [63:0] rd_q;
+	reg         rr;
+	wire [ 7:0] fl0 = filled[dl_e[0]];
+	wire [ 7:0] fl1 = filled[dl_e[1]];
+	wire        want0 = dl_act[0] && (dl_beat[0] < fl0);
+	wire        want1 = dl_act[1] && (dl_beat[1] < fl1);
+	wire        rd_s  = want1 && (!want0 || rr);
+	wire        do_rd = want0 || want1;
+	wire [EW+6:0] rd_addr = rd_s ? {dl_e[1], dl_beat[1][6:0]} : {dl_e[0], dl_beat[0][6:0]};
+
+	always @(posedge clk) rd_q <= data[rd_addr];
+
+	// fill write port
+	always @(posedge clk) begin
+		if (fill_busy && d_blte) data[{fill_e, d_ba[8:2]}] <= d_bout;
+	end
+
+	wire [EW:0] fdem0 = find(dem_h[0]);
+	wire [EW:0] fdem1 = find(dem_h[1]);
+	wire [EW:0] fpf0  = find(pf_h[0]);
+	wire [EW:0] fpf1  = find(pf_h[1]);
+	// a waiting demand miss resolves (finds its entry) in this cycle
+	wire        dres0 = dem_pend[0] && !req_v[0] && fdem0[EW];
+	wire        dres1 = dem_pend[1] && !req_v[1] && fdem1[EW];
+
+	// entries hit by a registered snoop
+	wire [ENTRIES-1:0] snoop_hit;
+	genvar gi;
+	generate
+		for (gi = 0; gi < ENTRIES; gi = gi + 1) begin : g_snoop
+			assign snoop_hit[gi] = valid[gi] && ((sn_we && tag[gi] == sn_h) || (sn_fw && tag[gi][9:1] == sn_row));
+		end
+	endgenerate
+
+	// ------------------------------------------------------------------
+	// Control
+	// ------------------------------------------------------------------
+	always @(posedge clk) begin
+		c_l_este   <= 0;
+		c_r_este   <= 0;
+		fill_issue <= 0;
+		d_blrd     <= 0;
+		d_brrd     <= 0;
+
+		// registered inputs
+		req_d    <= req_v[0] | req_v[1];
+		req_v[0] <= l_esrd; req_a[0] <= l_esaddr;
+		req_v[1] <= r_esrd; req_a[1] <= r_esaddr;
+		sn_we  <= ddr_we && ddr_addr[24:17] == '0;
+		sn_h   <= ddr_addr[16:7];
+		sn_fw  <= l_esfw;
+		sn_row <= l_esaddr[17:9];
+		hit_d[0] <= fdem0[EW];
+		hit_d[1] <= fdem1[EW];
+		hit_p[0] <= fpf0[EW];
+		hit_p[1] <= fpf1[EW];
+
+		if (rst) begin
+			for (int i = 0; i < ENTRIES; i++) begin
+				valid[i] <= 0; filled[i] <= '0; dirty[i] <= 0; used[i] <= 0;
+			end
+			fill_busy <= 0;
+			req_v[0] <= 0; req_v[1] <= 0;
+			dem_pend[0] <= 0; dem_pend[1] <= 0;
+			pf_v[0] <= 0; pf_v[1] <= 0;
+			dl_act[0] <= 0; dl_act[1] <= 0;
+			rd_v <= 0;
+			vptr <= '0;
+			stat_hits <= '0; stat_misses <= '0; stat_prefetches <= '0; stat_invalidations <= '0;
+		end else begin
+			// ---------------- victim pointer ----------------
+			if (!v_ok) begin
+				if (valid[vptr] && used[vptr] && !entry_busy(vptr)) used[vptr] <= 0;
+				vptr <= vptr + 1'd1;
+			end
+
+			// ---------------- requests (registered) ----------------
+			for (int s = 0; s < 2; s++) begin
+				if (req_v[s]) begin
+					bit [EW:0] f;
+					bit [9:0]  h;
+					h = req_a[s][17:8];
+					f = find(h);
+					if (f[EW]) begin
+						stat_hits <= stat_hits + 1'd1;
+						dl_act[s]  <= 1;
+						dl_e[s]    <= f[EW-1:0];
+						dl_beat[s] <= {1'b0, req_a[s][7:1]};
+						used[f[EW-1:0]] <= 1;
+					end else begin
+						stat_misses <= stat_misses + 1'd1;
+						dem_pend[s] <= 1;
+						dem_h[s]    <= h;
+						dem_beat[s] <= {1'b0, req_a[s][7:1]};
+					end
+					if (!is_internal(10'(h + 1))) begin pf_v[0] <= 1; pf_h[0] <= 10'(h + 1); end
+					if (!is_internal(10'(h + 2))) begin pf_v[1] <= 1; pf_h[1] <= 10'(h + 2); end
+				end
+			end
+
+			// ---------------- demand waiting for an entry ----------------
+			for (int s = 0; s < 2; s++) begin
+				if ((s == 0) ? dres0 : dres1) begin
+					bit [EW:0] f;
+					f = (s == 0) ? fdem0 : fdem1;
+					begin
+						dem_pend[s] <= 0;
+						dl_act[s]   <= 1;
+						dl_e[s]     <= f[EW-1:0];
+						dl_beat[s]  <= dem_beat[s];
+						used[f[EW-1:0]] <= 1;
+					end
+				end
+			end
+
+			// ---------------- start a fill ----------------
+			// demand misses first, then prefetches; ddram.sv must be idle and
+			// no VRAM write burst or flash write may be starting; not while a
+			// request is being looked up (the victim could be what it hits)
+			if (!fill_busy && !fill_issue && !d_bbusy && !l_eswr && !r_eswr && !l_esfw &&
+			    !req_v[0] && !req_v[1] && !req_d && !l_esrd && !r_esrd && !dres0 && !dres1 && v_ok) begin
+				bit        go;
+				bit [9:0]  nh;
+				bit        from_pf;
+				go = 0; from_pf = 0; nh = '0;
+				if (dem_pend[0] && !hit_d[0]) begin go = 1; nh = dem_h[0]; end
+				else if (dem_pend[1] && !hit_d[1]) begin go = 1; nh = dem_h[1]; end
+				else if (pf_v[0]) begin
+					from_pf = 1;
+					if (!hit_p[0]) begin go = 1; nh = pf_h[0]; end
+					pf_v[0] <= 0;
+				end else if (pf_v[1]) begin
+					from_pf = 1;
+					if (!hit_p[1]) begin go = 1; nh = pf_h[1]; end
+					pf_v[1] <= 0;
+				end
+				if (go) begin
+					tag[vptr]    <= nh;
+					valid[vptr]  <= 1;
+					filled[vptr] <= '0;
+					dirty[vptr]  <= 0;
+					used[vptr]   <= !from_pf;   // unused prefetches are evicted first
+					fill_e       <= vptr;
+					fill_h       <= nh;
+					fill_issue   <= 1;
+					d_blrd       <= 1;
+					d_brrd       <= 1;
+					fill_busy    <= 1;
+					vptr         <= vptr + 1'd1;
+					if (from_pf) stat_prefetches <= stat_prefetches + 1'd1;
+				end
+			end
+
+			// ---------------- fill progress ----------------
+			if (fill_busy && d_blte) begin
+				filled[fill_e] <= {1'b0, d_ba[8:2]} + 8'd1;
+				if (d_ba[8:2] == 7'd127) begin
+					fill_busy <= 0;
+					if (dirty[fill_e]) valid[fill_e] <= 0;   // data kept for a delivery in progress
+				end
+			end
+
+			// ---------------- delivery ----------------
+			rd_v    <= do_rd;
+			rd_side <= rd_s;
+			if (do_rd) begin
+				rr <= ~rd_s;
+				dl_beat[rd_s] <= dl_beat[rd_s] + 1'd1;
+				if (dl_beat[rd_s] == 8'd127) dl_act[rd_s] <= 0;
+			end
+			if (rd_v) begin
+				if (!rd_side) begin
+					c_l_este <= 1;
+					c_l_esq  <= {rd_q[63:48], rd_q[31:16]};
+				end else begin
+					c_r_este <= 1;
+					c_r_esq  <= {rd_q[47:32], rd_q[15: 0]};
+				end
+			end
+
+			// ---------------- coherence (registered snoops) ----------------
+			// A write registered here was issued to ddram.sv one cycle earlier;
+			// ddram.sv is serial, so no fill can start in between.
+			for (int i = 0; i < ENTRIES; i++) begin
+				if (snoop_hit[i]) begin
+					if (fill_busy && fill_e == EW'(i)) dirty[i] <= 1;
+					else valid[i] <= 0;
+				end
+			end
+			if (|snoop_hit) stat_invalidations <= stat_invalidations + 1'd1;
+		end
+	end
+
+	// The VRAM modules sample ESQ in the cycle ESTE is high. Write bursts
+	// (MWT) step on ddram.sv's ESTE pulses, passed through above only when no
+	// fill owns ddram.sv. A delivery whose entry is invalidated meanwhile
+	// completes with the data read so far (as ddram.sv would have returned).
+endmodule

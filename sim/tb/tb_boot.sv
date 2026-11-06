@@ -210,7 +210,7 @@ module tb_boot;
 	// Stale serial reads: a shift during a read transfer that reads a shift
 	// register word the transfer has not written yet.
 	bit sr_filled [512];
-	int stale_reads = 0, stale_rts = 0, good_reads = 0;
+	int stale_reads = 0, stale_rts = 0, good_reads = 0, stale_kind_clut = 0, stale_kind_vid = 0;
 	bit stale_this_rt, fill_half;
 	reg sc_old2 = 0;
 	always @(posedge clk_mem) begin
@@ -226,8 +226,10 @@ module tb_boot;
 		end
 		if (!dut.vram_l.SC && sc_old2 && dut.vram_l.SOM && dut.vram_l.RT_EXEC && !dut.vram_l.ISTE &&
 		    (!dut.vram_l.SPLIT || dut.vram_l.SR_RA[8] == fill_half)) begin
+			if (dut.p3do.madam.SPORT.CLUT_TRANS_EXEC) stale_kind_clut += !sr_filled[dut.vram_l.SR_RA];
+			else if (dut.p3do.madam.SPORT.VIDEO_TRANS_EXEC) stale_kind_vid += !sr_filled[dut.vram_l.SR_RA];
 			if (!sr_filled[dut.vram_l.SR_RA]) begin
-				if (stale_reads < 20)
+				if (stale_reads < 0)
 					$display("[%0t] stale read: RA=%03h fill pos=%03h split=%b (%0.2f us into the transfer)",
 					         $realtime, dut.vram_l.SR_RA, dut.vram_l.SREG_POS, dut.vram_l.SPLIT, ($realtime - rt_t0) / 1000.0);
 				stale_reads++;
@@ -236,7 +238,80 @@ module tb_boot;
 			end else good_reads++;
 		end
 	end
-	final $display("tb_boot: serial reads during transfers: %0d ok, %0d stale (in %0d transfers)", good_reads, stale_reads, stale_rts);
+	final $display("tb_boot: serial reads during transfers: %0d ok, %0d stale (in %0d transfers): %0d CLUT/VDL, %0d video",
+	               good_reads, stale_reads, stale_rts, stale_kind_clut, stale_kind_vid);
+	// where CLUT/VDL and video transfers point (64 KiB VRAM blocks)
+	int blk_clut [16], blk_vid [16];
+	reg clut_d = 0, vid_d = 0;
+	bit [3:0] last_rt_blk;
+	always @(posedge clk_mem) begin
+		if (dut.vram_l.RT_EXEC && !rt_exec_d) last_rt_blk = dut.vram_l.MEM_ROW[8:5];
+		clut_d <= dut.p3do.madam.SPORT.CLUT_TRANS_EXEC;
+		vid_d  <= dut.p3do.madam.SPORT.VIDEO_TRANS_EXEC;
+		if (dut.p3do.madam.SPORT.CLUT_TRANS_EXEC && !clut_d) blk_clut[last_rt_blk]++;
+		if (dut.p3do.madam.SPORT.VIDEO_TRANS_EXEC && !vid_d) blk_vid[last_rt_blk]++;
+	end
+	final begin
+		string a = "", b = "";
+		for (int i = 0; i < 16; i++) begin
+			a = {a, $sformatf(" %0h:%0d", i, blk_clut[i])};
+			b = {b, $sformatf(" %0h:%0d", i, blk_vid[i])};
+		end
+		$display("tb_boot: CLUT/VDL transfers per 64 KiB VRAM block:%s", a);
+		$display("tb_boot: video transfers per 64 KiB VRAM block:%s", b);
+	end
+
+	// First-data latency of external VRAM read transfers, by what the DDR
+	// path was doing when the request came in.
+	reg esrd_d = 0, blte_d = 0;
+	realtime esrd_t;
+	bit esrd_wait;
+	int lat_hist [8];          // <0.2, <0.4, <0.8, <1.6, <3.2, <6.4, <12.8, >=12.8 us
+	int lat_cause_busy = 0, lat_n = 0;
+	real lat_sum = 0, lat_busy_sum = 0;
+	bit req_while_busy;
+	always @(posedge clk_mem) begin
+		esrd_d <= dut.vram_l.ESRD;
+		if (dut.vram_l.ESRD && !esrd_d) begin
+			esrd_t = $realtime;
+			esrd_wait = 1;
+			req_while_busy = (dut.ddram.state != 0) || (dut.ddr_bridge.st != 0);
+		end
+		if (esrd_wait && dut.ddr_blte) begin
+			real l;
+			int b;
+			l = ($realtime - esrd_t) / 1000.0;
+			esrd_wait = 0;
+			b = l < 0.2 ? 0 : l < 0.4 ? 1 : l < 0.8 ? 2 : l < 1.6 ? 3 : l < 3.2 ? 4 : l < 6.4 ? 5 : l < 12.8 ? 6 : 7;
+			lat_hist[b]++;
+			lat_n++; lat_sum += l;
+			if (req_while_busy) begin lat_cause_busy++; lat_busy_sum += l; end
+		end
+	end
+	final begin
+		$display("tb_boot: VRAM read transfers: %0d, mean first-data latency %0.2f us", lat_n, lat_n ? lat_sum / lat_n : 0.0);
+		$display("tb_boot:   requested while the DDR path was busy: %0d (mean %0.2f us)", lat_cause_busy,
+		         lat_cause_busy ? lat_busy_sum / lat_cause_busy : 0.0);
+		$display("tb_boot:   latency histogram <0.2/<0.4/<0.8/<1.6/<3.2/<6.4/<12.8/more us: %0d %0d %0d %0d %0d %0d %0d %0d",
+		         lat_hist[0], lat_hist[1], lat_hist[2], lat_hist[3], lat_hist[4], lat_hist[5], lat_hist[6], lat_hist[7]);
+	end
+
+	// Address sequence of VRAM read transfers (+rtseq_ms=<start>, one frame)
+	int rtseq_ms = -1;
+	initial void'($value$plusargs("rtseq_ms=%d", rtseq_ms));
+	reg rtl_d = 0, rtr_d = 0;
+	always @(posedge clk_mem) begin
+		rtl_d <= dut.vram_l.RT_REQ;
+		rtr_d <= dut.vram_r.RT_REQ;
+		if (rtseq_ms >= 0 && $realtime >= rtseq_ms * 1ms && $realtime < rtseq_ms * 1ms + 17ms) begin
+			if (dut.vram_l.RT_REQ && !rtl_d)
+				$display("[%0t] RTSEQ L A=%05h split=%b int=%b bus=%s", $realtime, {dut.vram_l.MEM_ROW, dut.vram_l.MEM_COL},
+				         dut.vram_l.SPLIT, dut.vram_l.ISTE, dut.p3do.madam.ARB.BUS_ST.name());
+			if (dut.vram_r.RT_REQ && !rtr_d)
+				$display("[%0t] RTSEQ R A=%05h split=%b int=%b bus=%s", $realtime, {dut.vram_r.MEM_ROW, dut.vram_r.MEM_COL},
+				         dut.vram_r.SPLIT, dut.vram_r.ISTE, dut.p3do.madam.ARB.BUS_ST.name());
+		end
+	end
 
 	// pause statistics and CPU sampling
 	longint pause_cycles = 0, cycles = 0;
@@ -348,6 +423,8 @@ module tb_boot;
 		dump_vram_fb(32'h000000, 1638, "build/sim/frames/vram_all.ppm");
 		$display("tb_boot: %0d frames, %0d CD sectors, SDRAM model errors %0d, TB errors %0d",
 		         frames, sectors_sent, sdram.errors, errors);
+		$display("tb_boot: RT cache hits %0d, misses %0d, prefetches %0d, invalidations %0d",
+		         dut.rtc_hits, dut.rtc_misses, dut.rtc_prefetches, dut.rtc_invalidations);
 		$finish;
 	end
 endmodule

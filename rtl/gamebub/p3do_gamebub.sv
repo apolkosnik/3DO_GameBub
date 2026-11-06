@@ -507,20 +507,26 @@ module p3do_gamebub #(
 	wire [31: 0] vram_bldata, vram_brdata;
 
 	wire [31: 0] ddr_do;
+	// VRAM modules <-> read-transfer cache <-> ddram.sv
+	wire [17: 0] v_laddr, v_raddr;
+	wire         v_lwr, v_rwr, v_lrd, v_rrd, v_lfw;
+	wire         v_lte, v_rte;
+	wire [31: 0] v_lq, v_rq;
 	wire [17: 0] ddr_bladdr, ddr_braddr;
 	wire         ddr_blwr, ddr_brwr, ddr_blrd, ddr_brrd, ddr_bfw;
 	wire [63: 0] ddr_bin = {vram_bldata[31:16],vram_brdata[31:16],vram_bldata[15:0],vram_brdata[15:0]};
 	wire [63: 0] ddr_bout;
 	wire         ddr_blte, ddr_brte;
+	wire [ 9: 2] ddr_ba;
 
 	P3DO_VRAM #(USE_BRAM_BLOCKS_FOR_VRAM) vram_l (
 		.CLK(clk_sys), .CLK_MEM(clk_mem), .RST_N(~reset_3do),
 		.A(LA[19:2]), .D(RAM_DO[31:16]), .Q(VRAM_Q[31:16]),
 		.RAS_N(LRAS0_N), .CAS_N(LCAS_N), .WE_N(LWE_N), .OE_N(LOE_N), .DSF1(LDSF),
 		.SC(LSC), .SE_N(1'b0), .SQ(VRAM_SQ[31:16]), .QSF(LQSF), .RDY(VRAM_LRDY),
-		.EQ(ddr_do[31:16]), .ESADDR(ddr_bladdr), .ESDATA(vram_bldata),
-		.ESWR(ddr_blwr), .ESRD(ddr_blrd), .ESFW(ddr_bfw),
-		.ESQ({ddr_bout[63:48],ddr_bout[31:16]}), .ESTE(ddr_blte),
+		.EQ(ddr_do[31:16]), .ESADDR(v_laddr), .ESDATA(vram_bldata),
+		.ESWR(v_lwr), .ESRD(v_lrd), .ESFW(v_lfw),
+		.ESQ(v_lq), .ESTE(v_lte),
 		.BRAM4_OFFS(BRAM4_OFFS), .BRAM2_OFFS(BRAM2_OFFS), .BRAM1_OFFS(BRAM1_OFFS),
 		.DBG_WAIT_CNT()
 	);
@@ -530,9 +536,9 @@ module p3do_gamebub #(
 		.A(RA[19:2]), .D(RAM_DO[15:0]), .Q(VRAM_Q[15:0]),
 		.RAS_N(RRAS0_N), .CAS_N(RCAS_N), .WE_N(RWE_N), .OE_N(ROE_N), .DSF1(RDSF),
 		.SC(RSC), .SE_N(1'b0), .SQ(VRAM_SQ[15:0]), .QSF(RQSF), .RDY(VRAM_RRDY),
-		.EQ(ddr_do[15:0]), .ESADDR(ddr_braddr), .ESDATA(vram_brdata),
-		.ESWR(ddr_brwr), .ESRD(ddr_brrd), .ESFW(),
-		.ESQ({ddr_bout[47:32],ddr_bout[15:0]}), .ESTE(ddr_brte),
+		.EQ(ddr_do[15:0]), .ESADDR(v_raddr), .ESDATA(vram_brdata),
+		.ESWR(v_rwr), .ESRD(v_rrd), .ESFW(),
+		.ESQ(v_rq), .ESTE(v_rte),
 		.BRAM4_OFFS(BRAM4_OFFS), .BRAM2_OFFS(BRAM2_OFFS), .BRAM1_OFFS(BRAM1_OFFS),
 		.DBG_WAIT_CNT()
 	);
@@ -600,12 +606,28 @@ module p3do_gamebub #(
 		.brwr  (ddr_brwr),
 		.brrd  (ddr_brrd),
 		.bfw   (ddr_bfw),
-		.ba(),
+		.ba(ddr_ba),
 		.bin(ddr_bin),
 		.bout(ddr_bout),
 		.blte(ddr_blte),
 		.brte(ddr_brte),
 		.bbusy(ddr_bbusy)
+	);
+
+	// Read transfers from SDRAM-backed VRAM are served from a prefetching
+	// half-row cache (see vram_rtcache.sv for why).
+	wire [31:0] rtc_hits, rtc_misses, rtc_prefetches, rtc_invalidations;
+	vram_rtcache #(.ENTRIES(16)) rtcache (
+		.clk(clk_mem), .rst(rst_mem | reset_3do),
+		.BRAM1_OFFS(BRAM1_OFFS),
+		.l_esrd(v_lrd), .l_esaddr(v_laddr), .l_eswr(v_lwr), .l_esfw(v_lfw), .l_este(v_lte), .l_esq(v_lq),
+		.r_esrd(v_rrd), .r_esaddr(v_raddr), .r_eswr(v_rwr), .r_este(v_rte), .r_esq(v_rq),
+		.d_bladdr(ddr_bladdr), .d_blrd(ddr_blrd), .d_blwr(ddr_blwr), .d_bfw(ddr_bfw),
+		.d_braddr(ddr_braddr), .d_brrd(ddr_brrd), .d_brwr(ddr_brwr),
+		.d_blte(ddr_blte), .d_brte(ddr_brte), .d_bout(ddr_bout), .d_ba(ddr_ba), .d_bbusy(ddr_bbusy),
+		.ddr_we(DDRAM_WE && !DDRAM_BUSY), .ddr_addr(DDRAM_ADDR),
+		.stat_hits(rtc_hits), .stat_misses(rtc_misses), .stat_prefetches(rtc_prefetches),
+		.stat_invalidations(rtc_invalidations)
 	);
 
 	ddr_bridge ddr_bridge (

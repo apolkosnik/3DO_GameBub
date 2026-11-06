@@ -1,3 +1,5 @@
+`ifndef ARM6_PKG_SVH
+`define ARM6_PKG_SVH
 package ARM6_PKG;
 	
 	typedef struct packed
@@ -764,3 +766,5 @@ package ARM6_PKG;
 	endfunction 
 
 endpackage
+
+`endif

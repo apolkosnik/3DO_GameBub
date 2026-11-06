@@ -20,6 +20,6 @@ FILES+=("$HERE/tb/$TB.sv")
 verilator --binary --timing -j "$(nproc)" -Wno-fatal -Wno-lint -Wno-style -Wno-MULTIDRIVEN \
     -Wno-PINMISSING -Wno-DEFPARAM -Wno-IMPLICITSTATIC -Wno-TIMESCALEMOD -Wno-UNOPTFLAT \
     -Wno-INITIALDLY -Wno-COMBDLY -Wno-MULTITOP -Wno-ASCRANGE -Wno-SELRANGE -Wno-ZERODLY \
-    --timescale 1ns/1ps -O2 --top-module "$TB" --Mdir "$BUILD/obj_$TB" -o "$TB" "${FILES[@]}" $VARGS > "$BUILD/$TB.build.log" 2>&1 \
+    -I"$RTL/gamebub" -I"$RTL/p3do" -I"$RTL/arm6" --timescale 1ns/1ps -O2 --top-module "$TB" --Mdir "$BUILD/obj_$TB" -o "$TB" "${FILES[@]}" $VARGS > "$BUILD/$TB.build.log" 2>&1 \
     || { tail -40 "$BUILD/$TB.build.log"; exit 1; }
 "$BUILD/obj_$TB/$TB" "$@"

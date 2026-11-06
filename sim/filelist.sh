@@ -1,9 +1,6 @@
 # Core RTL in compile order (relative to the prepared RTL directory).
 RTL_FILES=(
     compat/altera_compat.sv
-    arm6/ARM6_pkg.sv
-    p3do/3DO_pkg.sv
-    gamebub/gb3do_pkg.sv
     arm6/ARM6_RB.sv
     arm6/ARM6_CORE.sv
     p3do/3DO_mem.sv

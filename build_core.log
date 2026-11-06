@@ -1,0 +1,1287 @@
+module p3do_gamebub
+#(
+  parameter int  DISPLAY_DIVIDER
+)
+(
+  input  logic        clock,
+  input  logic        reset,
+  input  logic        clocks_clockIn50M,
+  output logic        clocks_clockOutSystem,
+  output logic        clocks_clockOutDisplay,
+  output logic        clocks_clockOutSpi,
+  output logic        clocks_locked,
+  output logic [5:0]  video_data_r,
+  output logic [5:0]  video_data_g,
+  output logic [5:0]  video_data_b,
+  output logic        video_dataEnable,
+  output logic        video_vblank,
+  output logic        video_hblank,
+  output logic [15:0] audio_left,
+  output logic [15:0] audio_right,
+  input  logic        host_mem_enable,
+  input  logic        host_mem_write,
+  output logic        host_mem_done,
+  input  logic [31:0] host_mem_address,
+  output logic [31:0] host_mem_dataRead,
+  input  logic [31:0] host_mem_dataWrite,
+  input  logic        host_commandHost_request,
+  output logic        host_commandHost_busy,
+  output logic        host_commandHost_done,
+  output logic        host_commandHost_error,
+  output logic        host_commandCore_request,
+  input  logic        host_commandCore_busy,
+  input  logic        host_commandCore_done,
+  input  logic        host_commandCore_error,
+  input  logic        input_buttons_a,
+  input  logic        input_buttons_b,
+  input  logic        input_buttons_x,
+  input  logic        input_buttons_y,
+  input  logic        input_buttons_up,
+  input  logic        input_buttons_down,
+  input  logic        input_buttons_left,
+  input  logic        input_buttons_right,
+  input  logic        input_buttons_l,
+  input  logic        input_buttons_r,
+  input  logic        input_buttons_start,
+  input  logic        input_buttons_select,
+  output logic        sdram_clock,
+  output logic        sdram_cke,
+  output logic        sdram_cs,
+  output logic        sdram_ras,
+  output logic        sdram_cas,
+  output logic        sdram_we,
+  output logic [1:0]  sdram_dqm,
+  output logic [1:0]  sdram_bank,
+  output logic [12:0] sdram_address,
+  input  logic [15:0] sdram_dataIn,
+  output logic [15:0] sdram_dataOut,
+  output logic        sdram_dataDir
+);
+
+  // Add module implementation here.
+
+endmodule
+
+This backend is deprecated and will eventually be removed. Please migrate to the flow API instead.  See https://edalize.readthedocs.io/en/latest/ref/migrations.html#migrating-from-the-tool-api-to-the-flow-api for more details.
+vivado -notrace -mode batch -source P3DOCore-gamebub_rev4.tcl
+
+****** Vivado v2018.3 (64-bit)
+  **** SW Build 2405991 on Thu Dec  6 23:36:41 MST 2018
+  **** IP Build 2404404 on Fri Dec  7 01:43:56 MST 2018
+    ** Copyright 1986-2018 Xilinx, Inc. All Rights Reserved.
+
+source P3DOCore-gamebub_rev4.tcl -notrace
+INFO: [Common 17-206] Exiting Vivado at Thu Nov  5 22:50:16 2026...
+vivado -notrace -mode batch -source P3DOCore-gamebub_rev4_synth.tcl P3DOCore-gamebub_rev4_run.tcl P3DOCore-gamebub_rev4.xpr
+
+****** Vivado v2018.3 (64-bit)
+  **** SW Build 2405991 on Thu Dec  6 23:36:41 MST 2018
+  **** IP Build 2404404 on Fri Dec  7 01:43:56 MST 2018
+    ** Copyright 1986-2018 Xilinx, Inc. All Rights Reserved.
+
+open_project P3DOCore-gamebub_rev4.xpr
+Scanning sources...
+Finished scanning sources
+source P3DOCore-gamebub_rev4_synth.tcl -notrace
+[Thu Nov  5 22:50:19 2026] Launched synth_1...
+Run output will be captured here: /home/adam/3DO_GameBub/build/P3DOCore-gamebub_rev4/P3DOCore-gamebub_rev4.runs/synth_1/runme.log
+[Thu Nov  5 22:50:19 2026] Waiting for synth_1 to finish...
+
+*** Running vivado
+    with args -log top_handheld.vds -m64 -product Vivado -mode batch -messageDb vivado.pb -notrace -source top_handheld.tcl
+
+
+****** Vivado v2018.3 (64-bit)
+  **** SW Build 2405991 on Thu Dec  6 23:36:41 MST 2018
+  **** IP Build 2404404 on Fri Dec  7 01:43:56 MST 2018
+    ** Copyright 1986-2018 Xilinx, Inc. All Rights Reserved.
+
+source top_handheld.tcl -notrace
+Command: synth_design -top top_handheld -part xc7a100tcsg324-1
+Starting synth_design
+Attempting to get a license for feature 'Synthesis' and/or device 'xc7a100t'
+INFO: [Common 17-349] Got license for feature 'Synthesis' and/or device 'xc7a100t'
+INFO: Launching helper process for spawning children vivado processes
+INFO: Helper process launched with PID 2764355 
+WARNING: [Synth 8-992] XBUS_FIFO_FULL is already implicitly declared earlier [/home/adam/3DO_GameBub/rtl/p3do/CLIO.sv:1023]
+WARNING: [Synth 8-992] XY_FIFO_A_WRREQ is already implicitly declared earlier [/home/adam/3DO_GameBub/rtl/p3do/MADAM_SE.sv:1196]
+WARNING: [Synth 8-992] LF_A_REQ is already implicitly declared earlier [/home/adam/3DO_GameBub/rtl/p3do/MADAM_SE.sv:1203]
+WARNING: [Synth 8-992] LF_B_REQ is already implicitly declared earlier [/home/adam/3DO_GameBub/rtl/p3do/MADAM_SE.sv:1203]
+WARNING: [Synth 8-992] REGIS_A_CTL is already implicitly declared earlier [/home/adam/3DO_GameBub/rtl/p3do/MADAM_SE.sv:1585]
+WARNING: [Synth 8-992] REGIS_B_CTL is already implicitly declared earlier [/home/adam/3DO_GameBub/rtl/p3do/MADAM_SE.sv:1585]
+WARNING: [Synth 8-992] sec_rdata is already implicitly declared earlier [/home/adam/3DO_GameBub/rtl/gamebub/p3do_gamebub.sv:415]
+---------------------------------------------------------------------------------
+Starting RTL Elaboration : Time (s): cpu = 00:00:00.68 ; elapsed = 00:00:00.94 . Memory (MB): peak = 1354.102 ; gain = 0.000 ; free physical = 3058 ; free virtual = 46706
+---------------------------------------------------------------------------------
+INFO: [Synth 8-6157] synthesizing module 'top_handheld' [/home/adam/3DO_GameBub/framework/verilog/handheld/top.sv:3]
+INFO: [Synth 8-6157] synthesizing module 'IBUF' [/opt/tools/Xilinx/Vivado/2018.3/scripts/rt/data/unisim_comp.v:20408]
+	Parameter CAPACITANCE bound to: DONT_CARE - type: string 
+	Parameter IBUF_DELAY_VALUE bound to: 0 - type: string 
+	Parameter IBUF_LOW_PWR bound to: TRUE - type: string 
+	Parameter IFD_DELAY_VALUE bound to: AUTO - type: string 
+	Parameter IOSTANDARD bound to: DEFAULT - type: string 
+INFO: [Synth 8-6155] done synthesizing module 'IBUF' (1#1) [/opt/tools/Xilinx/Vivado/2018.3/scripts/rt/data/unisim_comp.v:20408]
+INFO: [Synth 8-6157] synthesizing module 'clk_wiz_hdmi_clk_wiz' [/home/adam/3DO_GameBub/framework/verilog/handheld/clk_wiz_hdmi.v:66]
+INFO: [Synth 8-6157] synthesizing module 'MMCME2_ADV' [/opt/tools/Xilinx/Vivado/2018.3/scripts/rt/data/unisim_comp.v:26717]
+	Parameter BANDWIDTH bound to: OPTIMIZED - type: string 
+	Parameter CLKFBOUT_MULT_F bound to: 21.625000 - type: float 
+	Parameter CLKFBOUT_PHASE bound to: 0.000000 - type: float 
+	Parameter CLKFBOUT_USE_FINE_PS bound to: FALSE - type: string 
+	Parameter CLKIN1_PERIOD bound to: 20.000000 - type: float 
+	Parameter CLKIN2_PERIOD bound to: 0.000000 - type: float 
+	Parameter CLKOUT0_DIVIDE_F bound to: 40.000000 - type: float 
+	Parameter CLKOUT0_DUTY_CYCLE bound to: 0.500000 - type: float 
+	Parameter CLKOUT0_PHASE bound to: 0.000000 - type: float 
+	Parameter CLKOUT0_USE_FINE_PS bound to: FALSE - type: string 
+	Parameter CLKOUT1_DIVIDE bound to: 8 - type: integer 
+	Parameter CLKOUT1_DUTY_CYCLE bound to: 0.500000 - type: float 
+	Parameter CLKOUT1_PHASE bound to: 0.000000 - type: float 
+	Parameter CLKOUT1_USE_FINE_PS bound to: FALSE - type: string 
+	Parameter CLKOUT2_DIVIDE bound to: 1 - type: integer 
+	Parameter CLKOUT2_DUTY_CYCLE bound to: 0.500000 - type: float 
+	Parameter CLKOUT2_PHASE bound to: 0.000000 - type: float 
+	Parameter CLKOUT2_USE_FINE_PS bound to: FALSE - type: string 
+	Parameter CLKOUT3_DIVIDE bound to: 1 - type: integer 
+	Parameter CLKOUT3_DUTY_CYCLE bound to: 0.500000 - type: float 
+	Parameter CLKOUT3_PHASE bound to: 0.000000 - type: float 
+	Parameter CLKOUT3_USE_FINE_PS bound to: FALSE - type: string 
+	Parameter CLKOUT4_CASCADE bound to: FALSE - type: string 
+	Parameter CLKOUT4_DIVIDE bound to: 1 - type: integer 
+	Parameter CLKOUT4_DUTY_CYCLE bound to: 0.500000 - type: float 
+	Parameter CLKOUT4_PHASE bound to: 0.000000 - type: float 
+	Parameter CLKOUT4_USE_FINE_PS bound to: FALSE - type: string 
+	Parameter CLKOUT5_DIVIDE bound to: 1 - type: integer 
+	Parameter CLKOUT5_DUTY_CYCLE bound to: 0.500000 - type: float 
+	Parameter CLKOUT5_PHASE bound to: 0.000000 - type: float 
+	Parameter CLKOUT5_USE_FINE_PS bound to: FALSE - type: string 
+	Parameter CLKOUT6_DIVIDE bound to: 1 - type: integer 
+	Parameter CLKOUT6_DUTY_CYCLE bound to: 0.500000 - type: float 
+	Parameter CLKOUT6_PHASE bound to: 0.000000 - type: float 
+	Parameter CLKOUT6_USE_FINE_PS bound to: FALSE - type: string 
+	Parameter COMPENSATION bound to: ZHOLD - type: string 
+	Parameter DIVCLK_DIVIDE bound to: 1 - type: integer 
+	Parameter IS_CLKINSEL_INVERTED bound to: 1'b0 
+	Parameter IS_PSEN_INVERTED bound to: 1'b0 
+	Parameter IS_PSINCDEC_INVERTED bound to: 1'b0 
+	Parameter IS_PWRDWN_INVERTED bound to: 1'b0 
+	Parameter IS_RST_INVERTED bound to: 1'b0 
+	Parameter REF_JITTER1 bound to: 0.010000 - type: float 
+	Parameter REF_JITTER2 bound to: 0.010000 - type: float 
+	Parameter SS_EN bound to: FALSE - type: string 
+	Parameter SS_MODE bound to: CENTER_HIGH - type: string 
+	Parameter SS_MOD_PERIOD bound to: 10000 - type: integer 
+	Parameter STARTUP_WAIT bound to: FALSE - type: string 
+INFO: [Synth 8-6155] done synthesizing module 'MMCME2_ADV' (2#1) [/opt/tools/Xilinx/Vivado/2018.3/scripts/rt/data/unisim_comp.v:26717]
+INFO: [Synth 8-6157] synthesizing module 'BUFG' [/opt/tools/Xilinx/Vivado/2018.3/scripts/rt/data/unisim_comp.v:609]
+INFO: [Synth 8-6155] done synthesizing module 'BUFG' (3#1) [/opt/tools/Xilinx/Vivado/2018.3/scripts/rt/data/unisim_comp.v:609]
+INFO: [Synth 8-6155] done synthesizing module 'clk_wiz_hdmi_clk_wiz' (4#1) [/home/adam/3DO_GameBub/framework/verilog/handheld/clk_wiz_hdmi.v:66]
+INFO: [Synth 8-6157] synthesizing module 'BUFH' [/opt/tools/Xilinx/Vivado/2018.3/scripts/rt/data/unisim_comp.v:813]
+INFO: [Synth 8-6155] done synthesizing module 'BUFH' (5#1) [/opt/tools/Xilinx/Vivado/2018.3/scripts/rt/data/unisim_comp.v:813]
+INFO: [Synth 8-6157] synthesizing module 'BUFGMUX_CTRL' [/opt/tools/Xilinx/Vivado/2018.3/scripts/rt/data/unisim_comp.v:729]
+INFO: [Synth 8-6155] done synthesizing module 'BUFGMUX_CTRL' (6#1) [/opt/tools/Xilinx/Vivado/2018.3/scripts/rt/data/unisim_comp.v:729]
+INFO: [Synth 8-6157] synthesizing module 'pll_reset_generator' [/home/adam/3DO_GameBub/framework/verilog/handheld/pll_reset_generator.sv:2]
+	Parameter CYCLES bound to: 2 - type: integer 
+INFO: [Synth 8-6155] done synthesizing module 'pll_reset_generator' (7#1) [/home/adam/3DO_GameBub/framework/verilog/handheld/pll_reset_generator.sv:2]
+INFO: [Synth 8-6157] synthesizing module 'HandheldTop' [/home/adam/3DO_GameBub/build/P3DOCore-gamebub_rev4/generated/HandheldTop.sv:46]
+INFO: [Synth 8-6157] synthesizing module 'P3DOCore' [/home/adam/3DO_GameBub/build/P3DOCore-gamebub_rev4/generated/P3DOCore.sv:2]
+INFO: [Synth 8-6157] synthesizing module 'p3do_gamebub' [/home/adam/3DO_GameBub/rtl/gamebub/p3do_gamebub.sv:23]
+	Parameter DISPLAY_DIVIDER bound to: 32'sb00000000000000000000000000011111 
+	Parameter USE_BRAM_BLOCKS_FOR_VRAM bound to: 0 - type: integer 
+INFO: [Synth 8-5534] Detected attribute (* ASYNC_REG = "TRUE" *) [/home/adam/3DO_GameBub/rtl/gamebub/p3do_gamebub.sv:99]
+INFO: [Synth 8-5534] Detected attribute (* ASYNC_REG = "TRUE" *) [/home/adam/3DO_GameBub/rtl/gamebub/p3do_gamebub.sv:104]
+INFO: [Synth 8-6157] synthesizing module 'gb_clocks' [/home/adam/3DO_GameBub/rtl/gamebub/gb_clocks.sv:14]
+	Parameter DISPLAY_DIVIDER bound to: 32'sb00000000000000000000000000011111 
+INFO: [Synth 8-6157] synthesizing module 'MMCME2_BASE' [/opt/tools/Xilinx/Vivado/2018.3/scripts/rt/data/unisim_comp.v:26837]
+	Parameter BANDWIDTH bound to: OPTIMIZED - type: string 
+	Parameter CLKFBOUT_MULT_F bound to: 16.000000 - type: float 
+	Parameter CLKFBOUT_PHASE bound to: 0.000000 - type: float 
+	Parameter CLKIN1_PERIOD bound to: 20.000000 - type: float 
+	Parameter CLKOUT0_DIVIDE_F bound to: 16.000000 - type: float 
+	Parameter CLKOUT0_DUTY_CYCLE bound to: 0.500000 - type: float 
+	Parameter CLKOUT0_PHASE bound to: 0.000000 - type: float 
+	Parameter CLKOUT1_DIVIDE bound to: 8 - type: integer 
+	Parameter CLKOUT1_DUTY_CYCLE bound to: 0.500000 - type: float 
+	Parameter CLKOUT1_PHASE bound to: 0.000000 - type: float 
+	Parameter CLKOUT2_DIVIDE bound to: 4 - type: integer 
+	Parameter CLKOUT2_DUTY_CYCLE bound to: 0.500000 - type: float 
+	Parameter CLKOUT2_PHASE bound to: 0.000000 - type: float 
+	Parameter CLKOUT3_DIVIDE bound to: 31 - type: integer 
+	Parameter CLKOUT3_DUTY_CYCLE bound to: 0.500000 - type: float 
+	Parameter CLKOUT3_PHASE bound to: 0.000000 - type: float 
+	Parameter CLKOUT4_CASCADE bound to: FALSE - type: string 
+	Parameter CLKOUT4_DIVIDE bound to: 1 - type: integer 
+	Parameter CLKOUT4_DUTY_CYCLE bound to: 0.500000 - type: float 
+	Parameter CLKOUT4_PHASE bound to: 0.000000 - type: float 
+	Parameter CLKOUT5_DIVIDE bound to: 1 - type: integer 
+	Parameter CLKOUT5_DUTY_CYCLE bound to: 0.500000 - type: float 
+	Parameter CLKOUT5_PHASE bound to: 0.000000 - type: float 
+	Parameter CLKOUT6_DIVIDE bound to: 1 - type: integer 
+	Parameter CLKOUT6_DUTY_CYCLE bound to: 0.500000 - type: float 
+	Parameter CLKOUT6_PHASE bound to: 0.000000 - type: float 
+	Parameter DIVCLK_DIVIDE bound to: 1 - type: integer 
+	Parameter REF_JITTER1 bound to: 0.010000 - type: float 
+	Parameter STARTUP_WAIT bound to: FALSE - type: string 
+INFO: [Synth 8-6155] done synthesizing module 'MMCME2_BASE' (8#1) [/opt/tools/Xilinx/Vivado/2018.3/scripts/rt/data/unisim_comp.v:26837]
+INFO: [Synth 8-6157] synthesizing module 'MMCME2_BASE__parameterized0' [/opt/tools/Xilinx/Vivado/2018.3/scripts/rt/data/unisim_comp.v:26837]
+	Parameter BANDWIDTH bound to: OPTIMIZED - type: string 
+	Parameter CLKFBOUT_MULT_F bound to: 19.625000 - type: float 
+	Parameter CLKFBOUT_PHASE bound to: 0.000000 - type: float 
+	Parameter CLKIN1_PERIOD bound to: 20.000000 - type: float 
+	Parameter CLKOUT0_DIVIDE_F bound to: 20.000000 - type: float 
+	Parameter CLKOUT0_DUTY_CYCLE bound to: 0.500000 - type: float 
+	Parameter CLKOUT0_PHASE bound to: 0.000000 - type: float 
+	Parameter CLKOUT1_DIVIDE bound to: 1 - type: integer 
+	Parameter CLKOUT1_DUTY_CYCLE bound to: 0.500000 - type: float 
+	Parameter CLKOUT1_PHASE bound to: 0.000000 - type: float 
+	Parameter CLKOUT2_DIVIDE bound to: 1 - type: integer 
+	Parameter CLKOUT2_DUTY_CYCLE bound to: 0.500000 - type: float 
+	Parameter CLKOUT2_PHASE bound to: 0.000000 - type: float 
+	Parameter CLKOUT3_DIVIDE bound to: 1 - type: integer 
+	Parameter CLKOUT3_DUTY_CYCLE bound to: 0.500000 - type: float 
+	Parameter CLKOUT3_PHASE bound to: 0.000000 - type: float 
+	Parameter CLKOUT4_CASCADE bound to: FALSE - type: string 
+	Parameter CLKOUT4_DIVIDE bound to: 1 - type: integer 
+	Parameter CLKOUT4_DUTY_CYCLE bound to: 0.500000 - type: float 
+	Parameter CLKOUT4_PHASE bound to: 0.000000 - type: float 
+	Parameter CLKOUT5_DIVIDE bound to: 1 - type: integer 
+	Parameter CLKOUT5_DUTY_CYCLE bound to: 0.500000 - type: float 
+	Parameter CLKOUT5_PHASE bound to: 0.000000 - type: float 
+	Parameter CLKOUT6_DIVIDE bound to: 1 - type: integer 
+	Parameter CLKOUT6_DUTY_CYCLE bound to: 0.500000 - type: float 
+	Parameter CLKOUT6_PHASE bound to: 0.000000 - type: float 
+	Parameter DIVCLK_DIVIDE bound to: 1 - type: integer 
+	Parameter REF_JITTER1 bound to: 0.010000 - type: float 
+	Parameter STARTUP_WAIT bound to: FALSE - type: string 
+INFO: [Synth 8-6155] done synthesizing module 'MMCME2_BASE__parameterized0' (8#1) [/opt/tools/Xilinx/Vivado/2018.3/scripts/rt/data/unisim_comp.v:26837]
+INFO: [Synth 8-6155] done synthesizing module 'gb_clocks' (9#1) [/home/adam/3DO_GameBub/rtl/gamebub/gb_clocks.sv:14]
+INFO: [Synth 8-6157] synthesizing module 'gb_host' [/home/adam/3DO_GameBub/rtl/gamebub/gb_host.sv:25]
+	Parameter CMD_GET_STATUS bound to: 16'b0000000000000000 
+	Parameter CMD_CORE_RUN bound to: 16'b0000000100000000 
+	Parameter CMD_CORE_HALT bound to: 16'b0000000100000001 
+	Parameter CMD_SETUP_COMPLETE bound to: 16'b0000000100000010 
+	Parameter CMD_NOTIFY_FOCUS bound to: 16'b0000001000000000 
+	Parameter CMD_FILE_WRITE_START bound to: 16'b0000001100000000 
+	Parameter CMD_FILE_WRITE_END bound to: 16'b0000001100000001 
+	Parameter CMD_FILE_READ_START bound to: 16'b0000001100000010 
+	Parameter CMD_FILE_READ_END bound to: 16'b0000001100000011 
+	Parameter STATUS_SETUP bound to: 2 - type: integer 
+	Parameter STATUS_CORE_HALT bound to: 3 - type: integer 
+	Parameter STATUS_CORE_RUN bound to: 4 - type: integer 
+	Parameter FILE_ISO bound to: 0 - type: integer 
+	Parameter FILE_BIOS bound to: 1 - type: integer 
+	Parameter FILE_KANJI bound to: 2 - type: integer 
+	Parameter FILE_NVRAM bound to: 3 - type: integer 
+	Parameter NVRAM_BYTES bound to: 32768 - type: integer 
+WARNING: [Synth 8-6014] Unused sequential element cur_file_reg was removed.  [/home/adam/3DO_GameBub/rtl/gamebub/gb_host.sv:243]
+INFO: [Synth 8-6155] done synthesizing module 'gb_host' (10#1) [/home/adam/3DO_GameBub/rtl/gamebub/gb_host.sv:25]
+INFO: [Synth 8-6157] synthesizing module 'ce_gen' [/home/adam/3DO_GameBub/rtl/gamebub/gb_util.sv:7]
+	Parameter IN_CLK bound to: 64'sb0000000000000000000000000000000000000010111110101111000010000000 
+	Parameter OUT_CLK bound to: 64'sb0000000000000000000000000000000000000001011101101000100001111000 
+	Parameter W bound to: 32'sb00000000000000000000000000011011 
+INFO: [Synth 8-6155] done synthesizing module 'ce_gen' (11#1) [/home/adam/3DO_GameBub/rtl/gamebub/gb_util.sv:7]
+INFO: [Synth 8-6157] synthesizing module 'ce_gen__parameterized0' [/home/adam/3DO_GameBub/rtl/gamebub/gb_util.sv:7]
+	Parameter IN_CLK bound to: 64'sb0000000000000000000000000000000000000010111110101111000010000000 
+	Parameter OUT_CLK bound to: 64'sb0000000000000000000000000000000000000001000000100110011000000000 
+	Parameter W bound to: 32'sb00000000000000000000000000011010 
+INFO: [Synth 8-6155] done synthesizing module 'ce_gen__parameterized0' (11#1) [/home/adam/3DO_GameBub/rtl/gamebub/gb_util.sv:7]
+INFO: [Synth 8-6157] synthesizing module 'P3DO' [/home/adam/3DO_GameBub/rtl/p3do/P3DO.sv:5]
+INFO: [Synth 8-6157] synthesizing module 'ARM6_CORE' [/home/adam/3DO_GameBub/rtl/arm6/ARM6_CORE.sv:2]
+INFO: [Synth 8-6157] synthesizing module 'ARM6_RB' [/home/adam/3DO_GameBub/rtl/arm6/ARM6_RB.sv:5]
+INFO: [Synth 8-6157] synthesizing module 'ARM6_RB_RAM' [/home/adam/3DO_GameBub/rtl/arm6/ARM6_RB.sv:201]
+INFO: [Synth 8-6157] synthesizing module 'altdpram' [/home/adam/3DO_GameBub/rtl/compat/altera_compat.sv:14]
+	Parameter width bound to: 32 - type: integer 
+	Parameter widthad bound to: 4 - type: integer 
+	Parameter numwords bound to: 0 - type: integer 
+	Parameter width_byteena bound to: 1 - type: integer 
+	Parameter byte_size bound to: 8 - type: integer 
+	Parameter indata_aclr bound to: OFF - type: string 
+	Parameter indata_reg bound to: INCLOCK - type: string 
+	Parameter intended_device_family bound to: Cyclone V - type: string 
+	Parameter lpm_type bound to: altdpram - type: string 
+	Parameter lpm_hint bound to: UNUSED - type: string 
+	Parameter outdata_aclr bound to: OFF - type: string 
+	Parameter outdata_reg bound to: UNREGISTERED - type: string 
+	Parameter ram_block_type bound to: MLAB - type: string 
+	Parameter rdaddress_aclr bound to: OFF - type: string 
+	Parameter rdaddress_reg bound to: UNREGISTERED - type: string 
+	Parameter rdcontrol_aclr bound to: OFF - type: string 
+	Parameter rdcontrol_reg bound to: UNREGISTERED - type: string 
+	Parameter read_during_write_mode_mixed_ports bound to: CONSTRAINED_DONT_CARE - type: string 
+	Parameter wraddress_aclr bound to: OFF - type: string 
+	Parameter wraddress_reg bound to: INCLOCK - type: string 
+	Parameter wrcontrol_aclr bound to: OFF - type: string 
+	Parameter wrcontrol_reg bound to: INCLOCK - type: string 
+	Parameter use_eab bound to: ON - type: string 
+	Parameter power_up_uninitialized bound to: FALSE - type: string 
+	Parameter DEPTH bound to: 16 - type: integer 
+	Parameter LANE_BITS bound to: 32 - type: integer 
+INFO: [Synth 8-5534] Detected attribute (* ram_style = "distributed" *) [/home/adam/3DO_GameBub/rtl/compat/altera_compat.sv:59]
+INFO: [Synth 8-6155] done synthesizing module 'altdpram' (12#1) [/home/adam/3DO_GameBub/rtl/compat/altera_compat.sv:14]
+INFO: [Synth 8-6155] done synthesizing module 'ARM6_RB_RAM' (13#1) [/home/adam/3DO_GameBub/rtl/arm6/ARM6_RB.sv:201]
+INFO: [Synth 8-6155] done synthesizing module 'ARM6_RB' (14#1) [/home/adam/3DO_GameBub/rtl/arm6/ARM6_RB.sv:5]
+INFO: [Synth 8-155] case statement is not full and has no default [/home/adam/3DO_GameBub/rtl/arm6/ARM6_CORE.sv:252]
+WARNING: [Synth 8-5858] RAM SPSR_reg from Abstract Data Type (record/struct) for this pattern/configuration is not supported. This will most likely be implemented in registers
+WARNING: [Synth 8-6014] Unused sequential element SPSR_reg[0][N] was removed.  [/home/adam/3DO_GameBub/rtl/arm6/ARM6_CORE.sv:400]
+WARNING: [Synth 8-6014] Unused sequential element SPSR_reg[0][Z] was removed.  [/home/adam/3DO_GameBub/rtl/arm6/ARM6_CORE.sv:400]
+WARNING: [Synth 8-6014] Unused sequential element SPSR_reg[0][C] was removed.  [/home/adam/3DO_GameBub/rtl/arm6/ARM6_CORE.sv:400]
+WARNING: [Synth 8-6014] Unused sequential element SPSR_reg[0][V] was removed.  [/home/adam/3DO_GameBub/rtl/arm6/ARM6_CORE.sv:400]
+WARNING: [Synth 8-6014] Unused sequential element SPSR_reg[0][UNUSED] was removed.  [/home/adam/3DO_GameBub/rtl/arm6/ARM6_CORE.sv:400]
+WARNING: [Synth 8-6014] Unused sequential element SPSR_reg[0][I] was removed.  [/home/adam/3DO_GameBub/rtl/arm6/ARM6_CORE.sv:400]
+WARNING: [Synth 8-6014] Unused sequential element SPSR_reg[0][F] was removed.  [/home/adam/3DO_GameBub/rtl/arm6/ARM6_CORE.sv:400]
+WARNING: [Synth 8-6014] Unused sequential element SPSR_reg[0][UNUSED2] was removed.  [/home/adam/3DO_GameBub/rtl/arm6/ARM6_CORE.sv:400]
+WARNING: [Synth 8-6014] Unused sequential element SPSR_reg[0][M] was removed.  [/home/adam/3DO_GameBub/rtl/arm6/ARM6_CORE.sv:400]
+WARNING: [Synth 8-5788] Register BLOCK_WN_reg in module ARM6_CORE is has both Set and reset with same priority. This may cause simulation mismatches. Consider rewriting code  [/home/adam/3DO_GameBub/rtl/arm6/ARM6_CORE.sv:199]
+WARNING: [Synth 8-5788] Register BLOCK_WE_reg in module ARM6_CORE is has both Set and reset with same priority. This may cause simulation mismatches. Consider rewriting code  [/home/adam/3DO_GameBub/rtl/arm6/ARM6_CORE.sv:199]
+WARNING: [Synth 8-87] always_comb on 'SHIFT_SA_reg' did not result in combinational logic [/home/adam/3DO_GameBub/rtl/arm6/ARM6_CORE.sv:253]
+WARNING: [Synth 8-87] always_comb on 'SHIFT_TYPE_reg' did not result in combinational logic [/home/adam/3DO_GameBub/rtl/arm6/ARM6_CORE.sv:253]
+INFO: [Synth 8-6155] done synthesizing module 'ARM6_CORE' (15#1) [/home/adam/3DO_GameBub/rtl/arm6/ARM6_CORE.sv:2]
+INFO: [Synth 8-6157] synthesizing module 'MADAM' [/home/adam/3DO_GameBub/rtl/p3do/MADAM.sv:2]
+	Parameter REV bound to: 16908288 - type: integer 
+INFO: [Synth 8-155] case statement is not full and has no default [/home/adam/3DO_GameBub/rtl/p3do/MADAM.sv:275]
+INFO: [Synth 8-6157] synthesizing module 'madam_div' [/home/adam/3DO_GameBub/rtl/p3do/MADAM_mem.sv:222]
+WARNING: [Synth 8-6014] Unused sequential element s1_reg was removed.  [/home/adam/3DO_GameBub/rtl/p3do/MADAM_mem.sv:269]
+WARNING: [Synth 8-6014] Unused sequential element n_sh_reg was removed.  [/home/adam/3DO_GameBub/rtl/p3do/MADAM_mem.sv:270]
+WARNING: [Synth 8-6014] Unused sequential element s2_reg was removed.  [/home/adam/3DO_GameBub/rtl/p3do/MADAM_mem.sv:271]
+WARNING: [Synth 8-6014] Unused sequential element q_t_reg was removed.  [/home/adam/3DO_GameBub/rtl/p3do/MADAM_mem.sv:278]
+INFO: [Synth 8-6155] done synthesizing module 'madam_div' (16#1) [/home/adam/3DO_GameBub/rtl/p3do/MADAM_mem.sv:222]
+INFO: [Synth 8-6157] synthesizing module 'MADAM_MATH_MATRIX' [/home/adam/3DO_GameBub/rtl/p3do/MADAM_mem.sv:1]
+WARNING: [Synth 8-350] instance 'altdpram_component' of module 'altdpram' requires 14 connections, but only 12 given [/home/adam/3DO_GameBub/rtl/p3do/MADAM_mem.sv:31]
+INFO: [Synth 8-6155] done synthesizing module 'MADAM_MATH_MATRIX' (17#1) [/home/adam/3DO_GameBub/rtl/p3do/MADAM_mem.sv:1]
+INFO: [Synth 8-6157] synthesizing module 'MADAM_MATH_VECTOR' [/home/adam/3DO_GameBub/rtl/p3do/MADAM_mem.sv:72]
+INFO: [Synth 8-6157] synthesizing module 'altdpram__parameterized0' [/home/adam/3DO_GameBub/rtl/compat/altera_compat.sv:14]
+	Parameter width bound to: 32 - type: integer 
+	Parameter widthad bound to: 2 - type: integer 
+	Parameter numwords bound to: 0 - type: integer 
+	Parameter width_byteena bound to: 1 - type: integer 
+	Parameter byte_size bound to: 8 - type: integer 
+	Parameter indata_aclr bound to: OFF - type: string 
+	Parameter indata_reg bound to: INCLOCK - type: string 
+	Parameter intended_device_family bound to: Cyclone V - type: string 
+	Parameter lpm_type bound to: altdpram - type: string 
+	Parameter lpm_hint bound to: UNUSED - type: string 
+	Parameter outdata_aclr bound to: OFF - type: string 
+	Parameter outdata_reg bound to: UNREGISTERED - type: string 
+	Parameter ram_block_type bound to: MLAB - type: string 
+	Parameter rdaddress_aclr bound to: OFF - type: string 
+	Parameter rdaddress_reg bound to: UNREGISTERED - type: string 
+	Parameter rdcontrol_aclr bound to: OFF - type: string 
+	Parameter rdcontrol_reg bound to: UNREGISTERED - type: string 
+	Parameter read_during_write_mode_mixed_ports bound to: CONSTRAINED_DONT_CARE - type: string 
+	Parameter wraddress_aclr bound to: OFF - type: string 
+	Parameter wraddress_reg bound to: INCLOCK - type: string 
+	Parameter wrcontrol_aclr bound to: OFF - type: string 
+	Parameter wrcontrol_reg bound to: INCLOCK - type: string 
+	Parameter use_eab bound to: ON - type: string 
+	Parameter power_up_uninitialized bound to: FALSE - type: string 
+	Parameter DEPTH bound to: 4 - type: integer 
+	Parameter LANE_BITS bound to: 32 - type: integer 
+INFO: [Synth 8-6155] done synthesizing module 'altdpram__parameterized0' (17#1) [/home/adam/3DO_GameBub/rtl/compat/altera_compat.sv:14]
+WARNING: [Synth 8-350] instance 'altdpram_component' of module 'altdpram' requires 14 connections, but only 12 given [/home/adam/3DO_GameBub/rtl/p3do/MADAM_mem.sv:102]
+INFO: [Synth 8-6155] done synthesizing module 'MADAM_MATH_VECTOR' (18#1) [/home/adam/3DO_GameBub/rtl/p3do/MADAM_mem.sv:72]
+INFO: [Synth 8-6157] synthesizing module 'MADAM_ARB' [/home/adam/3DO_GameBub/rtl/p3do/MADAM_ARB.sv:4]
+WARNING: [Synth 8-5788] Register CLUTWR_ACK_reg in module MADAM_ARB is has both Set and reset with same priority. This may cause simulation mismatches. Consider rewriting code  [/home/adam/3DO_GameBub/rtl/p3do/MADAM_ARB.sv:130]
+WARNING: [Synth 8-5788] Register VIDOUT_ACK_reg in module MADAM_ARB is has both Set and reset with same priority. This may cause simulation mismatches. Consider rewriting code  [/home/adam/3DO_GameBub/rtl/p3do/MADAM_ARB.sv:131]
+WARNING: [Synth 8-5788] Register SE_ACK_reg in module MADAM_ARB is has both Set and reset with same priority. This may cause simulation mismatches. Consider rewriting code  [/home/adam/3DO_GameBub/rtl/p3do/MADAM_ARB.sv:133]
+WARNING: [Synth 8-5788] Register EXTP_ACK_reg in module MADAM_ARB is has both Set and reset with same priority. This may cause simulation mismatches. Consider rewriting code  [/home/adam/3DO_GameBub/rtl/p3do/MADAM_ARB.sv:135]
+WARNING: [Synth 8-5788] Register VIDMID_PREV_CURR_reg in module MADAM_ARB is has both Set and reset with same priority. This may cause simulation mismatches. Consider rewriting code  [/home/adam/3DO_GameBub/rtl/p3do/MADAM_ARB.sv:147]
+WARNING: [Synth 8-5788] Register PB_NEXT_ST_reg in module MADAM_ARB is has both Set and reset with same priority. This may cause simulation mismatches. Consider rewriting code  [/home/adam/3DO_GameBub/rtl/p3do/MADAM_ARB.sv:309]
+WARNING: [Synth 8-5788] Register BUS_PB_reg in module MADAM_ARB is has both Set and reset with same priority. This may cause simulation mismatches. Consider rewriting code  [/home/adam/3DO_GameBub/rtl/p3do/MADAM_ARB.sv:799]
+INFO: [Synth 8-6155] done synthesizing module 'MADAM_ARB' (19#1) [/home/adam/3DO_GameBub/rtl/p3do/MADAM_ARB.sv:4]
+INFO: [Synth 8-6157] synthesizing module 'MADAM_CPUIF' [/home/adam/3DO_GameBub/rtl/p3do/MADAM_CPUIF.sv:4]
+INFO: [Synth 8-6155] done synthesizing module 'MADAM_CPUIF' (20#1) [/home/adam/3DO_GameBub/rtl/p3do/MADAM_CPUIF.sv:4]
+INFO: [Synth 8-6157] synthesizing module 'MADAM_EXTPIF' [/home/adam/3DO_GameBub/rtl/p3do/MADAM_EXTPIF.sv:4]
+INFO: [Synth 8-155] case statement is not full and has no default [/home/adam/3DO_GameBub/rtl/p3do/MADAM_EXTPIF.sv:341]
+WARNING: [Synth 8-5788] Register DMA_CHAN_reg in module MADAM_EXTPIF is has both Set and reset with same priority. This may cause simulation mismatches. Consider rewriting code  [/home/adam/3DO_GameBub/rtl/p3do/MADAM_EXTPIF.sv:94]
+INFO: [Synth 8-6155] done synthesizing module 'MADAM_EXTPIF' (21#1) [/home/adam/3DO_GameBub/rtl/p3do/MADAM_EXTPIF.sv:4]
+INFO: [Synth 8-6157] synthesizing module 'MADAM_AG' [/home/adam/3DO_GameBub/rtl/p3do/MADAM_AG.sv:4]
+INFO: [Synth 8-6157] synthesizing module 'MADAM_DMA_STACK' [/home/adam/3DO_GameBub/rtl/p3do/MADAM_mem.sv:292]
+INFO: [Synth 8-6157] synthesizing module 'altdpram__parameterized1' [/home/adam/3DO_GameBub/rtl/compat/altera_compat.sv:14]
+	Parameter width bound to: 22 - type: integer 
+	Parameter widthad bound to: 7 - type: integer 
+	Parameter numwords bound to: 0 - type: integer 
+	Parameter width_byteena bound to: 1 - type: integer 
+	Parameter byte_size bound to: 8 - type: integer 
+	Parameter indata_aclr bound to: OFF - type: string 
+	Parameter indata_reg bound to: INCLOCK - type: string 
+	Parameter intended_device_family bound to: Cyclone V - type: string 
+	Parameter lpm_type bound to: altdpram - type: string 
+	Parameter lpm_hint bound to: UNUSED - type: string 
+	Parameter outdata_aclr bound to: OFF - type: string 
+	Parameter outdata_reg bound to: UNREGISTERED - type: string 
+	Parameter ram_block_type bound to: MLAB - type: string 
+	Parameter rdaddress_aclr bound to: OFF - type: string 
+	Parameter rdaddress_reg bound to: UNREGISTERED - type: string 
+	Parameter rdcontrol_aclr bound to: OFF - type: string 
+	Parameter rdcontrol_reg bound to: UNREGISTERED - type: string 
+	Parameter read_during_write_mode_mixed_ports bound to: CONSTRAINED_DONT_CARE - type: string 
+	Parameter wraddress_aclr bound to: OFF - type: string 
+	Parameter wraddress_reg bound to: INCLOCK - type: string 
+	Parameter wrcontrol_aclr bound to: OFF - type: string 
+	Parameter wrcontrol_reg bound to: INCLOCK - type: string 
+	Parameter use_eab bound to: ON - type: string 
+	Parameter power_up_uninitialized bound to: FALSE - type: string 
+	Parameter DEPTH bound to: 128 - type: integer 
+	Parameter LANE_BITS bound to: 22 - type: integer 
+INFO: [Synth 8-6155] done synthesizing module 'altdpram__parameterized1' (21#1) [/home/adam/3DO_GameBub/rtl/compat/altera_compat.sv:14]
+WARNING: [Synth 8-350] instance 'altdpram_component' of module 'altdpram' requires 14 connections, but only 12 given [/home/adam/3DO_GameBub/rtl/p3do/MADAM_mem.sv:331]
+INFO: [Synth 8-6155] done synthesizing module 'MADAM_DMA_STACK' (22#1) [/home/adam/3DO_GameBub/rtl/p3do/MADAM_mem.sv:292]
+INFO: [Synth 8-155] case statement is not full and has no default [/home/adam/3DO_GameBub/rtl/p3do/MADAM_AG.sv:170]
+WARNING: [Synth 8-5788] Register REG_OVF_reg in module MADAM_AG is has both Set and reset with same priority. This may cause simulation mismatches. Consider rewriting code  [/home/adam/3DO_GameBub/rtl/p3do/MADAM_AG.sv:267]
+WARNING: [Synth 8-5788] Register V480_reg in module MADAM_AG is has both Set and reset with same priority. This may cause simulation mismatches. Consider rewriting code  [/home/adam/3DO_GameBub/rtl/p3do/MADAM_AG.sv:307]
+WARNING: [Synth 8-5788] Register CURR1_LATCH_reg in module MADAM_AG is has both Set and reset with same priority. This may cause simulation mismatches. Consider rewriting code  [/home/adam/3DO_GameBub/rtl/p3do/MADAM_AG.sv:311]
+WARNING: [Synth 8-5788] Register LQSF_SYNC_reg in module MADAM_AG is has both Set and reset with same priority. This may cause simulation mismatches. Consider rewriting code  [/home/adam/3DO_GameBub/rtl/p3do/MADAM_AG.sv:344]
+WARNING: [Synth 8-5788] Register RQSF_SYNC_reg in module MADAM_AG is has both Set and reset with same priority. This may cause simulation mismatches. Consider rewriting code  [/home/adam/3DO_GameBub/rtl/p3do/MADAM_AG.sv:344]
+WARNING: [Synth 8-5788] Register LQSF_OLD_reg in module MADAM_AG is has both Set and reset with same priority. This may cause simulation mismatches. Consider rewriting code  [/home/adam/3DO_GameBub/rtl/p3do/MADAM_AG.sv:346]
+WARNING: [Synth 8-5788] Register RQSF_OLD_reg in module MADAM_AG is has both Set and reset with same priority. This may cause simulation mismatches. Consider rewriting code  [/home/adam/3DO_GameBub/rtl/p3do/MADAM_AG.sv:346]
+INFO: [Synth 8-6155] done synthesizing module 'MADAM_AG' (23#1) [/home/adam/3DO_GameBub/rtl/p3do/MADAM_AG.sv:4]
+INFO: [Synth 8-6157] synthesizing module 'MADAM_SE' [/home/adam/3DO_GameBub/rtl/p3do/MADAM_SE.sv:8]
+INFO: [Synth 8-155] case statement is not full and has no default [/home/adam/3DO_GameBub/rtl/p3do/MADAM_SE.sv:261]
+INFO: [Synth 8-6157] synthesizing module 'MADAM_PIP' [/home/adam/3DO_GameBub/rtl/p3do/MADAM_mem.sv:480]
+INFO: [Synth 8-6157] synthesizing module 'altdpram__parameterized2' [/home/adam/3DO_GameBub/rtl/compat/altera_compat.sv:14]
+	Parameter width bound to: 16 - type: integer 
+	Parameter widthad bound to: 5 - type: integer 
+	Parameter numwords bound to: 0 - type: integer 
+	Parameter width_byteena bound to: 1 - type: integer 
+	Parameter byte_size bound to: 8 - type: integer 
+	Parameter indata_aclr bound to: OFF - type: string 
+	Parameter indata_reg bound to: INCLOCK - type: string 
+	Parameter intended_device_family bound to: Cyclone V - type: string 
+	Parameter lpm_type bound to: altdpram - type: string 
+	Parameter lpm_hint bound to: UNUSED - type: string 
+	Parameter outdata_aclr bound to: OFF - type: string 
+	Parameter outdata_reg bound to: UNREGISTERED - type: string 
+	Parameter ram_block_type bound to: MLAB - type: string 
+	Parameter rdaddress_aclr bound to: OFF - type: string 
+	Parameter rdaddress_reg bound to: UNREGISTERED - type: string 
+	Parameter rdcontrol_aclr bound to: OFF - type: string 
+	Parameter rdcontrol_reg bound to: UNREGISTERED - type: string 
+	Parameter read_during_write_mode_mixed_ports bound to: CONSTRAINED_DONT_CARE - type: string 
+	Parameter wraddress_aclr bound to: OFF - type: string 
+	Parameter wraddress_reg bound to: INCLOCK - type: string 
+	Parameter wrcontrol_aclr bound to: OFF - type: string 
+	Parameter wrcontrol_reg bound to: INCLOCK - type: string 
+	Parameter use_eab bound to: ON - type: string 
+	Parameter power_up_uninitialized bound to: FALSE - type: string 
+	Parameter DEPTH bound to: 32 - type: integer 
+	Parameter LANE_BITS bound to: 16 - type: integer 
+INFO: [Synth 8-6155] done synthesizing module 'altdpram__parameterized2' (23#1) [/home/adam/3DO_GameBub/rtl/compat/altera_compat.sv:14]
+WARNING: [Synth 8-350] instance 'altdpram_component' of module 'altdpram' requires 14 connections, but only 12 given [/home/adam/3DO_GameBub/rtl/p3do/MADAM_mem.sv:513]
+INFO: [Synth 8-6155] done synthesizing module 'MADAM_PIP' (24#1) [/home/adam/3DO_GameBub/rtl/p3do/MADAM_mem.sv:480]
+INFO: [Synth 8-155] case statement is not full and has no default [/home/adam/3DO_GameBub/rtl/p3do/MADAM_SE.sv:770]
+INFO: [Synth 8-155] case statement is not full and has no default [/home/adam/3DO_GameBub/rtl/p3do/MADAM_SE.sv:835]
+INFO: [Synth 8-6157] synthesizing module 'MADAM_SPRYTE_DATA_FIFO' [/home/adam/3DO_GameBub/rtl/p3do/MADAM_mem.sv:372]
+INFO: [Synth 8-6157] synthesizing module 'altdpram__parameterized3' [/home/adam/3DO_GameBub/rtl/compat/altera_compat.sv:14]
+	Parameter width bound to: 16 - type: integer 
+	Parameter widthad bound to: 4 - type: integer 
+	Parameter numwords bound to: 0 - type: integer 
+	Parameter width_byteena bound to: 1 - type: integer 
+	Parameter byte_size bound to: 8 - type: integer 
+	Parameter indata_aclr bound to: OFF - type: string 
+	Parameter indata_reg bound to: INCLOCK - type: string 
+	Parameter intended_device_family bound to: Cyclone V - type: string 
+	Parameter lpm_type bound to: altdpram - type: string 
+	Parameter lpm_hint bound to: UNUSED - type: string 
+	Parameter outdata_aclr bound to: OFF - type: string 
+	Parameter outdata_reg bound to: UNREGISTERED - type: string 
+	Parameter ram_block_type bound to: MLAB - type: string 
+	Parameter rdaddress_aclr bound to: OFF - type: string 
+	Parameter rdaddress_reg bound to: UNREGISTERED - type: string 
+	Parameter rdcontrol_aclr bound to: OFF - type: string 
+	Parameter rdcontrol_reg bound to: UNREGISTERED - type: string 
+	Parameter read_during_write_mode_mixed_ports bound to: CONSTRAINED_DONT_CARE - type: string 
+	Parameter wraddress_aclr bound to: OFF - type: string 
+	Parameter wraddress_reg bound to: INCLOCK - type: string 
+	Parameter wrcontrol_aclr bound to: OFF - type: string 
+	Parameter wrcontrol_reg bound to: INCLOCK - type: string 
+	Parameter use_eab bound to: ON - type: string 
+	Parameter power_up_uninitialized bound to: FALSE - type: string 
+	Parameter DEPTH bound to: 16 - type: integer 
+	Parameter LANE_BITS bound to: 16 - type: integer 
+INFO: [Synth 8-6155] done synthesizing module 'altdpram__parameterized3' (24#1) [/home/adam/3DO_GameBub/rtl/compat/altera_compat.sv:14]
+WARNING: [Synth 8-350] instance 'altdpram_component' of module 'altdpram' requires 14 connections, but only 12 given [/home/adam/3DO_GameBub/rtl/p3do/MADAM_mem.sv:438]
+INFO: [Synth 8-6155] done synthesizing module 'MADAM_SPRYTE_DATA_FIFO' (25#1) [/home/adam/3DO_GameBub/rtl/p3do/MADAM_mem.sv:372]
+WARNING: [Synth 8-350] instance 'SPR_FIFO_A' of module 'MADAM_SPRYTE_DATA_FIFO' requires 10 connections, but only 9 given [/home/adam/3DO_GameBub/rtl/p3do/MADAM_SE.sv:891]
+WARNING: [Synth 8-350] instance 'SPR_FIFO_B' of module 'MADAM_SPRYTE_DATA_FIFO' requires 10 connections, but only 9 given [/home/adam/3DO_GameBub/rtl/p3do/MADAM_SE.sv:913]
+INFO: [Synth 8-6157] synthesizing module 'MADAM_UNPACKER' [/home/adam/3DO_GameBub/rtl/p3do/MADAM_SE.sv:2746]
+INFO: [Synth 8-155] case statement is not full and has no default [/home/adam/3DO_GameBub/rtl/p3do/MADAM_SE.sv:2843]
+WARNING: [Synth 8-6014] Unused sequential element BITS_BY_BPP_reg was removed.  [/home/adam/3DO_GameBub/rtl/p3do/MADAM_SE.sv:2818]
+WARNING: [Synth 8-6014] Unused sequential element BIT_CNT_NEXT_reg was removed.  [/home/adam/3DO_GameBub/rtl/p3do/MADAM_SE.sv:2826]
+WARNING: [Synth 8-6014] Unused sequential element BIT_CNT_OVER_reg was removed.  [/home/adam/3DO_GameBub/rtl/p3do/MADAM_SE.sv:2826]
+WARNING: [Synth 8-6014] Unused sequential element TEMP_reg was removed.  [/home/adam/3DO_GameBub/rtl/p3do/MADAM_SE.sv:2828]
+WARNING: [Synth 8-6014] Unused sequential element CODE_reg was removed.  [/home/adam/3DO_GameBub/rtl/p3do/MADAM_SE.sv:2830]
+WARNING: [Synth 8-6014] Unused sequential element BUF_LOAD_reg was removed.  [/home/adam/3DO_GameBub/rtl/p3do/MADAM_SE.sv:2840]
+WARNING: [Synth 8-6014] Unused sequential element CODE_NEXT_reg was removed.  [/home/adam/3DO_GameBub/rtl/p3do/MADAM_SE.sv:2841]
+WARNING: [Synth 8-6014] Unused sequential element CODE_OUT_reg was removed.  [/home/adam/3DO_GameBub/rtl/p3do/MADAM_SE.sv:2842]
+INFO: [Synth 8-6155] done synthesizing module 'MADAM_UNPACKER' (26#1) [/home/adam/3DO_GameBub/rtl/p3do/MADAM_SE.sv:2746]
+INFO: [Synth 8-6157] synthesizing module 'MADAM_SYNC_FIFO' [/home/adam/3DO_GameBub/rtl/p3do/MADAM_mem.sv:554]
+	Parameter width bound to: 29 - type: integer 
+INFO: [Synth 8-6157] synthesizing module 'altdpram__parameterized4' [/home/adam/3DO_GameBub/rtl/compat/altera_compat.sv:14]
+	Parameter width bound to: 29 - type: integer 
+	Parameter widthad bound to: 4 - type: integer 
+	Parameter numwords bound to: 0 - type: integer 
+	Parameter width_byteena bound to: 1 - type: integer 
+	Parameter byte_size bound to: 8 - type: integer 
+	Parameter indata_aclr bound to: OFF - type: string 
+	Parameter indata_reg bound to: INCLOCK - type: string 
+	Parameter intended_device_family bound to: Cyclone V - type: string 
+	Parameter lpm_type bound to: altdpram - type: string 
+	Parameter lpm_hint bound to: UNUSED - type: string 
+	Parameter outdata_aclr bound to: OFF - type: string 
+	Parameter outdata_reg bound to: UNREGISTERED - type: string 
+	Parameter ram_block_type bound to: MLAB - type: string 
+	Parameter rdaddress_aclr bound to: OFF - type: string 
+	Parameter rdaddress_reg bound to: UNREGISTERED - type: string 
+	Parameter rdcontrol_aclr bound to: OFF - type: string 
+	Parameter rdcontrol_reg bound to: UNREGISTERED - type: string 
+	Parameter read_during_write_mode_mixed_ports bound to: CONSTRAINED_DONT_CARE - type: string 
+	Parameter wraddress_aclr bound to: OFF - type: string 
+	Parameter wraddress_reg bound to: INCLOCK - type: string 
+	Parameter wrcontrol_aclr bound to: OFF - type: string 
+	Parameter wrcontrol_reg bound to: INCLOCK - type: string 
+	Parameter use_eab bound to: ON - type: string 
+	Parameter power_up_uninitialized bound to: FALSE - type: string 
+	Parameter DEPTH bound to: 16 - type: integer 
+	Parameter LANE_BITS bound to: 29 - type: integer 
+INFO: [Synth 8-6155] done synthesizing module 'altdpram__parameterized4' (26#1) [/home/adam/3DO_GameBub/rtl/compat/altera_compat.sv:14]
+WARNING: [Synth 8-350] instance 'altdpram_component' of module 'altdpram' requires 14 connections, but only 12 given [/home/adam/3DO_GameBub/rtl/p3do/MADAM_mem.sv:622]
+INFO: [Synth 8-6155] done synthesizing module 'MADAM_SYNC_FIFO' (27#1) [/home/adam/3DO_GameBub/rtl/p3do/MADAM_mem.sv:554]
+WARNING: [Synth 8-350] instance 'IPS_FIFO' of module 'MADAM_SYNC_FIFO' requires 10 connections, but only 9 given [/home/adam/3DO_GameBub/rtl/p3do/MADAM_SE.sv:1112]
+WARNING: [Synth 8-350] instance 'IPS_FIFO_B' of module 'MADAM_SYNC_FIFO' requires 10 connections, but only 9 given [/home/adam/3DO_GameBub/rtl/p3do/MADAM_SE.sv:1129]
+INFO: [Synth 8-6157] synthesizing module 'MADAM_PPMP' [/home/adam/3DO_GameBub/rtl/p3do/MADAM_SE.sv:2984]
+WARNING: [Synth 8-6014] Unused sequential element AV_reg was removed.  [/home/adam/3DO_GameBub/rtl/p3do/MADAM_SE.sv:3043]
+WARNING: [Synth 8-6014] Unused sequential element MV_B_reg was removed.  [/home/adam/3DO_GameBub/rtl/p3do/MADAM_SE.sv:3045]
+WARNING: [Synth 8-6014] Unused sequential element MV_G_reg was removed.  [/home/adam/3DO_GameBub/rtl/p3do/MADAM_SE.sv:3045]
+WARNING: [Synth 8-6014] Unused sequential element MV_R_reg was removed.  [/home/adam/3DO_GameBub/rtl/p3do/MADAM_SE.sv:3045]
+WARNING: [Synth 8-6014] Unused sequential element DV1_B_reg was removed.  [/home/adam/3DO_GameBub/rtl/p3do/MADAM_SE.sv:3050]
+WARNING: [Synth 8-6014] Unused sequential element DV1_G_reg was removed.  [/home/adam/3DO_GameBub/rtl/p3do/MADAM_SE.sv:3050]
+WARNING: [Synth 8-6014] Unused sequential element DV1_R_reg was removed.  [/home/adam/3DO_GameBub/rtl/p3do/MADAM_SE.sv:3050]
+WARNING: [Synth 8-6014] Unused sequential element TEMPA_B_reg was removed.  [/home/adam/3DO_GameBub/rtl/p3do/MADAM_SE.sv:3056]
+WARNING: [Synth 8-6014] Unused sequential element TEMPA_G_reg was removed.  [/home/adam/3DO_GameBub/rtl/p3do/MADAM_SE.sv:3056]
+WARNING: [Synth 8-6014] Unused sequential element TEMPA_R_reg was removed.  [/home/adam/3DO_GameBub/rtl/p3do/MADAM_SE.sv:3056]
+WARNING: [Synth 8-6014] Unused sequential element MRES_R_reg was removed.  [/home/adam/3DO_GameBub/rtl/p3do/MADAM_SE.sv:3059]
+WARNING: [Synth 8-6014] Unused sequential element DIVA_R_reg was removed.  [/home/adam/3DO_GameBub/rtl/p3do/MADAM_SE.sv:3061]
+WARNING: [Synth 8-6014] Unused sequential element MRES_G_reg was removed.  [/home/adam/3DO_GameBub/rtl/p3do/MADAM_SE.sv:3066]
+WARNING: [Synth 8-6014] Unused sequential element DIVA_G_reg was removed.  [/home/adam/3DO_GameBub/rtl/p3do/MADAM_SE.sv:3068]
+WARNING: [Synth 8-6014] Unused sequential element MRES_B_reg was removed.  [/home/adam/3DO_GameBub/rtl/p3do/MADAM_SE.sv:3073]
+WARNING: [Synth 8-6014] Unused sequential element DIVA_B_reg was removed.  [/home/adam/3DO_GameBub/rtl/p3do/MADAM_SE.sv:3075]
+WARNING: [Synth 8-6014] Unused sequential element ADDA_B_reg was removed.  [/home/adam/3DO_GameBub/rtl/p3do/MADAM_SE.sv:3080]
+WARNING: [Synth 8-6014] Unused sequential element ADDA_G_reg was removed.  [/home/adam/3DO_GameBub/rtl/p3do/MADAM_SE.sv:3080]
+WARNING: [Synth 8-6014] Unused sequential element ADDA_R_reg was removed.  [/home/adam/3DO_GameBub/rtl/p3do/MADAM_SE.sv:3080]
+WARNING: [Synth 8-6014] Unused sequential element TEMPB_B_reg was removed.  [/home/adam/3DO_GameBub/rtl/p3do/MADAM_SE.sv:3083]
+WARNING: [Synth 8-6014] Unused sequential element TEMPB_G_reg was removed.  [/home/adam/3DO_GameBub/rtl/p3do/MADAM_SE.sv:3083]
+WARNING: [Synth 8-6014] Unused sequential element TEMPB_R_reg was removed.  [/home/adam/3DO_GameBub/rtl/p3do/MADAM_SE.sv:3083]
+WARNING: [Synth 8-6014] Unused sequential element DIVB_B_reg was removed.  [/home/adam/3DO_GameBub/rtl/p3do/MADAM_SE.sv:3089]
+WARNING: [Synth 8-6014] Unused sequential element DIVB_G_reg was removed.  [/home/adam/3DO_GameBub/rtl/p3do/MADAM_SE.sv:3089]
+WARNING: [Synth 8-6014] Unused sequential element DIVB_R_reg was removed.  [/home/adam/3DO_GameBub/rtl/p3do/MADAM_SE.sv:3089]
+WARNING: [Synth 8-6014] Unused sequential element PXORB_B_reg was removed.  [/home/adam/3DO_GameBub/rtl/p3do/MADAM_SE.sv:3094]
+WARNING: [Synth 8-6014] Unused sequential element PXORB_G_reg was removed.  [/home/adam/3DO_GameBub/rtl/p3do/MADAM_SE.sv:3094]
+WARNING: [Synth 8-6014] Unused sequential element PXORB_R_reg was removed.  [/home/adam/3DO_GameBub/rtl/p3do/MADAM_SE.sv:3094]
+WARNING: [Synth 8-6014] Unused sequential element ADDB_B_reg was removed.  [/home/adam/3DO_GameBub/rtl/p3do/MADAM_SE.sv:3095]
+WARNING: [Synth 8-6014] Unused sequential element ADDB_G_reg was removed.  [/home/adam/3DO_GameBub/rtl/p3do/MADAM_SE.sv:3095]
+WARNING: [Synth 8-6014] Unused sequential element ADDB_R_reg was removed.  [/home/adam/3DO_GameBub/rtl/p3do/MADAM_SE.sv:3095]
+WARNING: [Synth 8-6014] Unused sequential element ADDB6_B_reg was removed.  [/home/adam/3DO_GameBub/rtl/p3do/MADAM_SE.sv:3096]
+WARNING: [Synth 8-6014] Unused sequential element ADDB6_G_reg was removed.  [/home/adam/3DO_GameBub/rtl/p3do/MADAM_SE.sv:3096]
+WARNING: [Synth 8-6014] Unused sequential element ADDB6_R_reg was removed.  [/home/adam/3DO_GameBub/rtl/p3do/MADAM_SE.sv:3096]
+WARNING: [Synth 8-6014] Unused sequential element ADD_R_reg was removed.  [/home/adam/3DO_GameBub/rtl/p3do/MADAM_SE.sv:3119]
+WARNING: [Synth 8-6014] Unused sequential element ADD_G_reg was removed.  [/home/adam/3DO_GameBub/rtl/p3do/MADAM_SE.sv:3120]
+WARNING: [Synth 8-6014] Unused sequential element ADD_B_reg was removed.  [/home/adam/3DO_GameBub/rtl/p3do/MADAM_SE.sv:3121]
+WARNING: [Synth 8-6014] Unused sequential element DIVR_B_reg was removed.  [/home/adam/3DO_GameBub/rtl/p3do/MADAM_SE.sv:3123]
+WARNING: [Synth 8-6014] Unused sequential element DIVR_G_reg was removed.  [/home/adam/3DO_GameBub/rtl/p3do/MADAM_SE.sv:3123]
+WARNING: [Synth 8-6014] Unused sequential element DIVR_R_reg was removed.  [/home/adam/3DO_GameBub/rtl/p3do/MADAM_SE.sv:3123]
+WARNING: [Synth 8-6014] Unused sequential element PEN_R_reg was removed.  [/home/adam/3DO_GameBub/rtl/p3do/MADAM_SE.sv:3126]
+WARNING: [Synth 8-6014] Unused sequential element PEN_G_reg was removed.  [/home/adam/3DO_GameBub/rtl/p3do/MADAM_SE.sv:3127]
+WARNING: [Synth 8-6014] Unused sequential element PEN_B_reg was removed.  [/home/adam/3DO_GameBub/rtl/p3do/MADAM_SE.sv:3128]
+WARNING: [Synth 8-6014] Unused sequential element PEN15_reg was removed.  [/home/adam/3DO_GameBub/rtl/p3do/MADAM_SE.sv:3137]
+WARNING: [Synth 8-5788] Register ADDB6_B_PIPE_reg in module MADAM_PPMP is has both Set and reset with same priority. This may cause simulation mismatches. Consider rewriting code  [/home/adam/3DO_GameBub/rtl/p3do/MADAM_SE.sv:3101]
+WARNING: [Synth 8-5788] Register ADDB6_G_PIPE_reg in module MADAM_PPMP is has both Set and reset with same priority. This may cause simulation mismatches. Consider rewriting code  [/home/adam/3DO_GameBub/rtl/p3do/MADAM_SE.sv:3101]
+WARNING: [Synth 8-5788] Register ADDB6_R_PIPE_reg in module MADAM_PPMP is has both Set and reset with same priority. This may cause simulation mismatches. Consider rewriting code  [/home/adam/3DO_GameBub/rtl/p3do/MADAM_SE.sv:3101]
+WARNING: [Synth 8-5788] Register SPH_PIPE_reg in module MADAM_PPMP is has both Set and reset with same priority. This may cause simulation mismatches. Consider rewriting code  [/home/adam/3DO_GameBub/rtl/p3do/MADAM_SE.sv:3104]
+WARNING: [Synth 8-5788] Register SPV_PIPE_reg in module MADAM_PPMP is has both Set and reset with same priority. This may cause simulation mismatches. Consider rewriting code  [/home/adam/3DO_GameBub/rtl/p3do/MADAM_SE.sv:3105]
+INFO: [Synth 8-6155] done synthesizing module 'MADAM_PPMP' (28#1) [/home/adam/3DO_GameBub/rtl/p3do/MADAM_SE.sv:2984]
+INFO: [Synth 8-6157] synthesizing module 'MADAM_REGIS' [/home/adam/3DO_GameBub/rtl/p3do/MADAM_SE.sv:3475]
+INFO: [Synth 8-155] case statement is not full and has no default [/home/adam/3DO_GameBub/rtl/p3do/MADAM_SE.sv:3634]
+INFO: [Synth 8-155] case statement is not full and has no default [/home/adam/3DO_GameBub/rtl/p3do/MADAM_SE.sv:3655]
+WARNING: [Synth 8-6014] Unused sequential element BW1_NEXT_CONER_reg was removed.  [/home/adam/3DO_GameBub/rtl/p3do/MADAM_SE.sv:3520]
+WARNING: [Synth 8-6014] Unused sequential element BW2_NEXT_CONER_reg was removed.  [/home/adam/3DO_GameBub/rtl/p3do/MADAM_SE.sv:3521]
+WARNING: [Synth 8-5788] Register T2_reg in module MADAM_REGIS is has both Set and reset with same priority. This may cause simulation mismatches. Consider rewriting code  [/home/adam/3DO_GameBub/rtl/p3do/MADAM_SE.sv:3503]
+WARNING: [Synth 8-5788] Register T1_reg in module MADAM_REGIS is has both Set and reset with same priority. This may cause simulation mismatches. Consider rewriting code  [/home/adam/3DO_GameBub/rtl/p3do/MADAM_SE.sv:3502]
+WARNING: [Synth 8-5788] Register CC2_reg in module MADAM_REGIS is has both Set and reset with same priority. This may cause simulation mismatches. Consider rewriting code  [/home/adam/3DO_GameBub/rtl/p3do/MADAM_SE.sv:3504]
+WARNING: [Synth 8-5788] Register CC1_reg in module MADAM_REGIS is has both Set and reset with same priority. This may cause simulation mismatches. Consider rewriting code  [/home/adam/3DO_GameBub/rtl/p3do/MADAM_SE.sv:3504]
+WARNING: [Synth 8-5788] Register BW1_PREV_S_reg in module MADAM_REGIS is has both Set and reset with same priority. This may cause simulation mismatches. Consider rewriting code  [/home/adam/3DO_GameBub/rtl/p3do/MADAM_SE.sv:3527]
+WARNING: [Synth 8-5788] Register BW2_PREV_S_reg in module MADAM_REGIS is has both Set and reset with same priority. This may cause simulation mismatches. Consider rewriting code  [/home/adam/3DO_GameBub/rtl/p3do/MADAM_SE.sv:3528]
+INFO: [Synth 8-6155] done synthesizing module 'MADAM_REGIS' (29#1) [/home/adam/3DO_GameBub/rtl/p3do/MADAM_SE.sv:3475]
+INFO: [Synth 8-155] case statement is not full and has no default [/home/adam/3DO_GameBub/rtl/p3do/MADAM_SE.sv:1298]
+INFO: [Synth 8-155] case statement is not full and has no default [/home/adam/3DO_GameBub/rtl/p3do/MADAM_SE.sv:1437]
+INFO: [Synth 8-6157] synthesizing module 'MADAM_MATH_STACK' [/home/adam/3DO_GameBub/rtl/p3do/MADAM_mem.sv:143]
+INFO: [Synth 8-6157] synthesizing module 'altdpram__parameterized5' [/home/adam/3DO_GameBub/rtl/compat/altera_compat.sv:14]
+	Parameter width bound to: 32 - type: integer 
+	Parameter widthad bound to: 3 - type: integer 
+	Parameter numwords bound to: 0 - type: integer 
+	Parameter width_byteena bound to: 4 - type: integer 
+	Parameter byte_size bound to: 8 - type: integer 
+	Parameter indata_aclr bound to: OFF - type: string 
+	Parameter indata_reg bound to: INCLOCK - type: string 
+	Parameter intended_device_family bound to: Cyclone V - type: string 
+	Parameter lpm_type bound to: altdpram - type: string 
+	Parameter lpm_hint bound to: UNUSED - type: string 
+	Parameter outdata_aclr bound to: OFF - type: string 
+	Parameter outdata_reg bound to: UNREGISTERED - type: string 
+	Parameter ram_block_type bound to: MLAB - type: string 
+	Parameter rdaddress_aclr bound to: OFF - type: string 
+	Parameter rdaddress_reg bound to: UNREGISTERED - type: string 
+	Parameter rdcontrol_aclr bound to: OFF - type: string 
+	Parameter rdcontrol_reg bound to: UNREGISTERED - type: string 
+	Parameter read_during_write_mode_mixed_ports bound to: CONSTRAINED_DONT_CARE - type: string 
+	Parameter wraddress_aclr bound to: OFF - type: string 
+	Parameter wraddress_reg bound to: INCLOCK - type: string 
+	Parameter wrcontrol_aclr bound to: OFF - type: string 
+	Parameter wrcontrol_reg bound to: INCLOCK - type: string 
+	Parameter use_eab bound to: ON - type: string 
+	Parameter power_up_uninitialized bound to: FALSE - type: string 
+	Parameter DEPTH bound to: 8 - type: integer 
+	Parameter LANE_BITS bound to: 8 - type: integer 
+INFO: [Synth 8-6155] done synthesizing module 'altdpram__parameterized5' (29#1) [/home/adam/3DO_GameBub/rtl/compat/altera_compat.sv:14]
+WARNING: [Synth 8-350] instance 'altdpram_component' of module 'altdpram' requires 14 connections, but only 12 given [/home/adam/3DO_GameBub/rtl/p3do/MADAM_mem.sv:180]
+INFO: [Synth 8-6155] done synthesizing module 'MADAM_MATH_STACK' (30#1) [/home/adam/3DO_GameBub/rtl/p3do/MADAM_mem.sv:143]
+INFO: [Synth 8-6157] synthesizing module 'MADAM_MATH_PLATFORM' [/home/adam/3DO_GameBub/rtl/p3do/MADAM_SE.sv:3148]
+INFO: [Synth 8-226] default block is never used [/home/adam/3DO_GameBub/rtl/p3do/MADAM_SE.sv:3261]
+INFO: [Synth 8-226] default block is never used [/home/adam/3DO_GameBub/rtl/p3do/MADAM_SE.sv:3282]
+INFO: [Synth 8-6155] done synthesizing module 'MADAM_MATH_PLATFORM' (31#1) [/home/adam/3DO_GameBub/rtl/p3do/MADAM_SE.sv:3148]
+INFO: [Synth 8-6157] synthesizing module 'MADAM_SYNC_FIFO__parameterized0' [/home/adam/3DO_GameBub/rtl/p3do/MADAM_mem.sv:554]
+	Parameter width bound to: 26 - type: integer 
+INFO: [Synth 8-6157] synthesizing module 'altdpram__parameterized6' [/home/adam/3DO_GameBub/rtl/compat/altera_compat.sv:14]
+	Parameter width bound to: 26 - type: integer 
+	Parameter widthad bound to: 4 - type: integer 
+	Parameter numwords bound to: 0 - type: integer 
+	Parameter width_byteena bound to: 1 - type: integer 
+	Parameter byte_size bound to: 8 - type: integer 
+	Parameter indata_aclr bound to: OFF - type: string 
+	Parameter indata_reg bound to: INCLOCK - type: string 
+	Parameter intended_device_family bound to: Cyclone V - type: string 
+	Parameter lpm_type bound to: altdpram - type: string 
+	Parameter lpm_hint bound to: UNUSED - type: string 
+	Parameter outdata_aclr bound to: OFF - type: string 
+	Parameter outdata_reg bound to: UNREGISTERED - type: string 
+	Parameter ram_block_type bound to: MLAB - type: string 
+	Parameter rdaddress_aclr bound to: OFF - type: string 
+	Parameter rdaddress_reg bound to: UNREGISTERED - type: string 
+	Parameter rdcontrol_aclr bound to: OFF - type: string 
+	Parameter rdcontrol_reg bound to: UNREGISTERED - type: string 
+	Parameter read_during_write_mode_mixed_ports bound to: CONSTRAINED_DONT_CARE - type: string 
+	Parameter wraddress_aclr bound to: OFF - type: string 
+	Parameter wraddress_reg bound to: INCLOCK - type: string 
+	Parameter wrcontrol_aclr bound to: OFF - type: string 
+	Parameter wrcontrol_reg bound to: INCLOCK - type: string 
+	Parameter use_eab bound to: ON - type: string 
+	Parameter power_up_uninitialized bound to: FALSE - type: string 
+	Parameter DEPTH bound to: 16 - type: integer 
+	Parameter LANE_BITS bound to: 26 - type: integer 
+INFO: [Synth 8-6155] done synthesizing module 'altdpram__parameterized6' (31#1) [/home/adam/3DO_GameBub/rtl/compat/altera_compat.sv:14]
+WARNING: [Synth 8-350] instance 'altdpram_component' of module 'altdpram' requires 14 connections, but only 12 given [/home/adam/3DO_GameBub/rtl/p3do/MADAM_mem.sv:622]
+INFO: [Synth 8-6155] done synthesizing module 'MADAM_SYNC_FIFO__parameterized0' (31#1) [/home/adam/3DO_GameBub/rtl/p3do/MADAM_mem.sv:554]
+WARNING: [Synth 8-6014] Unused sequential element SCOB_PRE0_reg[LITERAL] was removed.  [/home/adam/3DO_GameBub/rtl/p3do/MADAM_SE.sv:206]
+WARNING: [Synth 8-6014] Unused sequential element SCOB_PRE0_reg[BGND] was removed.  [/home/adam/3DO_GameBub/rtl/p3do/MADAM_SE.sv:206]
+WARNING: [Synth 8-6014] Unused sequential element SCOB_PRE0_reg[PRESERVED] was removed.  [/home/adam/3DO_GameBub/rtl/p3do/MADAM_SE.sv:206]
+WARNING: [Synth 8-6014] Unused sequential element SCOB_PRE0_reg[UNUSED2] was removed.  [/home/adam/3DO_GameBub/rtl/p3do/MADAM_SE.sv:206]
+WARNING: [Synth 8-6014] Unused sequential element SCOB_PRE0_reg[UNUSED] was removed.  [/home/adam/3DO_GameBub/rtl/p3do/MADAM_SE.sv:206]
+WARNING: [Synth 8-6014] Unused sequential element SCOB_PRE1_reg[WOFFSET8] was removed.  [/home/adam/3DO_GameBub/rtl/p3do/MADAM_SE.sv:97]
+WARNING: [Synth 8-6014] Unused sequential element SCOB_PRE1_reg[WOFFSET10] was removed.  [/home/adam/3DO_GameBub/rtl/p3do/MADAM_SE.sv:97]
+WARNING: [Synth 8-6014] Unused sequential element SCOB_PRE1_reg[UNUSED] was removed.  [/home/adam/3DO_GameBub/rtl/p3do/MADAM_SE.sv:97]
+WARNING: [Synth 8-6014] Unused sequential element SCOB_PRE1_reg[NOSWAP] was removed.  [/home/adam/3DO_GameBub/rtl/p3do/MADAM_SE.sv:97]
+WARNING: [Synth 8-6014] Unused sequential element SCOB_PRE1_reg[TLLSBIPN] was removed.  [/home/adam/3DO_GameBub/rtl/p3do/MADAM_SE.sv:97]
+WARNING: [Synth 8-6014] Unused sequential element CORNER_SEL_reg was removed.  [/home/adam/3DO_GameBub/rtl/p3do/MADAM_SE.sv:766]
+WARNING: [Synth 8-6014] Unused sequential element D_reg was removed.  [/home/adam/3DO_GameBub/rtl/p3do/MADAM_SE.sv:1020]
+WARNING: [Synth 8-6014] Unused sequential element PPMPC_SEL_reg was removed.  [/home/adam/3DO_GameBub/rtl/p3do/MADAM_SE.sv:1027]
+WARNING: [Synth 8-6014] Unused sequential element PPMPC_reg[S1] was removed.  [/home/adam/3DO_GameBub/rtl/p3do/MADAM_SE.sv:1032]
+WARNING: [Synth 8-6014] Unused sequential element PPMPC_reg[MS] was removed.  [/home/adam/3DO_GameBub/rtl/p3do/MADAM_SE.sv:1032]
+WARNING: [Synth 8-6014] Unused sequential element PPMPC_reg[MXF] was removed.  [/home/adam/3DO_GameBub/rtl/p3do/MADAM_SE.sv:1032]
+WARNING: [Synth 8-6014] Unused sequential element PPMPC_reg[DV1] was removed.  [/home/adam/3DO_GameBub/rtl/p3do/MADAM_SE.sv:1032]
+WARNING: [Synth 8-6014] Unused sequential element PPMPC_reg[S2] was removed.  [/home/adam/3DO_GameBub/rtl/p3do/MADAM_SE.sv:1032]
+WARNING: [Synth 8-6014] Unused sequential element PPMPC_reg[AV] was removed.  [/home/adam/3DO_GameBub/rtl/p3do/MADAM_SE.sv:1032]
+WARNING: [Synth 8-6014] Unused sequential element PPMPC_reg[DV2] was removed.  [/home/adam/3DO_GameBub/rtl/p3do/MADAM_SE.sv:1032]
+WARNING: [Synth 8-6014] Unused sequential element B_reg was removed.  [/home/adam/3DO_GameBub/rtl/p3do/MADAM_SE.sv:1035]
+WARNING: [Synth 8-6014] Unused sequential element G_reg was removed.  [/home/adam/3DO_GameBub/rtl/p3do/MADAM_SE.sv:1035]
+WARNING: [Synth 8-6014] Unused sequential element R_reg was removed.  [/home/adam/3DO_GameBub/rtl/p3do/MADAM_SE.sv:1035]
+WARNING: [Synth 8-6014] Unused sequential element T_reg was removed.  [/home/adam/3DO_GameBub/rtl/p3do/MADAM_SE.sv:1039]
+WARNING: [Synth 8-6014] Unused sequential element MB_reg was removed.  [/home/adam/3DO_GameBub/rtl/p3do/MADAM_SE.sv:1041]
+WARNING: [Synth 8-6014] Unused sequential element MG_reg was removed.  [/home/adam/3DO_GameBub/rtl/p3do/MADAM_SE.sv:1041]
+WARNING: [Synth 8-6014] Unused sequential element MR_reg was removed.  [/home/adam/3DO_GameBub/rtl/p3do/MADAM_SE.sv:1041]
+WARNING: [Synth 8-6014] Unused sequential element RMODE_reg was removed.  [/home/adam/3DO_GameBub/rtl/p3do/MADAM_SE.sv:1045]
+WARNING: [Synth 8-6014] Unused sequential element SPH_reg was removed.  [/home/adam/3DO_GameBub/rtl/p3do/MADAM_SE.sv:1046]
+WARNING: [Synth 8-6014] Unused sequential element SPV_reg was removed.  [/home/adam/3DO_GameBub/rtl/p3do/MADAM_SE.sv:1047]
+WARNING: [Synth 8-6014] Unused sequential element D_reg was removed.  [/home/adam/3DO_GameBub/rtl/p3do/MADAM_SE.sv:1065]
+WARNING: [Synth 8-6014] Unused sequential element PPMPC_SEL_reg was removed.  [/home/adam/3DO_GameBub/rtl/p3do/MADAM_SE.sv:1072]
+INFO: [Common 17-14] Message 'Synth 8-6014' appears 100 times and further instances of the messages will be disabled. Use the Tcl command set_msg_config to change the current settings.
+WARNING: [Synth 8-5788] Register SPRDATA_BURST_LAST_FF_reg in module MADAM_SE is has both Set and reset with same priority. This may cause simulation mismatches. Consider rewriting code  [/home/adam/3DO_GameBub/rtl/p3do/MADAM_SE.sv:255]
+WARNING: [Synth 8-5788] Register SPRDATA_ENG_B_DISABLE_reg in module MADAM_SE is has both Set and reset with same priority. This may cause simulation mismatches. Consider rewriting code  [/home/adam/3DO_GameBub/rtl/p3do/MADAM_SE.sv:318]
+WARNING: [Synth 8-5788] Register SPRDATA_ENG_SEL_reg in module MADAM_SE is has both Set and reset with same priority. This may cause simulation mismatches. Consider rewriting code  [/home/adam/3DO_GameBub/rtl/p3do/MADAM_SE.sv:351]
+WARNING: [Synth 8-5788] Register SPRSTRT_WRITE_OLD_reg in module MADAM_SE is has both Set and reset with same priority. This may cause simulation mismatches. Consider rewriting code  [/home/adam/3DO_GameBub/rtl/p3do/MADAM_SE.sv:491]
+WARNING: [Synth 8-5788] Register SPRCNTU_WRITE_OLD_reg in module MADAM_SE is has both Set and reset with same priority. This may cause simulation mismatches. Consider rewriting code  [/home/adam/3DO_GameBub/rtl/p3do/MADAM_SE.sv:492]
+WARNING: [Synth 8-5788] Register SPRPAUS_WRITE_OLD_reg in module MADAM_SE is has both Set and reset with same priority. This may cause simulation mismatches. Consider rewriting code  [/home/adam/3DO_GameBub/rtl/p3do/MADAM_SE.sv:493]
+WARNING: [Synth 8-5788] Register ENGINE_B_FF_reg in module MADAM_SE is has both Set and reset with same priority. This may cause simulation mismatches. Consider rewriting code  [/home/adam/3DO_GameBub/rtl/p3do/MADAM_SE.sv:540]
+WARNING: [Synth 8-5788] Register LOAD_BUF_reg in module MADAM_SE is has both Set and reset with same priority. This may cause simulation mismatches. Consider rewriting code  [/home/adam/3DO_GameBub/rtl/p3do/MADAM_SE.sv:630]
+WARNING: [Synth 8-5788] Register PIP_WA_reg in module MADAM_SE is has both Set and reset with same priority. This may cause simulation mismatches. Consider rewriting code  [/home/adam/3DO_GameBub/rtl/p3do/MADAM_SE.sv:654]
+WARNING: [Synth 8-5788] Register IPS_FIFO_B_OUT_FF_reg[D] in module MADAM_SE is has both Set and reset with same priority. This may cause simulation mismatches. Consider rewriting code  [/home/adam/3DO_GameBub/rtl/p3do/MADAM_SE.sv:1157]
+WARNING: [Synth 8-5788] Register IPS_FIFO_B_OUT_FF_reg[R] in module MADAM_SE is has both Set and reset with same priority. This may cause simulation mismatches. Consider rewriting code  [/home/adam/3DO_GameBub/rtl/p3do/MADAM_SE.sv:1157]
+WARNING: [Synth 8-5788] Register IPS_FIFO_B_OUT_FF_reg[G] in module MADAM_SE is has both Set and reset with same priority. This may cause simulation mismatches. Consider rewriting code  [/home/adam/3DO_GameBub/rtl/p3do/MADAM_SE.sv:1157]
+WARNING: [Synth 8-5788] Register IPS_FIFO_B_OUT_FF_reg[B] in module MADAM_SE is has both Set and reset with same priority. This may cause simulation mismatches. Consider rewriting code  [/home/adam/3DO_GameBub/rtl/p3do/MADAM_SE.sv:1157]
+WARNING: [Synth 8-5788] Register IPS_FIFO_B_OUT_FF_reg[T] in module MADAM_SE is has both Set and reset with same priority. This may cause simulation mismatches. Consider rewriting code  [/home/adam/3DO_GameBub/rtl/p3do/MADAM_SE.sv:1157]
+WARNING: [Synth 8-5788] Register IPS_FIFO_B_OUT_FF_reg[MR] in module MADAM_SE is has both Set and reset with same priority. This may cause simulation mismatches. Consider rewriting code  [/home/adam/3DO_GameBub/rtl/p3do/MADAM_SE.sv:1157]
+WARNING: [Synth 8-5788] Register IPS_FIFO_B_OUT_FF_reg[MG] in module MADAM_SE is has both Set and reset with same priority. This may cause simulation mismatches. Consider rewriting code  [/home/adam/3DO_GameBub/rtl/p3do/MADAM_SE.sv:1157]
+WARNING: [Synth 8-5788] Register IPS_FIFO_B_OUT_FF_reg[MB] in module MADAM_SE is has both Set and reset with same priority. This may cause simulation mismatches. Consider rewriting code  [/home/adam/3DO_GameBub/rtl/p3do/MADAM_SE.sv:1157]
+WARNING: [Synth 8-5788] Register IPS_FIFO_B_OUT_FF_reg[RMODE] in module MADAM_SE is has both Set and reset with same priority. This may cause simulation mismatches. Consider rewriting code  [/home/adam/3DO_GameBub/rtl/p3do/MADAM_SE.sv:1157]
+WARNING: [Synth 8-5788] Register IPS_FIFO_B_OUT_FF_reg[SPH] in module MADAM_SE is has both Set and reset with same priority. This may cause simulation mismatches. Consider rewriting code  [/home/adam/3DO_GameBub/rtl/p3do/MADAM_SE.sv:1157]
+WARNING: [Synth 8-5788] Register IPS_FIFO_B_OUT_FF_reg[SPV] in module MADAM_SE is has both Set and reset with same priority. This may cause simulation mismatches. Consider rewriting code  [/home/adam/3DO_GameBub/rtl/p3do/MADAM_SE.sv:1157]
+WARNING: [Synth 8-5788] Register REGIS_A_Y_reg in module MADAM_SE is has both Set and reset with same priority. This may cause simulation mismatches. Consider rewriting code  [/home/adam/3DO_GameBub/rtl/p3do/MADAM_SE.sv:1354]
+WARNING: [Synth 8-5788] Register REGIS_A_OUT_reg in module MADAM_SE is has both Set and reset with same priority. This may cause simulation mismatches. Consider rewriting code  [/home/adam/3DO_GameBub/rtl/p3do/MADAM_SE.sv:1370]
+WARNING: [Synth 8-5788] Register LF_A_LAST_reg in module MADAM_SE is has both Set and reset with same priority. This may cause simulation mismatches. Consider rewriting code  [/home/adam/3DO_GameBub/rtl/p3do/MADAM_SE.sv:1378]
+WARNING: [Synth 8-5788] Register LF_A_RUN_reg in module MADAM_SE is has both Set and reset with same priority. This may cause simulation mismatches. Consider rewriting code  [/home/adam/3DO_GameBub/rtl/p3do/MADAM_SE.sv:1246]
+WARNING: [Synth 8-5788] Register LF_A_XY_reg[Y] in module MADAM_SE is has both Set and reset with same priority. This may cause simulation mismatches. Consider rewriting code  [/home/adam/3DO_GameBub/rtl/p3do/MADAM_SE.sv:1404]
+WARNING: [Synth 8-5788] Register LF_A_XY_reg[X] in module MADAM_SE is has both Set and reset with same priority. This may cause simulation mismatches. Consider rewriting code  [/home/adam/3DO_GameBub/rtl/p3do/MADAM_SE.sv:1404]
+WARNING: [Synth 8-5788] Register LF_A_X2_reg in module MADAM_SE is has both Set and reset with same priority. This may cause simulation mismatches. Consider rewriting code  [/home/adam/3DO_GameBub/rtl/p3do/MADAM_SE.sv:1405]
+WARNING: [Synth 8-5788] Register REGIS_B_Y_reg in module MADAM_SE is has both Set and reset with same priority. This may cause simulation mismatches. Consider rewriting code  [/home/adam/3DO_GameBub/rtl/p3do/MADAM_SE.sv:1493]
+WARNING: [Synth 8-5788] Register REGIS_B_OUT_reg in module MADAM_SE is has both Set and reset with same priority. This may cause simulation mismatches. Consider rewriting code  [/home/adam/3DO_GameBub/rtl/p3do/MADAM_SE.sv:1506]
+WARNING: [Synth 8-5788] Register LF_B_LAST_reg in module MADAM_SE is has both Set and reset with same priority. This may cause simulation mismatches. Consider rewriting code  [/home/adam/3DO_GameBub/rtl/p3do/MADAM_SE.sv:1514]
+WARNING: [Synth 8-5788] Register LF_B_RUN_reg in module MADAM_SE is has both Set and reset with same priority. This may cause simulation mismatches. Consider rewriting code  [/home/adam/3DO_GameBub/rtl/p3do/MADAM_SE.sv:1276]
+WARNING: [Synth 8-5788] Register LF_B_XY_reg[Y] in module MADAM_SE is has both Set and reset with same priority. This may cause simulation mismatches. Consider rewriting code  [/home/adam/3DO_GameBub/rtl/p3do/MADAM_SE.sv:1540]
+WARNING: [Synth 8-5788] Register LF_B_XY_reg[X] in module MADAM_SE is has both Set and reset with same priority. This may cause simulation mismatches. Consider rewriting code  [/home/adam/3DO_GameBub/rtl/p3do/MADAM_SE.sv:1540]
+WARNING: [Synth 8-5788] Register LF_B_X2_reg in module MADAM_SE is has both Set and reset with same priority. This may cause simulation mismatches. Consider rewriting code  [/home/adam/3DO_GameBub/rtl/p3do/MADAM_SE.sv:1541]
+WARNING: [Synth 8-5788] Register LF_SKIP_reg in module MADAM_SE is has both Set and reset with same priority. This may cause simulation mismatches. Consider rewriting code  [/home/adam/3DO_GameBub/rtl/p3do/MADAM_SE.sv:1377]
+WARNING: [Synth 8-5788] Register REG_STACK_ADDR_L_reg in module MADAM_SE is has both Set and reset with same priority. This may cause simulation mismatches. Consider rewriting code  [/home/adam/3DO_GameBub/rtl/p3do/MADAM_SE.sv:1767]
+WARNING: [Synth 8-5788] Register REG_STACK_HALF_L_reg in module MADAM_SE is has both Set and reset with same priority. This may cause simulation mismatches. Consider rewriting code  [/home/adam/3DO_GameBub/rtl/p3do/MADAM_SE.sv:1768]
+WARNING: [Synth 8-5788] Register YOFFS1_A_reg in module MADAM_SE is has both Set and reset with same priority. This may cause simulation mismatches. Consider rewriting code  [/home/adam/3DO_GameBub/rtl/p3do/MADAM_SE.sv:2201]
+WARNING: [Synth 8-5788] Register YOFFS1_B_reg in module MADAM_SE is has both Set and reset with same priority. This may cause simulation mismatches. Consider rewriting code  [/home/adam/3DO_GameBub/rtl/p3do/MADAM_SE.sv:2201]
+WARNING: [Synth 8-5788] Register YOFFS2_A_reg in module MADAM_SE is has both Set and reset with same priority. This may cause simulation mismatches. Consider rewriting code  [/home/adam/3DO_GameBub/rtl/p3do/MADAM_SE.sv:2207]
+WARNING: [Synth 8-5788] Register YOFFS2_B_reg in module MADAM_SE is has both Set and reset with same priority. This may cause simulation mismatches. Consider rewriting code  [/home/adam/3DO_GameBub/rtl/p3do/MADAM_SE.sv:2207]
+WARNING: [Synth 8-5788] Register ADDR_FF_A_reg in module MADAM_SE is has both Set and reset with same priority. This may cause simulation mismatches. Consider rewriting code  [/home/adam/3DO_GameBub/rtl/p3do/MADAM_SE.sv:2212]
+WARNING: [Synth 8-5788] Register ADDR_FF_B_reg in module MADAM_SE is has both Set and reset with same priority. This may cause simulation mismatches. Consider rewriting code  [/home/adam/3DO_GameBub/rtl/p3do/MADAM_SE.sv:2212]
+WARNING: [Synth 8-5788] Register DRAW_A_FF_reg in module MADAM_SE is has both Set and reset with same priority. This may cause simulation mismatches. Consider rewriting code  [/home/adam/3DO_GameBub/rtl/p3do/MADAM_SE.sv:2213]
+WARNING: [Synth 8-5788] Register DRAW_B_FF_reg in module MADAM_SE is has both Set and reset with same priority. This may cause simulation mismatches. Consider rewriting code  [/home/adam/3DO_GameBub/rtl/p3do/MADAM_SE.sv:2214]
+WARNING: [Synth 8-5788] Register DST_PAGE_A_reg in module MADAM_SE is has both Set and reset with same priority. This may cause simulation mismatches. Consider rewriting code  [/home/adam/3DO_GameBub/rtl/p3do/MADAM_SE.sv:2219]
+WARNING: [Synth 8-5788] Register DST_PAGE_B_reg in module MADAM_SE is has both Set and reset with same priority. This may cause simulation mismatches. Consider rewriting code  [/home/adam/3DO_GameBub/rtl/p3do/MADAM_SE.sv:2220]
+WARNING: [Synth 8-5788] Register DST_PB_A_reg in module MADAM_SE is has both Set and reset with same priority. This may cause simulation mismatches. Consider rewriting code  [/home/adam/3DO_GameBub/rtl/p3do/MADAM_SE.sv:2221]
+WARNING: [Synth 8-5788] Register DST_PB_B_reg in module MADAM_SE is has both Set and reset with same priority. This may cause simulation mismatches. Consider rewriting code  [/home/adam/3DO_GameBub/rtl/p3do/MADAM_SE.sv:2222]
+WARNING: [Synth 8-5788] Register DST_READ_reg in module MADAM_SE is has both Set and reset with same priority. This may cause simulation mismatches. Consider rewriting code  [/home/adam/3DO_GameBub/rtl/p3do/MADAM_SE.sv:2223]
+WARNING: [Synth 8-5788] Register DST_SUSPEND_reg in module MADAM_SE is has both Set and reset with same priority. This may cause simulation mismatches. Consider rewriting code  [/home/adam/3DO_GameBub/rtl/p3do/MADAM_SE.sv:2162]
+INFO: [Synth 8-6155] done synthesizing module 'MADAM_SE' (32#1) [/home/adam/3DO_GameBub/rtl/p3do/MADAM_SE.sv:8]
+INFO: [Synth 8-6157] synthesizing module 'MADAM_SPORT' [/home/adam/3DO_GameBub/rtl/p3do/MADAM_SPORT.sv:4]
+INFO: [Synth 8-155] case statement is not full and has no default [/home/adam/3DO_GameBub/rtl/p3do/MADAM_SPORT.sv:106]
+WARNING: [Synth 8-5788] Register PEND2_reg in module MADAM_SPORT is has both Set and reset with same priority. This may cause simulation mismatches. Consider rewriting code  [/home/adam/3DO_GameBub/rtl/p3do/MADAM_SPORT.sv:142]
+WARNING: [Synth 8-5788] Register LINE_reg in module MADAM_SPORT is has both Set and reset with same priority. This may cause simulation mismatches. Consider rewriting code  [/home/adam/3DO_GameBub/rtl/p3do/MADAM_SPORT.sv:146]
+WARNING: [Synth 8-5788] Register ENVIDDMA_reg in module MADAM_SPORT is has both Set and reset with same priority. This may cause simulation mismatches. Consider rewriting code  [/home/adam/3DO_GameBub/rtl/p3do/MADAM_SPORT.sv:147]
+WARNING: [Synth 8-5788] Register PEND_reg in module MADAM_SPORT is has both Set and reset with same priority. This may cause simulation mismatches. Consider rewriting code  [/home/adam/3DO_GameBub/rtl/p3do/MADAM_SPORT.sv:158]
+WARNING: [Synth 8-5788] Register PEND_reg in module MADAM_SPORT is has both Set and reset with same priority. This may cause simulation mismatches. Consider rewriting code  [/home/adam/3DO_GameBub/rtl/p3do/MADAM_SPORT.sv:201]
+WARNING: [Synth 8-5788] Register PEND_reg in module MADAM_SPORT is has both Set and reset with same priority. This may cause simulation mismatches. Consider rewriting code  [/home/adam/3DO_GameBub/rtl/p3do/MADAM_SPORT.sv:236]
+INFO: [Synth 8-6155] done synthesizing module 'MADAM_SPORT' (33#1) [/home/adam/3DO_GameBub/rtl/p3do/MADAM_SPORT.sv:4]
+INFO: [Synth 8-6157] synthesizing module 'MADAM_PLAYER' [/home/adam/3DO_GameBub/rtl/p3do/MADAM_PLAYER.sv:4]
+WARNING: [Synth 8-5788] Register DBG_WAIT_CNT_reg in module MADAM_PLAYER is has both Set and reset with same priority. This may cause simulation mismatches. Consider rewriting code  [/home/adam/3DO_GameBub/rtl/p3do/MADAM_PLAYER.sv:69]
+WARNING: [Synth 8-5788] Register SHIFT_STROBE_reg in module MADAM_PLAYER is has both Set and reset with same priority. This may cause simulation mismatches. Consider rewriting code  [/home/adam/3DO_GameBub/rtl/p3do/MADAM_PLAYER.sv:101]
+WARNING: [Synth 8-5788] Register SHIFT_CNT_reg in module MADAM_PLAYER is has both Set and reset with same priority. This may cause simulation mismatches. Consider rewriting code  [/home/adam/3DO_GameBub/rtl/p3do/MADAM_PLAYER.sv:103]
+WARNING: [Synth 8-5788] Register SHIFT_LAST_reg in module MADAM_PLAYER is has both Set and reset with same priority. This may cause simulation mismatches. Consider rewriting code  [/home/adam/3DO_GameBub/rtl/p3do/MADAM_PLAYER.sv:104]
+WARNING: [Synth 8-5788] Register OUT_reg in module MADAM_PLAYER is has both Set and reset with same priority. This may cause simulation mismatches. Consider rewriting code  [/home/adam/3DO_GameBub/rtl/p3do/MADAM_PLAYER.sv:145]
+WARNING: [Synth 8-5788] Register BUF_OUT_reg in module MADAM_PLAYER is has both Set and reset with same priority. This may cause simulation mismatches. Consider rewriting code  [/home/adam/3DO_GameBub/rtl/p3do/MADAM_PLAYER.sv:151]
+INFO: [Synth 8-6155] done synthesizing module 'MADAM_PLAYER' (34#1) [/home/adam/3DO_GameBub/rtl/p3do/MADAM_PLAYER.sv:4]
+INFO: [Synth 8-6157] synthesizing module 'MADAM_SLOWBUS' [/home/adam/3DO_GameBub/rtl/p3do/MADAM_SLOWBUS.sv:4]
+INFO: [Synth 8-6155] done synthesizing module 'MADAM_SLOWBUS' (35#1) [/home/adam/3DO_GameBub/rtl/p3do/MADAM_SLOWBUS.sv:4]
+WARNING: [Synth 8-5788] Register MATH_START_reg in module MADAM is has both Set and reset with same priority. This may cause simulation mismatches. Consider rewriting code  [/home/adam/3DO_GameBub/rtl/p3do/MADAM.sv:257]
+WARNING: [Synth 8-5788] Register MATH_BANK_reg in module MADAM is has both Set and reset with same priority. This may cause simulation mismatches. Consider rewriting code  [/home/adam/3DO_GameBub/rtl/p3do/MADAM.sv:259]
+WARNING: [Synth 8-5788] Register MATH_DIV_N_reg in module MADAM is has both Set and reset with same priority. This may cause simulation mismatches. Consider rewriting code  [/home/adam/3DO_GameBub/rtl/p3do/MADAM.sv:267]
+WARNING: [Synth 8-5788] Register MATH_CALC_ROW_END_reg in module MADAM is has both Set and reset with same priority. This may cause simulation mismatches. Consider rewriting code  [/home/adam/3DO_GameBub/rtl/p3do/MADAM.sv:274]
+WARNING: [Synth 8-5788] Register MATH_CALC_ROW_START_reg in module MADAM is has both Set and reset with same priority. This may cause simulation mismatches. Consider rewriting code  [/home/adam/3DO_GameBub/rtl/p3do/MADAM.sv:274]
+WARNING: [Synth 8-5788] Register MATH_STEP_reg in module MADAM is has both Set and reset with same priority. This may cause simulation mismatches. Consider rewriting code  [/home/adam/3DO_GameBub/rtl/p3do/MADAM.sv:274]
+WARNING: [Synth 8-5788] Register MATH_M_reg in module MADAM is has both Set and reset with same priority. This may cause simulation mismatches. Consider rewriting code  [/home/adam/3DO_GameBub/rtl/p3do/MADAM.sv:286]
+WARNING: [Synth 8-5788] Register MATH_V_reg in module MADAM is has both Set and reset with same priority. This may cause simulation mismatches. Consider rewriting code  [/home/adam/3DO_GameBub/rtl/p3do/MADAM.sv:287]
+WARNING: [Synth 8-5788] Register MATH_CALC_ROW_reg in module MADAM is has both Set and reset with same priority. This may cause simulation mismatches. Consider rewriting code  [/home/adam/3DO_GameBub/rtl/p3do/MADAM.sv:291]
+INFO: [Common 17-14] Message 'Synth 8-5788' appears 100 times and further instances of the messages will be disabled. Use the Tcl command set_msg_config to change the current settings.
+INFO: [Synth 8-6155] done synthesizing module 'MADAM' (36#1) [/home/adam/3DO_GameBub/rtl/p3do/MADAM.sv:2]
+INFO: [Synth 8-6157] synthesizing module 'CLIO' [/home/adam/3DO_GameBub/rtl/p3do/CLIO.sv:5]
+	Parameter REV bound to: 33685504 - type: integer 
+INFO: [Synth 8-155] case statement is not full and has no default [/home/adam/3DO_GameBub/rtl/p3do/CLIO.sv:349]
+INFO: [Synth 8-155] case statement is not full and has no default [/home/adam/3DO_GameBub/rtl/p3do/CLIO.sv:702]
+INFO: [Synth 8-6157] synthesizing module 'CLIO_XBUS' [/home/adam/3DO_GameBub/rtl/p3do/CLIO_XBUS.sv:4]
+INFO: [Synth 8-155] case statement is not full and has no default [/home/adam/3DO_GameBub/rtl/p3do/CLIO_XBUS.sv:84]
+INFO: [Synth 8-6155] done synthesizing module 'CLIO_XBUS' (37#1) [/home/adam/3DO_GameBub/rtl/p3do/CLIO_XBUS.sv:4]
+INFO: [Synth 8-6157] synthesizing module 'CLIO_DMA_FIFO' [/home/adam/3DO_GameBub/rtl/p3do/CLIO_mem.sv:5]
+INFO: [Synth 8-6157] synthesizing module 'altdpram__parameterized7' [/home/adam/3DO_GameBub/rtl/compat/altera_compat.sv:14]
+	Parameter width bound to: 32 - type: integer 
+	Parameter widthad bound to: 3 - type: integer 
+	Parameter numwords bound to: 0 - type: integer 
+	Parameter width_byteena bound to: 1 - type: integer 
+	Parameter byte_size bound to: 8 - type: integer 
+	Parameter indata_aclr bound to: OFF - type: string 
+	Parameter indata_reg bound to: INCLOCK - type: string 
+	Parameter intended_device_family bound to: Cyclone V - type: string 
+	Parameter lpm_type bound to: altdpram - type: string 
+	Parameter lpm_hint bound to: UNUSED - type: string 
+	Parameter outdata_aclr bound to: OFF - type: string 
+	Parameter outdata_reg bound to: UNREGISTERED - type: string 
+	Parameter ram_block_type bound to: MLAB - type: string 
+	Parameter rdaddress_aclr bound to: OFF - type: string 
+	Parameter rdaddress_reg bound to: UNREGISTERED - type: string 
+	Parameter rdcontrol_aclr bound to: OFF - type: string 
+	Parameter rdcontrol_reg bound to: UNREGISTERED - type: string 
+	Parameter read_during_write_mode_mixed_ports bound to: CONSTRAINED_DONT_CARE - type: string 
+	Parameter wraddress_aclr bound to: OFF - type: string 
+	Parameter wraddress_reg bound to: INCLOCK - type: string 
+	Parameter wrcontrol_aclr bound to: OFF - type: string 
+	Parameter wrcontrol_reg bound to: INCLOCK - type: string 
+	Parameter use_eab bound to: ON - type: string 
+	Parameter power_up_uninitialized bound to: FALSE - type: string 
+	Parameter DEPTH bound to: 8 - type: integer 
+	Parameter LANE_BITS bound to: 32 - type: integer 
+INFO: [Synth 8-6155] done synthesizing module 'altdpram__parameterized7' (37#1) [/home/adam/3DO_GameBub/rtl/compat/altera_compat.sv:14]
+WARNING: [Synth 8-350] instance 'altdpram_component' of module 'altdpram' requires 14 connections, but only 12 given [/home/adam/3DO_GameBub/rtl/p3do/CLIO_mem.sv:67]
+INFO: [Synth 8-6155] done synthesizing module 'CLIO_DMA_FIFO' (38#1) [/home/adam/3DO_GameBub/rtl/p3do/CLIO_mem.sv:5]
+INFO: [Synth 8-6157] synthesizing module 'CLIO_DSP' [/home/adam/3DO_GameBub/rtl/p3do/CLIO_DSP.sv:8]
+INFO: [Synth 8-155] case statement is not full and has no default [/home/adam/3DO_GameBub/rtl/p3do/CLIO_DSP.sv:479]
+INFO: [Synth 8-6157] synthesizing module 'CLIO_DSP_IRAM' [/home/adam/3DO_GameBub/rtl/p3do/CLIO_mem.sv:516]
+INFO: [Synth 8-6157] synthesizing module 'altdpram__parameterized8' [/home/adam/3DO_GameBub/rtl/compat/altera_compat.sv:14]
+	Parameter width bound to: 16 - type: integer 
+	Parameter widthad bound to: 8 - type: integer 
+	Parameter numwords bound to: 0 - type: integer 
+	Parameter width_byteena bound to: 1 - type: integer 
+	Parameter byte_size bound to: 8 - type: integer 
+	Parameter indata_aclr bound to: OFF - type: string 
+	Parameter indata_reg bound to: INCLOCK - type: string 
+	Parameter intended_device_family bound to: Cyclone V - type: string 
+	Parameter lpm_type bound to: altdpram - type: string 
+	Parameter lpm_hint bound to: UNUSED - type: string 
+	Parameter outdata_aclr bound to: OFF - type: string 
+	Parameter outdata_reg bound to: UNREGISTERED - type: string 
+	Parameter ram_block_type bound to: MLAB - type: string 
+	Parameter rdaddress_aclr bound to: OFF - type: string 
+	Parameter rdaddress_reg bound to: UNREGISTERED - type: string 
+	Parameter rdcontrol_aclr bound to: OFF - type: string 
+	Parameter rdcontrol_reg bound to: UNREGISTERED - type: string 
+	Parameter read_during_write_mode_mixed_ports bound to: CONSTRAINED_DONT_CARE - type: string 
+	Parameter wraddress_aclr bound to: OFF - type: string 
+	Parameter wraddress_reg bound to: INCLOCK - type: string 
+	Parameter wrcontrol_aclr bound to: OFF - type: string 
+	Parameter wrcontrol_reg bound to: INCLOCK - type: string 
+	Parameter use_eab bound to: ON - type: string 
+	Parameter power_up_uninitialized bound to: FALSE - type: string 
+	Parameter DEPTH bound to: 256 - type: integer 
+	Parameter LANE_BITS bound to: 16 - type: integer 
+INFO: [Synth 8-6155] done synthesizing module 'altdpram__parameterized8' (38#1) [/home/adam/3DO_GameBub/rtl/compat/altera_compat.sv:14]
+WARNING: [Synth 8-350] instance 'altdpram_component' of module 'altdpram' requires 14 connections, but only 12 given [/home/adam/3DO_GameBub/rtl/p3do/CLIO_mem.sv:549]
+INFO: [Synth 8-6155] done synthesizing module 'CLIO_DSP_IRAM' (39#1) [/home/adam/3DO_GameBub/rtl/p3do/CLIO_mem.sv:516]
+INFO: [Synth 8-6155] done synthesizing module 'CLIO_DSP' (40#1) [/home/adam/3DO_GameBub/rtl/p3do/CLIO_DSP.sv:8]
+INFO: [Synth 8-6157] synthesizing module 'CLIO_DSP_NRAM' [/home/adam/3DO_GameBub/rtl/p3do/CLIO_mem.sv:107]
+INFO: [Synth 8-6157] synthesizing module 'altdpram__parameterized9' [/home/adam/3DO_GameBub/rtl/compat/altera_compat.sv:14]
+	Parameter width bound to: 16 - type: integer 
+	Parameter widthad bound to: 9 - type: integer 
+	Parameter numwords bound to: 0 - type: integer 
+	Parameter width_byteena bound to: 1 - type: integer 
+	Parameter byte_size bound to: 8 - type: integer 
+	Parameter indata_aclr bound to: OFF - type: string 
+	Parameter indata_reg bound to: INCLOCK - type: string 
+	Parameter intended_device_family bound to: Cyclone V - type: string 
+	Parameter lpm_type bound to: altdpram - type: string 
+	Parameter lpm_hint bound to: UNUSED - type: string 
+	Parameter outdata_aclr bound to: OFF - type: string 
+	Parameter outdata_reg bound to: UNREGISTERED - type: string 
+	Parameter ram_block_type bound to: MLAB - type: string 
+	Parameter rdaddress_aclr bound to: OFF - type: string 
+	Parameter rdaddress_reg bound to: UNREGISTERED - type: string 
+	Parameter rdcontrol_aclr bound to: OFF - type: string 
+	Parameter rdcontrol_reg bound to: UNREGISTERED - type: string 
+	Parameter read_during_write_mode_mixed_ports bound to: CONSTRAINED_DONT_CARE - type: string 
+	Parameter wraddress_aclr bound to: OFF - type: string 
+	Parameter wraddress_reg bound to: INCLOCK - type: string 
+	Parameter wrcontrol_aclr bound to: OFF - type: string 
+	Parameter wrcontrol_reg bound to: INCLOCK - type: string 
+	Parameter use_eab bound to: ON - type: string 
+	Parameter power_up_uninitialized bound to: FALSE - type: string 
+	Parameter DEPTH bound to: 512 - type: integer 
+	Parameter LANE_BITS bound to: 16 - type: integer 
+INFO: [Synth 8-6155] done synthesizing module 'altdpram__parameterized9' (40#1) [/home/adam/3DO_GameBub/rtl/compat/altera_compat.sv:14]
+WARNING: [Synth 8-350] instance 'altdpram_component' of module 'altdpram' requires 14 connections, but only 12 given [/home/adam/3DO_GameBub/rtl/p3do/CLIO_mem.sv:147]
+INFO: [Synth 8-6155] done synthesizing module 'CLIO_DSP_NRAM' (41#1) [/home/adam/3DO_GameBub/rtl/p3do/CLIO_mem.sv:107]
+INFO: [Synth 8-6157] synthesizing module 'CLIO_DSP_EIRAM' [/home/adam/3DO_GameBub/rtl/p3do/CLIO_mem.sv:188]
+INFO: [Synth 8-6157] synthesizing module 'altdpram__parameterized10' [/home/adam/3DO_GameBub/rtl/compat/altera_compat.sv:14]
+	Parameter width bound to: 16 - type: integer 
+	Parameter widthad bound to: 7 - type: integer 
+	Parameter numwords bound to: 0 - type: integer 
+	Parameter width_byteena bound to: 1 - type: integer 
+	Parameter byte_size bound to: 8 - type: integer 
+	Parameter indata_aclr bound to: OFF - type: string 
+	Parameter indata_reg bound to: INCLOCK - type: string 
+	Parameter intended_device_family bound to: Cyclone V - type: string 
+	Parameter lpm_type bound to: altdpram - type: string 
+	Parameter lpm_hint bound to: UNUSED - type: string 
+	Parameter outdata_aclr bound to: OFF - type: string 
+	Parameter outdata_reg bound to: UNREGISTERED - type: string 
+	Parameter ram_block_type bound to: MLAB - type: string 
+	Parameter rdaddress_aclr bound to: OFF - type: string 
+	Parameter rdaddress_reg bound to: UNREGISTERED - type: string 
+	Parameter rdcontrol_aclr bound to: OFF - type: string 
+	Parameter rdcontrol_reg bound to: UNREGISTERED - type: string 
+	Parameter read_during_write_mode_mixed_ports bound to: CONSTRAINED_DONT_CARE - type: string 
+	Parameter wraddress_aclr bound to: OFF - type: string 
+	Parameter wraddress_reg bound to: INCLOCK - type: string 
+	Parameter wrcontrol_aclr bound to: OFF - type: string 
+	Parameter wrcontrol_reg bound to: INCLOCK - type: string 
+	Parameter use_eab bound to: ON - type: string 
+	Parameter power_up_uninitialized bound to: FALSE - type: string 
+	Parameter DEPTH bound to: 128 - type: integer 
+	Parameter LANE_BITS bound to: 16 - type: integer 
+INFO: [Synth 8-6155] done synthesizing module 'altdpram__parameterized10' (41#1) [/home/adam/3DO_GameBub/rtl/compat/altera_compat.sv:14]
+WARNING: [Synth 8-350] instance 'altdpram_component' of module 'altdpram' requires 14 connections, but only 12 given [/home/adam/3DO_GameBub/rtl/p3do/CLIO_mem.sv:221]
+INFO: [Synth 8-6155] done synthesizing module 'CLIO_DSP_EIRAM' (42#1) [/home/adam/3DO_GameBub/rtl/p3do/CLIO_mem.sv:188]
+INFO: [Synth 8-6157] synthesizing module 'CLIO_DSP_EORAM' [/home/adam/3DO_GameBub/rtl/p3do/CLIO_mem.sv:263]
+WARNING: [Synth 8-350] instance 'altdpram_component' of module 'altdpram' requires 14 connections, but only 12 given [/home/adam/3DO_GameBub/rtl/p3do/CLIO_mem.sv:296]
+INFO: [Synth 8-6155] done synthesizing module 'CLIO_DSP_EORAM' (43#1) [/home/adam/3DO_GameBub/rtl/p3do/CLIO_mem.sv:263]
+INFO: [Synth 8-6157] synthesizing module 'CLIO_DSP_FIFO' [/home/adam/3DO_GameBub/rtl/p3do/CLIO_mem.sv:337]
+INFO: [Synth 8-6157] synthesizing module 'altdpram__parameterized11' [/home/adam/3DO_GameBub/rtl/compat/altera_compat.sv:14]
+	Parameter width bound to: 16 - type: integer 
+	Parameter widthad bound to: 3 - type: integer 
+	Parameter numwords bound to: 0 - type: integer 
+	Parameter width_byteena bound to: 1 - type: integer 
+	Parameter byte_size bound to: 8 - type: integer 
+	Parameter indata_aclr bound to: OFF - type: string 
+	Parameter indata_reg bound to: INCLOCK - type: string 
+	Parameter intended_device_family bound to: Cyclone V - type: string 
+	Parameter lpm_type bound to: altdpram - type: string 
+	Parameter lpm_hint bound to: UNUSED - type: string 
+	Parameter outdata_aclr bound to: OFF - type: string 
+	Parameter outdata_reg bound to: UNREGISTERED - type: string 
+	Parameter ram_block_type bound to: MLAB - type: string 
+	Parameter rdaddress_aclr bound to: OFF - type: string 
+	Parameter rdaddress_reg bound to: UNREGISTERED - type: string 
+	Parameter rdcontrol_aclr bound to: OFF - type: string 
+	Parameter rdcontrol_reg bound to: UNREGISTERED - type: string 
+	Parameter read_during_write_mode_mixed_ports bound to: CONSTRAINED_DONT_CARE - type: string 
+	Parameter wraddress_aclr bound to: OFF - type: string 
+	Parameter wraddress_reg bound to: INCLOCK - type: string 
+	Parameter wrcontrol_aclr bound to: OFF - type: string 
+	Parameter wrcontrol_reg bound to: INCLOCK - type: string 
+	Parameter use_eab bound to: ON - type: string 
+	Parameter power_up_uninitialized bound to: FALSE - type: string 
+	Parameter DEPTH bound to: 8 - type: integer 
+	Parameter LANE_BITS bound to: 16 - type: integer 
+INFO: [Synth 8-6155] done synthesizing module 'altdpram__parameterized11' (43#1) [/home/adam/3DO_GameBub/rtl/compat/altera_compat.sv:14]
+WARNING: [Synth 8-350] instance 'altdpram_component' of module 'altdpram' requires 14 connections, but only 12 given [/home/adam/3DO_GameBub/rtl/p3do/CLIO_mem.sv:397]
+INFO: [Synth 8-6155] done synthesizing module 'CLIO_DSP_FIFO' (44#1) [/home/adam/3DO_GameBub/rtl/p3do/CLIO_mem.sv:337]
+INFO: [Synth 8-6157] synthesizing module 'CLIO_VIDEO' [/home/adam/3DO_GameBub/rtl/p3do/CLIO_VIDEO.sv:9]
+INFO: [Synth 8-6157] synthesizing module 'CLIO_CLUT' [/home/adam/3DO_GameBub/rtl/p3do/CLIO_CLUT.sv:1]
+INFO: [Synth 8-6157] synthesizing module 'CLIO_COL_TBL' [/home/adam/3DO_GameBub/rtl/p3do/CLIO_mem.sv:438]
+INFO: [Synth 8-6157] synthesizing module 'altdpram__parameterized12' [/home/adam/3DO_GameBub/rtl/compat/altera_compat.sv:14]
+	Parameter width bound to: 8 - type: integer 
+	Parameter widthad bound to: 7 - type: integer 
+	Parameter numwords bound to: 0 - type: integer 
+	Parameter width_byteena bound to: 1 - type: integer 
+	Parameter byte_size bound to: 8 - type: integer 
+	Parameter indata_aclr bound to: OFF - type: string 
+	Parameter indata_reg bound to: INCLOCK - type: string 
+	Parameter intended_device_family bound to: Cyclone V - type: string 
+	Parameter lpm_type bound to: altdpram - type: string 
+	Parameter lpm_hint bound to: UNUSED - type: string 
+	Parameter outdata_aclr bound to: OFF - type: string 
+	Parameter outdata_reg bound to: UNREGISTERED - type: string 
+	Parameter ram_block_type bound to: MLAB - type: string 
+	Parameter rdaddress_aclr bound to: OFF - type: string 
+	Parameter rdaddress_reg bound to: UNREGISTERED - type: string 
+	Parameter rdcontrol_aclr bound to: OFF - type: string 
+	Parameter rdcontrol_reg bound to: UNREGISTERED - type: string 
+	Parameter read_during_write_mode_mixed_ports bound to: CONSTRAINED_DONT_CARE - type: string 
+	Parameter wraddress_aclr bound to: OFF - type: string 
+	Parameter wraddress_reg bound to: INCLOCK - type: string 
+	Parameter wrcontrol_aclr bound to: OFF - type: string 
+	Parameter wrcontrol_reg bound to: INCLOCK - type: string 
+	Parameter use_eab bound to: ON - type: string 
+	Parameter power_up_uninitialized bound to: FALSE - type: string 
+	Parameter DEPTH bound to: 128 - type: integer 
+	Parameter LANE_BITS bound to: 8 - type: integer 
+INFO: [Synth 8-6155] done synthesizing module 'altdpram__parameterized12' (44#1) [/home/adam/3DO_GameBub/rtl/compat/altera_compat.sv:14]
+WARNING: [Synth 8-350] instance 'altdpram_component' of module 'altdpram' requires 14 connections, but only 12 given [/home/adam/3DO_GameBub/rtl/p3do/CLIO_mem.sv:475]
+INFO: [Synth 8-6155] done synthesizing module 'CLIO_COL_TBL' (45#1) [/home/adam/3DO_GameBub/rtl/p3do/CLIO_mem.sv:438]
+INFO: [Synth 8-6155] done synthesizing module 'CLIO_CLUT' (46#1) [/home/adam/3DO_GameBub/rtl/p3do/CLIO_CLUT.sv:1]
+INFO: [Synth 8-6157] synthesizing module 'CLIO_24DESTACKER' [/home/adam/3DO_GameBub/rtl/p3do/CLIO_VIDEO.sv:424]
+INFO: [Synth 8-6155] done synthesizing module 'CLIO_24DESTACKER' (47#1) [/home/adam/3DO_GameBub/rtl/p3do/CLIO_VIDEO.sv:424]
+INFO: [Synth 8-6157] synthesizing module 'CLIO_INTERPOL' [/home/adam/3DO_GameBub/rtl/p3do/CLIO_INTERPOL.sv:1]
+INFO: [Synth 8-6155] done synthesizing module 'CLIO_INTERPOL' (48#1) [/home/adam/3DO_GameBub/rtl/p3do/CLIO_INTERPOL.sv:1]
+INFO: [Synth 8-6155] done synthesizing module 'CLIO_VIDEO' (49#1) [/home/adam/3DO_GameBub/rtl/p3do/CLIO_VIDEO.sv:9]
+INFO: [Synth 8-6155] done synthesizing module 'CLIO' (50#1) [/home/adam/3DO_GameBub/rtl/p3do/CLIO.sv:5]
+WARNING: [Synth 8-350] instance 'clio' of module 'CLIO' requires 50 connections, but only 49 given [/home/adam/3DO_GameBub/rtl/p3do/P3DO.sv:335]
+INFO: [Synth 8-6157] synthesizing module 'OSA' [/home/adam/3DO_GameBub/rtl/p3do/OSA.sv:1]
+	Parameter POLL_STAT_INT_EN bound to: 32'sb00000000000000000000000000000000 
+	Parameter POLL_READ_INT_EN bound to: 32'sb00000000000000000000000000000001 
+	Parameter POLL_WRIT_INT_EN bound to: 32'sb00000000000000000000000000000010 
+	Parameter POLL_STAT_VALID bound to: 32'sb00000000000000000000000000000100 
+	Parameter POLL_READ_VALID bound to: 32'sb00000000000000000000000000000101 
+	Parameter POLL_WRIT_VALID bound to: 32'sb00000000000000000000000000000110 
+	Parameter POLL_MEDIA_ACCESS bound to: 32'sb00000000000000000000000000000111 
+INFO: [Synth 8-6155] done synthesizing module 'OSA' (51#1) [/home/adam/3DO_GameBub/rtl/p3do/OSA.sv:1]
+WARNING: [Synth 8-350] instance 'osa' of module 'OSA' requires 25 connections, but only 24 given [/home/adam/3DO_GameBub/rtl/p3do/P3DO.sv:408]
+INFO: [Synth 8-6157] synthesizing module 'VE' [/home/adam/3DO_GameBub/rtl/p3do/VE.sv:1]
+INFO: [Synth 8-6157] synthesizing module 'VE_LINE_BUF' [/home/adam/3DO_GameBub/rtl/p3do/3DO_mem.sv:379]
+INFO: [Synth 8-5534] Detected attribute (* ram_style = "block" *) [/home/adam/3DO_GameBub/rtl/p3do/3DO_mem.sv:394]
+INFO: [Synth 8-6155] done synthesizing module 'VE_LINE_BUF' (52#1) [/home/adam/3DO_GameBub/rtl/p3do/3DO_mem.sv:379]
+INFO: [Synth 8-6155] done synthesizing module 'VE' (53#1) [/home/adam/3DO_GameBub/rtl/p3do/VE.sv:1]
+WARNING: [Synth 8-350] instance 've' of module 'VE' requires 20 connections, but only 18 given [/home/adam/3DO_GameBub/rtl/p3do/P3DO.sv:439]
+INFO: [Synth 8-6155] done synthesizing module 'P3DO' (54#1) [/home/adam/3DO_GameBub/rtl/p3do/P3DO.sv:5]
+INFO: [Synth 8-6157] synthesizing module 'P3DO_CDROM' [/home/adam/3DO_GameBub/rtl/p3do/3DO_CDROM.sv:1]
+	Parameter ID_STAT bound to: 96'b100000110000000000010000000000000000000100000000000000000000000000000000000000000000000000000000 
+	Parameter ERROR_NO_ERR bound to: 8'b00000000 
+	Parameter ERROR_DISC_OUT bound to: 8'b00010101 
+INFO: [Synth 8-6157] synthesizing module 'dpram_dif' [/home/adam/3DO_GameBub/rtl/compat/altera_compat.sv:86]
+	Parameter addr_width_a bound to: 10 - type: integer 
+	Parameter data_width_a bound to: 16 - type: integer 
+	Parameter addr_width_b bound to: 11 - type: integer 
+	Parameter data_width_b bound to: 8 - type: integer 
+	Parameter RATIO bound to: 2 - type: integer 
+INFO: [Synth 8-6155] done synthesizing module 'dpram_dif' (55#1) [/home/adam/3DO_GameBub/rtl/compat/altera_compat.sv:86]
+WARNING: [Synth 8-350] instance 'disc_toc' of module 'dpram_dif' requires 9 connections, but only 6 given [/home/adam/3DO_GameBub/rtl/p3do/3DO_CDROM.sv:112]
+WARNING: [Synth 8-350] instance 'disc_data' of module 'dpram_dif' requires 9 connections, but only 6 given [/home/adam/3DO_GameBub/rtl/p3do/3DO_CDROM.sv:126]
+INFO: [Synth 8-155] case statement is not full and has no default [/home/adam/3DO_GameBub/rtl/p3do/3DO_CDROM.sv:228]
+INFO: [Synth 8-155] case statement is not full and has no default [/home/adam/3DO_GameBub/rtl/p3do/3DO_CDROM.sv:395]
+INFO: [Synth 8-155] case statement is not full and has no default [/home/adam/3DO_GameBub/rtl/p3do/3DO_CDROM.sv:324]
+INFO: [Synth 8-6155] done synthesizing module 'P3DO_CDROM' (56#1) [/home/adam/3DO_GameBub/rtl/p3do/3DO_CDROM.sv:1]
+INFO: [Synth 8-6157] synthesizing module 'cdd_emu' [/home/adam/3DO_GameBub/rtl/gamebub/cdd_emu.sv:23]
+INFO: [Synth 8-5534] Detected attribute (* ram_style = "block" *) [/home/adam/3DO_GameBub/rtl/gamebub/cdd_emu.sv:79]
+INFO: [Synth 8-6155] done synthesizing module 'cdd_emu' (57#1) [/home/adam/3DO_GameBub/rtl/gamebub/cdd_emu.sv:23]
+INFO: [Synth 8-6157] synthesizing module 'HPS2PAD' [/home/adam/3DO_GameBub/rtl/p3do/hps2pad.sv:1]
+INFO: [Synth 8-6155] done synthesizing module 'HPS2PAD' (58#1) [/home/adam/3DO_GameBub/rtl/p3do/hps2pad.sv:1]
+INFO: [Synth 8-6157] synthesizing module 'sdram_3do' [/home/adam/3DO_GameBub/rtl/gamebub/sdram_3do.sv:29]
+	Parameter CLK_HZ bound to: 32'sb00000101111101011110000100000000 
+	Parameter POWERUP_US bound to: 32'sb00000000000000000000000011001000 
+	Parameter REFRESH_CYCLES bound to: 32'sb00000000000000000000010111011100 
+	Parameter READ_STAGE bound to: 32'sb00000000000000000000000000000101 
+	Parameter RASCAS_DELAY bound to: 3'b010 
+	Parameter BURST bound to: 3'b000 
+	Parameter ACCESS_TYPE bound to: 1'b0 
+	Parameter CAS_LATENCY bound to: 3'b010 
+	Parameter OP_MODE bound to: 2'b00 
+	Parameter NO_WRITE_BURST bound to: 1'b1 
+	Parameter MODE bound to: 13'b0001000100000 
+	Parameter STATE_IDLE bound to: 3'b000 
+	Parameter STATE_START bound to: 3'b001 
+	Parameter STATE_CONT bound to: 3'b011 
+	Parameter STATE_READY bound to: 3'b110 
+	Parameter STATE_LAST bound to: 3'b110 
+	Parameter MODE_NORMAL bound to: 2'b00 
+	Parameter MODE_RESET bound to: 2'b01 
+	Parameter MODE_LDM bound to: 2'b10 
+	Parameter MODE_PRE bound to: 2'b11 
+	Parameter POWERUP_CYCLES bound to: 32'sb00000000000000000100111000100000 
+	Parameter CTRL_IDLE bound to: 2'b00 
+	Parameter CTRL_RAS bound to: 2'b01 
+	Parameter CTRL_CAS bound to: 2'b10 
+	Parameter CTRL_PRE bound to: 2'b11 
+	Parameter SLOT_PARK bound to: 4'b1000 
+	Parameter CMD_NOP bound to: 3'b111 
+	Parameter CMD_ACTIVE bound to: 3'b011 
+	Parameter CMD_READ bound to: 3'b101 
+	Parameter CMD_WRITE bound to: 3'b100 
+	Parameter CMD_PRECHARGE bound to: 3'b010 
+	Parameter CMD_AUTO_REFRESH bound to: 3'b001 
+	Parameter CMD_LOAD_MODE bound to: 3'b000 
+INFO: [Synth 8-5534] Detected attribute (* IOB = "TRUE" *) [/home/adam/3DO_GameBub/rtl/gamebub/sdram_3do.sv:606]
+INFO: [Synth 8-226] default block is never used [/home/adam/3DO_GameBub/rtl/gamebub/sdram_3do.sv:381]
+INFO: [Synth 8-155] case statement is not full and has no default [/home/adam/3DO_GameBub/rtl/gamebub/sdram_3do.sv:658]
+INFO: [Synth 8-6157] synthesizing module 'ODDR' [/opt/tools/Xilinx/Vivado/2018.3/scripts/rt/data/unisim_comp.v:31641]
+	Parameter DDR_CLK_EDGE bound to: OPPOSITE_EDGE - type: string 
+	Parameter INIT bound to: 1'b0 
+	Parameter IS_C_INVERTED bound to: 1'b0 
+	Parameter IS_D1_INVERTED bound to: 1'b0 
+	Parameter IS_D2_INVERTED bound to: 1'b0 
+	Parameter SRTYPE bound to: SYNC - type: string 
+INFO: [Synth 8-6155] done synthesizing module 'ODDR' (59#1) [/opt/tools/Xilinx/Vivado/2018.3/scripts/rt/data/unisim_comp.v:31641]
+WARNING: [Synth 8-5858] RAM state_reg from Abstract Data Type (record/struct) for this pattern/configuration is not supported. This will most likely be implemented in registers
+INFO: [Synth 8-4471] merging register 'tdm_s0_reg[ALL]' into 'tdm_s0_reg[SEC]' [/home/adam/3DO_GameBub/rtl/gamebub/sdram_3do.sv:308]
+INFO: [Synth 8-6155] done synthesizing module 'sdram_3do' (60#1) [/home/adam/3DO_GameBub/rtl/gamebub/sdram_3do.sv:29]
+INFO: [Synth 8-6157] synthesizing module 'sec_arb' [/home/adam/3DO_GameBub/rtl/gamebub/sec_arb.sv:8]
+	Parameter N bound to: 32'sb00000000000000000000000000000011 
+	Parameter W bound to: 2 - type: integer 
+INFO: [Synth 8-6155] done synthesizing module 'sec_arb' (61#1) [/home/adam/3DO_GameBub/rtl/gamebub/sec_arb.sv:8]
+INFO: [Synth 8-6157] synthesizing module 'P3DO_VRAM' [/home/adam/3DO_GameBub/rtl/p3do/vram.sv:1]
+	Parameter USE_BRAM bound to: 0 - type: integer 
+INFO: [Synth 8-6157] synthesizing module 'VRAM_MEM' [/home/adam/3DO_GameBub/rtl/p3do/3DO_mem.sv:314]
+	Parameter addr_width bound to: 16 - type: integer 
+	Parameter LANE_AW bound to: 12 - type: integer 
+INFO: [Synth 8-5534] Detected attribute (* ram_style = "block" *) [/home/adam/3DO_GameBub/rtl/p3do/3DO_mem.sv:347]
+INFO: [Synth 8-6155] done synthesizing module 'VRAM_MEM' (62#1) [/home/adam/3DO_GameBub/rtl/p3do/3DO_mem.sv:314]
+INFO: [Synth 8-6157] synthesizing module 'VRAM_MEM__parameterized0' [/home/adam/3DO_GameBub/rtl/p3do/3DO_mem.sv:314]
+	Parameter addr_width bound to: 15 - type: integer 
+	Parameter LANE_AW bound to: 11 - type: integer 
+INFO: [Synth 8-6155] done synthesizing module 'VRAM_MEM__parameterized0' (62#1) [/home/adam/3DO_GameBub/rtl/p3do/3DO_mem.sv:314]
+INFO: [Synth 8-6157] synthesizing module 'VRAM_MEM__parameterized1' [/home/adam/3DO_GameBub/rtl/p3do/3DO_mem.sv:314]
+	Parameter addr_width bound to: 14 - type: integer 
+	Parameter LANE_AW bound to: 10 - type: integer 
+INFO: [Synth 8-6155] done synthesizing module 'VRAM_MEM__parameterized1' (62#1) [/home/adam/3DO_GameBub/rtl/p3do/3DO_mem.sv:314]
+INFO: [Synth 8-6157] synthesizing module 'VRAM_SHIFTREG' [/home/adam/3DO_GameBub/rtl/p3do/3DO_mem.sv:1]
+	Parameter addr_width bound to: 9 - type: integer 
+INFO: [Synth 8-6157] synthesizing module 'altdpram__parameterized13' [/home/adam/3DO_GameBub/rtl/compat/altera_compat.sv:14]
+	Parameter width bound to: 32 - type: integer 
+	Parameter widthad bound to: 5 - type: integer 
+	Parameter numwords bound to: 0 - type: integer 
+	Parameter width_byteena bound to: 1 - type: integer 
+	Parameter byte_size bound to: 8 - type: integer 
+	Parameter indata_aclr bound to: OFF - type: string 
+	Parameter indata_reg bound to: INCLOCK - type: string 
+	Parameter intended_device_family bound to: Cyclone V - type: string 
+	Parameter lpm_type bound to: altdpram - type: string 
+	Parameter lpm_hint bound to: UNUSED - type: string 
+	Parameter outdata_aclr bound to: OFF - type: string 
+	Parameter outdata_reg bound to: UNREGISTERED - type: string 
+	Parameter ram_block_type bound to: MLAB - type: string 
+	Parameter rdaddress_aclr bound to: OFF - type: string 
+	Parameter rdaddress_reg bound to: UNREGISTERED - type: string 
+	Parameter rdcontrol_aclr bound to: OFF - type: string 
+	Parameter rdcontrol_reg bound to: UNREGISTERED - type: string 
+	Parameter read_during_write_mode_mixed_ports bound to: CONSTRAINED_DONT_CARE - type: string 
+	Parameter wraddress_aclr bound to: OFF - type: string 
+	Parameter wraddress_reg bound to: INCLOCK - type: string 
+	Parameter wrcontrol_aclr bound to: OFF - type: string 
+	Parameter wrcontrol_reg bound to: INCLOCK - type: string 
+	Parameter use_eab bound to: ON - type: string 
+	Parameter power_up_uninitialized bound to: FALSE - type: string 
+	Parameter DEPTH bound to: 32 - type: integer 
+	Parameter LANE_BITS bound to: 32 - type: integer 
+INFO: [Synth 8-6155] done synthesizing module 'altdpram__parameterized13' (62#1) [/home/adam/3DO_GameBub/rtl/compat/altera_compat.sv:14]
+INFO: [Synth 8-6155] done synthesizing module 'VRAM_SHIFTREG' (63#1) [/home/adam/3DO_GameBub/rtl/p3do/3DO_mem.sv:1]
+INFO: [Synth 8-4471] merging register 'MEM2_SQ_SEL_reg' into 'MEM4_SQ_SEL_reg' [/home/adam/3DO_GameBub/rtl/p3do/vram.sv:277]
+INFO: [Synth 8-6155] done synthesizing module 'P3DO_VRAM' (64#1) [/home/adam/3DO_GameBub/rtl/p3do/vram.sv:1]
+INFO: [Synth 8-6157] synthesizing module 'ddram' [/home/adam/3DO_GameBub/rtl/p3do/ddram.sv:1]
+INFO: [Synth 8-6157] synthesizing module 'VRAM_FW' [/home/adam/3DO_GameBub/rtl/p3do/ddram.sv:660]
+	Parameter addr_width bound to: 18 - type: integer 
+	Parameter LANE_AW bound to: 13 - type: integer 
+INFO: [Synth 8-5534] Detected attribute (* ram_style = "block" *) [/home/adam/3DO_GameBub/rtl/p3do/ddram.sv:686]
+INFO: [Synth 8-6155] done synthesizing module 'VRAM_FW' (65#1) [/home/adam/3DO_GameBub/rtl/p3do/ddram.sv:660]
+INFO: [Synth 8-6157] synthesizing module 'VRAM_COLOR' [/home/adam/3DO_GameBub/rtl/p3do/ddram.sv:714]
+	Parameter addr_width bound to: 18 - type: integer 
+INFO: [Synth 8-5534] Detected attribute (* ram_style = "block" *) [/home/adam/3DO_GameBub/rtl/p3do/ddram.sv:724]
+INFO: [Synth 8-6155] done synthesizing module 'VRAM_COLOR' (66#1) [/home/adam/3DO_GameBub/rtl/p3do/ddram.sv:714]
+INFO: [Synth 8-155] case statement is not full and has no default [/home/adam/3DO_GameBub/rtl/p3do/ddram.sv:290]
+INFO: [Synth 8-155] case statement is not full and has no default [/home/adam/3DO_GameBub/rtl/p3do/ddram.sv:299]
+INFO: [Synth 8-6157] synthesizing module 'ddr_cache_ram' [/home/adam/3DO_GameBub/rtl/p3do/ddram.sv:602]
+	Parameter wa bound to: 4 - type: integer 
+INFO: [Synth 8-6157] synthesizing module 'altdpram__parameterized14' [/home/adam/3DO_GameBub/rtl/compat/altera_compat.sv:14]
+	Parameter width bound to: 32 - type: integer 
+	Parameter widthad bound to: 4 - type: integer 
+	Parameter numwords bound to: 0 - type: integer 
+	Parameter width_byteena bound to: 4 - type: integer 
+	Parameter byte_size bound to: 8 - type: integer 
+	Parameter indata_aclr bound to: OFF - type: string 
+	Parameter indata_reg bound to: INCLOCK - type: string 
+	Parameter intended_device_family bound to: Cyclone V - type: string 
+	Parameter lpm_type bound to: altdpram - type: string 
+	Parameter lpm_hint bound to: UNUSED - type: string 
+	Parameter outdata_aclr bound to: OFF - type: string 
+	Parameter outdata_reg bound to: UNREGISTERED - type: string 
+	Parameter ram_block_type bound to: MLAB - type: string 
+	Parameter rdaddress_aclr bound to: OFF - type: string 
+	Parameter rdaddress_reg bound to: UNREGISTERED - type: string 
+	Parameter rdcontrol_aclr bound to: OFF - type: string 
+	Parameter rdcontrol_reg bound to: UNREGISTERED - type: string 
+	Parameter read_during_write_mode_mixed_ports bound to: CONSTRAINED_DONT_CARE - type: string 
+	Parameter wraddress_aclr bound to: OFF - type: string 
+	Parameter wraddress_reg bound to: INCLOCK - type: string 
+	Parameter wrcontrol_aclr bound to: OFF - type: string 
+	Parameter wrcontrol_reg bound to: INCLOCK - type: string 
+	Parameter use_eab bound to: ON - type: string 
+	Parameter power_up_uninitialized bound to: TRUE - type: string 
+	Parameter DEPTH bound to: 16 - type: integer 
+	Parameter LANE_BITS bound to: 8 - type: integer 
+INFO: [Synth 8-6155] done synthesizing module 'altdpram__parameterized14' (66#1) [/home/adam/3DO_GameBub/rtl/compat/altera_compat.sv:14]
+WARNING: [Synth 8-350] instance 'altdpram_component' of module 'altdpram' requires 14 connections, but only 12 given [/home/adam/3DO_GameBub/rtl/p3do/ddram.sv:619]
+INFO: [Synth 8-6155] done synthesizing module 'ddr_cache_ram' (67#1) [/home/adam/3DO_GameBub/rtl/p3do/ddram.sv:602]
+INFO: [Synth 8-6155] done synthesizing module 'ddram' (68#1) [/home/adam/3DO_GameBub/rtl/p3do/ddram.sv:1]
+INFO: [Synth 8-6157] synthesizing module 'ddr_bridge' [/home/adam/3DO_GameBub/rtl/gamebub/ddr_bridge.sv:22]
+INFO: [Synth 8-5534] Detected attribute (* ram_style = "distributed" *) [/home/adam/3DO_GameBub/rtl/gamebub/ddr_bridge.sv:59]
+INFO: [Synth 8-6155] done synthesizing module 'ddr_bridge' (69#1) [/home/adam/3DO_GameBub/rtl/gamebub/ddr_bridge.sv:22]
+INFO: [Synth 8-6157] synthesizing module 'video_capture' [/home/adam/3DO_GameBub/rtl/gamebub/gb_util.sv:90]
+	Parameter CDEPTH bound to: 32'sb00000000000000000000000000000110 
+	Parameter TW bound to: 20 - type: integer 
+INFO: [Synth 8-6157] synthesizing module 'async_fifo' [/home/adam/3DO_GameBub/rtl/gamebub/gb_util.sv:34]
+	Parameter WIDTH bound to: 20 - type: integer 
+	Parameter AW bound to: 32'sb00000000000000000000000000000100 
+INFO: [Synth 8-5534] Detected attribute (* ram_style = "distributed" *) [/home/adam/3DO_GameBub/rtl/gamebub/gb_util.sv:50]
+INFO: [Synth 8-5534] Detected attribute (* ASYNC_REG = "TRUE" *) [/home/adam/3DO_GameBub/rtl/gamebub/gb_util.sv:53]
+INFO: [Synth 8-5534] Detected attribute (* ASYNC_REG = "TRUE" *) [/home/adam/3DO_GameBub/rtl/gamebub/gb_util.sv:54]
+INFO: [Synth 8-6155] done synthesizing module 'async_fifo' (70#1) [/home/adam/3DO_GameBub/rtl/gamebub/gb_util.sv:34]
+INFO: [Synth 8-6155] done synthesizing module 'video_capture' (71#1) [/home/adam/3DO_GameBub/rtl/gamebub/gb_util.sv:90]
+INFO: [Synth 8-6155] done synthesizing module 'p3do_gamebub' (72#1) [/home/adam/3DO_GameBub/rtl/gamebub/p3do_gamebub.sv:23]
+INFO: [Synth 8-6155] done synthesizing module 'P3DOCore' (73#1) [/home/adam/3DO_GameBub/build/P3DOCore-gamebub_rev4/generated/P3DOCore.sv:2]
+INFO: [Synth 8-6157] synthesizing module 'SpiReceiverFifo' [/home/adam/3DO_GameBub/build/P3DOCore-gamebub_rev4/generated/SpiReceiverFifo.sv:46]
+INFO: [Synth 8-6157] synthesizing module 'XpmFifoAsync' [/home/adam/3DO_GameBub/build/P3DOCore-gamebub_rev4/generated/XpmFifoAsync.sv:2]
+ERROR: [Synth 8-3438] module 'xpm_fifo_async' declared at '/opt/tools/Xilinx/Vivado/2018.3/data/ip/xpm/xpm_fifo/hdl/xpm_fifo.sv:2016' does not have any parameter 'CASCADE_HEIGHT' used as named parameter override [/home/adam/3DO_GameBub/build/P3DOCore-gamebub_rev4/generated/XpmFifoAsync.sv:18]
+ERROR: [Synth 8-6156] failed synthesizing module 'XpmFifoAsync' [/home/adam/3DO_GameBub/build/P3DOCore-gamebub_rev4/generated/XpmFifoAsync.sv:2]
+ERROR: [Synth 8-6156] failed synthesizing module 'SpiReceiverFifo' [/home/adam/3DO_GameBub/build/P3DOCore-gamebub_rev4/generated/SpiReceiverFifo.sv:46]
+ERROR: [Synth 8-6156] failed synthesizing module 'HandheldTop' [/home/adam/3DO_GameBub/build/P3DOCore-gamebub_rev4/generated/HandheldTop.sv:46]
+ERROR: [Synth 8-476] no matching instance 'hdmi' for defparam [/home/adam/3DO_GameBub/framework/verilog/handheld/top.sv:486]
+ERROR: [Synth 8-6156] failed synthesizing module 'top_handheld' [/home/adam/3DO_GameBub/framework/verilog/handheld/top.sv:3]
+---------------------------------------------------------------------------------
+Finished RTL Elaboration : Time (s): cpu = 00:00:07 ; elapsed = 00:00:07 . Memory (MB): peak = 1912.117 ; gain = 558.016 ; free physical = 2987 ; free virtual = 46483
+---------------------------------------------------------------------------------
+RTL Elaboration failed
+INFO: [Common 17-83] Releasing license: Synthesis
+235 Infos, 236 Warnings, 0 Critical Warnings and 7 Errors encountered.
+synth_design failed
+ERROR: [Common 17-69] Command failed: Synthesis failed - please see the console or run log file for details
+INFO: [Common 17-206] Exiting Vivado at Thu Nov  5 22:50:29 2026...
+[Thu Nov  5 22:50:29 2026] synth_1 finished
+wait_on_run: Time (s): cpu = 00:00:10 ; elapsed = 00:00:10 . Memory (MB): peak = 1354.094 ; gain = 0.000 ; free physical = 3174 ; free virtual = 46669
+source P3DOCore-gamebub_rev4_run.tcl -notrace
+ERROR: [Common 17-70] Application Exception: Failed to launch run 'impl_1' due to failures in the following run(s):
+synth_1
+These failed run(s) need to be reset prior to launching 'impl_1' again.
+
+INFO: [Common 17-206] Exiting Vivado at Thu Nov  5 22:50:29 2026...
+make: *** [Makefile:16: P3DOCore-gamebub_rev4.bit] Error 1
+WARNING: Skipping unknown file type: /home/adam/3DO_GameBub/rtl/p3do/3DO_pkg.svh
+WARNING: Skipping unknown file type: /home/adam/3DO_GameBub/rtl/arm6/ARM6_pkg.svh
+WARNING: Skipping unknown file type: /home/adam/3DO_GameBub/rtl/gamebub/gb3do_pkg.svh
+Entering directory '/home/adam/3DO_GameBub/build/P3DOCore-gamebub_rev4'
+Traceback (most recent call last):
+  File "/home/adam/3DO_GameBub/out/framework/pyBuildCore/venv.dest/venv/lib/python3.13/site-packages/edalize/edatool.py", line 574, in _run_tool
+    cp = run(
+        [cmd] + args,
+    ...<5 lines>...
+        check=True,
+    )
+  File "/home/adam/.pyenv/versions/3.13.5/lib/python3.13/subprocess.py", line 577, in run
+    raise CalledProcessError(retcode, process.args,
+                             output=stdout, stderr=stderr)
+subprocess.CalledProcessError: Command '['make']' returned non-zero exit status 2.
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "/home/adam/3DO_GameBub/framework/scripts/build_core.py", line 236, in <module>
+    main(sys.argv[1:])
+    ~~~~^^^^^^^^^^^^^^
+  File "/home/adam/3DO_GameBub/framework/scripts/build_core.py", line 225, in main
+    build(
+    ~~~~~^
+        args.name,
+        ^^^^^^^^^^
+    ...<4 lines>...
+        args.additional_file_dirs,
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^
+    )
+    ^
+  File "/home/adam/3DO_GameBub/framework/scripts/build_core.py", line 174, in build
+    backend.build()
+    ~~~~~~~~~~~~~^^
+  File "/home/adam/3DO_GameBub/out/framework/pyBuildCore/venv.dest/venv/lib/python3.13/site-packages/edalize/edatool.py", line 345, in build
+    self.build_main()
+    ~~~~~~~~~~~~~~~^^
+  File "/home/adam/3DO_GameBub/out/framework/pyBuildCore/venv.dest/venv/lib/python3.13/site-packages/edalize/vivado.py", line 122, in build_main
+    self._run_tool("make", args)
+    ~~~~~~~~~~~~~~^^^^^^^^^^^^^^
+  File "/home/adam/3DO_GameBub/out/framework/pyBuildCore/venv.dest/venv/lib/python3.13/site-packages/edalize/edatool.py", line 597, in _run_tool
+    raise RuntimeError(_s)
+RuntimeError: '['make']' exited with an error: 2
+[error] framework.pyBuildCore.run
+os.SubprocessException: Result of /home/adam/3DO_GameBub/out/framework/pyBuildCore/venv.dest/venv/bin/python3…: 1
+
+  os.SubprocessException$.apply(Model.scala:211)
+  os.proc.call(ProcessOps.scala:232)
+  os.call$.apply(ProcessOps.scala:42)
+  mill.pythonlib.PythonModule$RunnerImpl.run(PythonModule.scala:293)
+  mill.pythonlib.PythonModule.run$$anonfun$1(PythonModule.scala:187)
+  mill.api.Task$Named.evaluate(Task.scala:443)
+  mill.api.Task$Named.evaluate$(Task.scala:428)
+  mill.api.Task$Command.evaluate(Task.scala:525)
+exit=1

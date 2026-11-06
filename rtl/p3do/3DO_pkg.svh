@@ -1,3 +1,5 @@
+`ifndef P3DO_PKG_SVH
+`define P3DO_PKG_SVH
 package P3DO_PKG;
 
 	//MADAM
@@ -584,3 +586,5 @@ package P3DO_PKG;
 	endfunction
 
 endpackage
+
+`endif

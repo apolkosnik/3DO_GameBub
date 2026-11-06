@@ -1,3 +1,4 @@
+`include "gb3do_pkg.svh"
 // CD drive back end for the 3DO core on Game Bub.
 //
 // On MiSTer the 3DO CD-ROM controller (3DO_CDROM.sv) talks to the ARM HPS

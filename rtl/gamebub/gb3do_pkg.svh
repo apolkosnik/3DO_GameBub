@@ -1,3 +1,5 @@
+`ifndef GB3DO_PKG_SVH
+`define GB3DO_PKG_SVH
 // Shared definitions for the Game Bub 3DO core.
 //
 // SDRAM map (32 MiB, 4 banks x 8 MiB, 8192 rows x 512 x 16-bit words):
@@ -45,3 +47,5 @@ package gb3do_pkg;
 	endfunction
 
 endpackage
+
+`endif

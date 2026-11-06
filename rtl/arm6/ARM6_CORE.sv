@@ -1,3 +1,4 @@
+`include "ARM6_pkg.svh"  // GameBub: framework adds files in arbitrary order
 module ARM6_CORE
  (
 	input             CLK,

@@ -1,3 +1,4 @@
+`include "3DO_pkg.svh"  // GameBub: framework adds files in arbitrary order
 // synopsys translate_off
 `define SIM
 // synopsys translate_on

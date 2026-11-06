@@ -3,6 +3,9 @@
 `define DEBUG
 // synopsys translate_on
 
+`include "3DO_pkg.svh"  // GameBub: framework adds files in arbitrary order
+import P3DO_PKG::*;
+
 module CLIO_VIDEO
 (
 	input              CLK,

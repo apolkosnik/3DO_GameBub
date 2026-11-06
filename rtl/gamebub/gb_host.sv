@@ -1,3 +1,4 @@
+`include "gb3do_pkg.svh"
 // Game Bub host (MCU) interface for the 3DO core.
 //
 //  * HostV0 command channel: GetStatus, CoreRun/Halt, SetupComplete,

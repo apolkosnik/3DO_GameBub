@@ -10,4 +10,4 @@ source "$HERE/filelist.sh"
 cd "$OUT"
 verilator --lint-only -Wall -Wno-fatal -Wno-DECLFILENAME -Wno-UNUSEDSIGNAL -Wno-UNUSEDPARAM \
     -Wno-PINCONNECTEMPTY -Wno-DEFPARAM -Wno-IMPLICITSTATIC -Wno-PINMISSING \
-    --top-module p3do_gamebub "${RTL_FILES[@]}" "$HERE/models/xilinx_sim.sv" "$HERE/models/gb_clocks_lint.sv" "$@"
+    -Igamebub -Ip3do -Iarm6 --top-module p3do_gamebub "${RTL_FILES[@]}" "$HERE/models/xilinx_sim.sv" "$HERE/models/gb_clocks_lint.sv" "$@"

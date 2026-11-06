@@ -5,25 +5,17 @@ A port of the [MiSTer 3DO core](https://github.com/MiSTer-devel/3DO_MiSTer) (by 
 [Game Bub core framework](https://docs.gamebub.net/developing-cores/overview/)
 (XC7A100T FPGA, one 32 MiB SDRAM chip).
 
-**Status: experimental, not yet playable.** The core passes its simulation test suite
-(see below) and the real Panasonic FZ-10 BIOS boots in simulation: it decompresses its
-kernel into DRAM, runs from DRAM and draws the 3DO logo correctly into VRAM. The
-displayed picture is corrupted, though, and this is a known architectural limit rather
-than a bug to be hunted:
+**Status: experimental.** It has not yet been run on Game Bub hardware. In simulation,
+the core passes its test suite (see below) and the real Panasonic FZ-10 BIOS boots:
 
-* On MiSTer, VRAM that does not fit into block RAM lives in DDR3 (about 800 MB/s). Here
-  it lives in the single 16-bit SDRAM (about 200 MB/s), and the framework's double
-  framebuffer leaves only about 80 KB of block RAM for VRAM, not enough for one 150 KB
-  3DO framebuffer. A 128-beat video read transfer takes ~5.5 µs instead of ~1.3 µs and
-  often queues behind SPORT row writes, so CLIO shifts out stale data (measured with
-  `tb_boot`: most serial reads during a transfer hit words not yet delivered).
-* Fixing this needs either a faster or wider VRAM backing store (the 512 KiB SRAM and
-  the SDRAM used as parallel channels, plus a redesigned VRAM tier), or a framework that
-  wires the second SDRAM chip / frees block RAM.
+* It decompresses its kernel into DRAM and displays the 3DO logo correctly.
+* It brings up the CD drive: Read ID, Spin Up, Set Speed, Disc Info and Read TOC, all
+  answered by the core's drive emulation.
+* It reads the disc's volume and directory sectors.
 
-The core has not been run on Game Bub hardware. The SDRAM read capture timing
+Commercial discs do not fit yet (see *Limitations*). The SDRAM read-capture timing
 (`READ_STAGE` in `rtl/gamebub/sdram_3do.sv`) follows the MiSTer design and may need
-tuning there.
+tuning on real hardware.
 
 ## Installing
 
@@ -45,17 +37,21 @@ save exists, a blank 3DO NVRAM is created.
 
 ### Limitations
 
-* **Disc size: at most 22 MiB.** The Game Bub framework loads files into the core when
+* **Disc size: at most 22 MiB.** The Game Bub firmware loads files into the core when
   it starts, and cannot yet stream from the microSD card. So the whole ISO must fit into
   the SDRAM space left over (bank 3 plus the unused rows of banks 0 and 1). This is
-  enough for homebrew, demos and small titles, but not for most commercial games. When the
-  framework gets core-initiated file reads, `cdd_emu.sv` is the only module that needs to
-  change.
+  enough for homebrew, demos and small titles, but not for commercial games. For example,
+  Wolfenstein 3D keeps its boot files 87 MB into the disc. The framework already has the
+  command channel streaming needs; the firmware does not use it yet. See
+  [docs/disc_streaming.md](docs/disc_streaming.md) for the investigation and a proposed
+  protocol.
 * ISO images only (no CUE/BIN, no CD audio tracks).
 * NTSC only (PAL video modes are not supported).
-* Only the 64 KiB "BRAM1" VRAM block is on-chip. The framework's double framebuffer uses
-  most of the block RAM. The rest of VRAM is in SDRAM, behind the original MiSTer DDR3
-  logic (`ddram.sv`), so games that render outside that block run slower than on MiSTer.
+* Only the 64 KiB "BRAM1" VRAM block is on chip, because the framework's double
+  framebuffer uses most of the block RAM. The rest of VRAM is in SDRAM, behind the
+  original MiSTer DDR3 logic (`ddram.sv`). Video reads from it go through a prefetching
+  cache (below), but CPU and CEL-engine accesses outside the block are slower than on
+  MiSTer.
 * One controller. Buttons: Y/B/A = 3DO A/B/C, Start = P (play), Select/X = X (stop),
   L/R = L/R. They can be remapped in the Game Bub menu.
 
@@ -76,6 +72,7 @@ save exists, a blank 3DO NVRAM is created.
 | Altera megafunctions                    | `rtl/compat/altera_compat.sv`, Xilinx-inferable rewrites          |
 | combinational `lpm_divide` (MADAM)      | sequential divider, same results (`MADAM_mem.sv`)                 |
 | video_mixer / scaler                    | framework framebuffer, 320x240, 18-bit colour (`video_capture`)   |
+| fast DDR3 for video reads               | `vram_rtcache.sv`, prefetching half-row cache (see below)        |
 
 The SDRAM controller has a second, burst-capable port. It may only use the bus while the
 3DO is frozen: either in reset, or paused through the core's existing `PAUSE` mechanism,
@@ -89,6 +86,16 @@ MiSTer's controller, because these pauses can now happen at any time:
   reset, or before the BIOS enables refresh). It closes and re-opens open 3DO pages
   around the refresh.
 * tRAS is respected when the 3DO closes a page in the MCLK right after opening it.
+
+**VRAM read-transfer cache.** MADAM's video DMA loads a VRAM row into the serial
+register and starts shifting it out about 160 ns later, and the video beam cannot be
+paused. A transfer from the shared SDRAM takes 0.5–6 µs, so before this cache the BIOS
+logo came out as garbage: 54,464 stale serial reads measured in `tb_boot`.
+`vram_rtcache.sv` serves every external read transfer from 16 half-row entries in block
+RAM, and each request prefetches the next two half-rows, because video DMA walks the
+framebuffer sequentially. Writes are snooped where they reach SDRAM (and at flash
+writes), which keeps `ddram.sv`'s own ordering. BIOS boot result: 99.9% hits and a clean
+picture.
 
 Host file data is stored exactly as received. The byte order of the MCU's words is
 detected from the Opera volume header of the ISO (little-endian if no ISO is loaded).
@@ -123,6 +130,7 @@ are needed.
 sim/lint.sh                    # Verilator lint of the whole core
 sim/run_tb.sh tb_div           # MADAM divider vs. LPM_DIVIDE semantics (20k cases)
 sim/run_tb.sh tb_sdram         # SDRAM controller vs. timing-checking SDRAM model
+sim/run_tb.sh tb_rtcache       # VRAM read-transfer cache: coherence vs. reference VRAM model
 sim/build_testrom.sh           # assemble the test BIOS (sim/tb/testrom.S)
 sim/run_tb.sh tb_top           # whole core: boots the test BIOS
 sim/run_tb.sh tb_top +be       # same with a big-endian host

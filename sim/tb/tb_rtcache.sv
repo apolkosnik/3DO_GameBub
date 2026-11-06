@@ -7,6 +7,9 @@
 //   * random CPU writes (ddram.sv's posted write port)
 //   * write transfers (MWT, shift register -> row: SPORT row copy)
 //   * flash writes (FW, colour register -> whole row)
+//   * CEL-engine framebuffer writes (phase 9): one per MCLK, stopped only by
+//     the core's PAUSE (ddram.sv busy, registered at CE_F), into flash-filled
+//     and plain rows while read-transfer fills keep ddram.sv bursting
 // and checks every word shifted out against a reference model of VRAM. The
 // important cases write to rows that are already in the cache.
 //
@@ -248,6 +251,89 @@ module tb_rtcache;
 		for (int i = 0; i < 512; i++) begin ref_l[{row, 9'(i)}] = cl; ref_r[{row, 9'(i)}] = cr; end
 	endtask
 
+	// ---------------- CEL-engine style framebuffer writes ----------------
+	// MADAM's CFB access (MADAM_AG.sv) writes one pixel per MCLK with a
+	// WE/CAS pulse during the CE_R cycle, to the address it drives; the next
+	// pixel's address follows right after. The core stops MADAM only through
+	// PAUSE: p3do_gamebub.sv registers ddram.sv's busy at the end of every
+	// CE_F cycle and MADAM's CE_R is gated with it. This BFM reproduces that
+	// timing on ddram.sv's random-access port (clk_sys = 2 clk_mem cycles).
+	typedef struct packed { bit [17:0] a; bit [15:0] dl, dr; bit [1:0] lm, rm; bit [3:0] gap; bit sync; } cfbw_t;
+	cfbw_t cfb_q [$];
+	bit        cfb_en = 0;
+	bit [1:0]  cfb_ph = 0;          // 0,1: CE_R cycle  2,3: CE_F cycle
+	int        cfb_issued = 0, cfb_paused = 0;
+	always @(posedge clk_mem) begin
+		if (!cfb_en) cfb_ph <= 0;
+		else begin
+			cfb_ph <= cfb_ph + 2'd1;
+			if (cfb_ph == 2'd3) begin
+				// end of the CE_F cycle: PAUSE <= busy; the CE_R cycle that
+				// follows writes only if not paused
+				if (ddram.busy) cfb_paused++;
+				else if (cfb_q.size() != 0 && cfb_q[0].gap != 0) cfb_q[0].gap = cfb_q[0].gap - 4'd1;   // idle MCLK
+				// 'sync' writes wait for the cache to request a fill: the write
+				// is then latched on the edge ddram.sv starts that burst, while
+				// ddram.sv was idle (the case write_lbusy does not cover)
+				else if (cfb_q.size() != 0 && cfb_q[0].sync && !cache.fill_issue) ;
+				else if (cfb_q.size() != 0) begin
+					cfbw_t w;
+					w = cfb_q.pop_front();
+					w_addr <= w.a; w_ldata <= w.dl; w_rdata <= w.dr; w_lwe <= w.lm; w_rwe <= w.rm;
+					if (w.lm[1]) ref_l[w.a][15:8] = w.dl[15:8];
+					if (w.lm[0]) ref_l[w.a][ 7:0] = w.dl[ 7:0];
+					if (w.rm[1]) ref_r[w.a][15:8] = w.dr[15:8];
+					if (w.rm[0]) ref_r[w.a][ 7:0] = w.dr[ 7:0];
+					cfb_issued++;
+				end
+			end
+			if (cfb_ph == 2'd1) begin
+				// end of the CE_R cycle: WE goes away, the next address is
+				// driven (and stays on the bus while MADAM is paused)
+				w_lwe <= 2'b00; w_rwe <= 2'b00;
+				if (cfb_q.size() != 0) begin
+					w_addr <= cfb_q[0].a; w_ldata <= cfb_q[0].dl; w_rdata <= cfb_q[0].dr;
+				end
+			end
+		end
+	end
+	// writes latched by ddram.sv while it was not free to issue them at once,
+	// and writes latched while it was idle just as a fill burst started
+	// (served first, so the write waits although ddram.sv was idle)
+	int cfb_latched_busy = 0, cfb_latched_at_burst = 0;
+	bit cfb_old_we = 0;
+	always @(posedge clk_mem) begin
+		cfb_old_we <= |w_lwe || |w_rwe;
+		if (cfb_en && (|w_lwe || |w_rwe) && !cfb_old_we) begin
+			if (ddram.state != 0 || DDRAM_BUSY) cfb_latched_busy++;
+			else if (ddram.burst_read_lbusy || ddram.burst_read_rbusy || ddr_blrd || ddr_brrd) cfb_latched_at_burst++;
+		end
+	end
+
+	// read transfer for use while other traffic runs: waits only for the
+	// transfer itself (rows that nothing writes during it)
+	task automatic rt_read_busy(input [17:0] a, input int n);
+		int pos, to;
+		ras_cycle(a, 0, 2'b11, 0);
+		ras_end();
+		to = 0;
+		do begin mem_cycles(4); to++; end while ((vram_l.RT_EXEC || vram_r.RT_EXEC) && to < 50000);
+		if (to >= 50000) fail("timeout waiting for a read transfer");
+		for (int i = a[8:1] * 2; i < 512; i++) begin sr_l[i] = rl({a[17:9], 9'(i)}); sr_r[i] = rr({a[17:9], 9'(i)}); end
+		pos = a[8:0];
+		for (int k = 0; k < n; k++) begin
+			@(posedge clk_mem); SC <= 1;
+			mem_cycles(3);
+			@(posedge clk_mem); SC <= 0;
+			mem_cycles(3);
+			checks++;
+			if (SQL !== sr_l[pos] || SQR !== sr_r[pos])
+				fail($sformatf("RT %05h word %03h: got %04h/%04h expected %04h/%04h", a, pos,
+				               SQL, SQR, sr_l[pos], sr_r[pos]));
+			pos = (pos + 1) % 512;
+		end
+	endtask
+
 	// invariant: no two valid entries hold the same half-row
 	always @(posedge clk_mem) if (!rst) begin
 		for (int i = 0; i < 16; i++)
@@ -358,6 +444,78 @@ module tb_rtcache;
 			endcase
 		end
 		$display("[%0t] phase 8: random mix, errors=%0d", $realtime, errors);
+
+		// 9) CEL-engine style framebuffer writes (one per MCLK, stopped only
+		//    by PAUSE) into flash-filled and plain rows, while read transfers
+		//    of 16 other rows keep ddram.sv busy with bursts.
+		begin
+			bit [8:0] rows_w [4], rows_c [16];
+			int errors0, n;
+			bit rt_done;
+			errors0 = errors;
+			rows_w = '{9'h060, 9'h061, 9'h0A3, 9'h0A4};
+			foreach (rows_c[i]) rows_c[i] = 9'(9'h100 + i);
+			flash_write(rows_w[0], 16'h7FFF, 16'h7C00);
+			flash_write(rows_w[1], 16'h03E0, 16'h001F);
+			n = 0;
+			while (n < 20000) begin
+				bit [17:0] a;
+				int run, stride;
+				a = {rows_w[$urandom() % 4], 9'($urandom())};
+				run = 1 + $urandom() % 24;
+				stride = ($urandom() % 3 == 0) ? 2 : 1;
+				for (int k = 0; k < run && n < 20000; k++, n++) begin
+					cfbw_t w;
+					w.a = {a[17:9], 9'(a[8:0] + k * stride)};
+					w.dl = 16'($urandom()); w.dr = 16'($urandom());
+					// idle MCLKs before the write (CEL source fetches, transparent pixels)
+					w.gap = ($urandom() % 2 == 0) ? 4'(2 + $urandom() % 14) : 4'd0;
+					w.sync = (n % 200 == 199);
+					if (w.sync) w.gap = 4'd8;              // SDRAM idle by then
+					if (n % 200 == 0) w.gap = 4'd0;        // the write right after a sync write
+					case ($urandom() % 8)
+						0, 1:    begin w.lm = 2'b11; w.rm = 2'b00; end   // left chip only
+						2, 3:    begin w.lm = 2'b00; w.rm = 2'b11; end   // right chip only
+						4, 5, 6: begin w.lm = 2'b11; w.rm = 2'b11; end
+						default: begin w.lm = 2'($urandom() % 3 + 1); w.rm = 2'($urandom() % 4); end
+					endcase
+					cfb_q.push_back(w);
+				end
+			end
+			rt_done = 0;
+			fork
+				begin
+					@(posedge clk_mem); w_ras <= 1;
+					mem_cycles(2);
+					cfb_en = 1;
+					while (cfb_q.size() != 0) @(posedge clk_mem);
+					mem_cycles(8);
+					cfb_en = 0;
+					wait_idle();
+					@(posedge clk_mem); w_ras <= 0;
+				end
+				begin
+					int k;
+					k = 0;
+					// one transfer every 15-40 us. Video DMA does one per
+					// 63.5 us line; each transfer here misses and prefetches
+					// two more half-rows (3 fills of ~6 us), and ddram.sv
+					// serves bursts before random writes, so a much higher
+					// rate would only starve the writes.
+					while (cfb_en || cfb_q.size() != 0) begin
+						rt_read_busy({rows_c[k % 16], 9'h0}, 32);
+						mem_cycles(1500 + $urandom() % 2500);
+						k++;
+					end
+				end
+			join
+			$display("[%0t] phase 9: %0d framebuffer writes (%0d latched while ddram.sv was busy, %0d as a fill burst started; %0d paused MCLKs)",
+			         $realtime, cfb_issued, cfb_latched_busy, cfb_latched_at_burst, cfb_paused);
+			foreach (rows_w[i]) rt_read({rows_w[i], 9'h0}, 0, 512);
+			if (cfb_latched_busy < 100) fail("phase 9 did not exercise writes latched while ddram.sv was busy");
+			if (cfb_latched_at_burst < 5) fail("phase 9 did not exercise writes latched as a fill burst started");
+			$display("[%0t] phase 9: framebuffer writes during bursts, errors=%0d", $realtime, errors - errors0);
+		end
 
 		$display("tb_rtcache: %0d words checked, hits %0d misses %0d prefetches %0d invalidations %0d",
 		         checks, st_hits, st_misses, st_pf, st_inv);

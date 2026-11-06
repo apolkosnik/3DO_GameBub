@@ -104,6 +104,24 @@ framebuffer sequentially. Writes are snooped where they reach SDRAM (and at flas
 writes), which keeps `ddram.sv`'s own ordering. BIOS boot result: 99.9% hits and a clean
 picture.
 
+**Random VRAM writes (fixes to `ddram.sv`).** On MiSTer, framebuffers are normally in
+block RAM (a per-game table moves the on-chip blocks to where a game puts them). On Game
+Bub only one 64 KiB block is on chip, so every pixel the CEL engine draws goes through
+`ddram.sv`'s single posted-write slot to the SDRAM. Two problems in that path made the
+animated 3DO logo at the start of a game come out dotted and streaky:
+
+* When one pixel of a flash-cleared 64-bit word is written, `ddram.sv` completes the word
+  with the clear colour. It looked up the "flash-cleared" flag and colour for the address
+  on the bus. Once the write had been delayed (the SDRAM was busy), that was already the
+  CEL engine's next pixel, so the colour overwrote pixels drawn just before.
+* MADAM was paused only if `ddram.sv` was busy when a write arrived. If a read-transfer
+  fill started in the next cycle (bursts are served first), the write waited without a
+  pause, and the CEL engine's next pixel (one per MCLK) replaced it.
+
+The lookup now uses the waiting write's own address, and a write that has not been issued
+keeps MADAM paused. `tb_rtcache` reproduces both with MADAM's write timing, and `tb_boot`
+checks every VRAM write during a boot.
+
 Host file data is stored exactly as received. The byte order of the MCU's words is
 detected from the Opera volume header of the ISO (little-endian if no ISO is loaded).
 
@@ -124,10 +142,10 @@ Requirements: Vivado 2023.2 or later (as the framework documents), a JDK (11 or 
 and Python 3.12 or 3.13. On Python 3.14 the framework's pinned `pex` dependency fails to
 install.
 
-Vivado 2018.3 also synthesizes the core. However, the framework's generated
-`XpmFifoAsync*.sv` sets `CASCADE_HEIGHT`, which the 2018.3 XPM library does not have.
-For a local 2018.3 build, delete those lines from `build/*/generated/XpmFifoAsync*.sv`
-after the first (failing) run, and run `make` in that build directory.
+Vivado 2018.3 also builds the core: `tools/build_vivado2018.sh` runs the framework flow,
+removes the two `xpm_fifo_async` parameters that the 2018.3 XPM library does not have
+from the generated wrappers, sets timing-driven implementation directives and fails if
+timing is not met.
 
 ```
 git clone --recurse-submodules https://github.com/apolkosnik/3DO_GameBub
@@ -146,7 +164,8 @@ are needed.
 sim/lint.sh                    # Verilator lint of the whole core
 sim/run_tb.sh tb_div           # MADAM divider vs. LPM_DIVIDE semantics (20k cases)
 sim/run_tb.sh tb_sdram         # SDRAM controller vs. timing-checking SDRAM model
-sim/run_tb.sh tb_rtcache       # VRAM read-transfer cache: coherence vs. reference VRAM model
+sim/run_tb.sh tb_rtcache       # VRAM read-transfer cache and ddram.sv: coherence vs. reference VRAM model,
+                               # including CEL-engine framebuffer writes during cache fills
 sim/build_testrom.sh           # assemble the test BIOS (sim/tb/testrom.S)
 sim/run_tb.sh tb_top           # whole core: boots the test BIOS
 sim/run_tb.sh tb_top +be       # same with a big-endian host
@@ -160,9 +179,12 @@ VARGS="+define+TB_TOP=tb_boot" BUILD=build/sim_boot sim/run_tb.sh tb_boot \
 
 `tb_boot` boots a real BIOS, with a disc either streamed from a raw `.bin`
 (`+disc_bin=`, served the way the streaming firmware does) or preloaded from an ISO
-(`+iso=`). It writes framework video frames to `build/sim/frames/`
-(PPM), logs every CD command, dumps VRAM as an image at the end and measures stale
-serial reads during VRAM read transfers. About 1 ms of 3DO time per second of wall time.
+(`+iso=`). It writes framework video frames to `build/sim/frames/` (PPM; `+out=<dir>`
+for another directory), logs every CD command and checks every streamed sector against
+the image, checks every random VRAM write that goes to the SDRAM, dumps VRAM as an image
+at the end and measures stale serial reads during VRAM read transfers. If the CPU runs
+outside the memory map, the last CPU bus cycles are written to `cpu_trace.txt`. About
+2.5 ms of 3DO time per second of wall time.
 
 `tb_top` runs the complete core against an SDRAM model that checks every SDRAM timing
 parameter and refresh. A host model follows the framework's MCU protocol: it loads the

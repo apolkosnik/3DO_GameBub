@@ -107,12 +107,20 @@ module ddram
 	
 	reg  [ 19:  3] vram_fw_baddr;
 	reg            vram_fw_brd,vram_fw_bwr;
-	wire [ 19:  3] vram_fw_raddr1 = rwe || rrd ? raddr[19:3] : laddr[19:3];
+	// Game Bub port: while a random write waits to be issued, look up the
+	// flash-write flag and row colour of the address it writes. The original
+	// used the address on the bus, which is MADAM's next access once the
+	// write has been held up (SDRAM busy): the word was then completed with
+	// the wrong flag, so the flash colour overwrote neighbouring pixels.
+	wire [ 19:  3] vram_fw_raddr1 = write_lpend ? write_laddr[19:3] : write_rpend ? write_raddr[19:3] : rwe || rrd ? raddr[19:3] : laddr[19:3];
+	wire [ 19:  3] vram_fw_addr1 = vram_fw_brd || vram_fw_bwr ? vram_fw_baddr : vram_fw_raddr1;
+	reg  [ 19:  3] vram_fw_qaddr;   // address the flag/colour outputs now belong to
+	always @(posedge clk) vram_fw_qaddr <= vram_fw_addr1;
 	wire           vram_fw_q1;
 	VRAM_FW #(18) vram_fw
 	(
 		.CLK1(clk),
-		.ADDR1(vram_fw_brd || vram_fw_bwr ? vram_fw_baddr : vram_fw_raddr1),
+		.ADDR1(vram_fw_addr1),
 		.DATA1(1'b0),
 		.WREN1(vram_fw_bwr),
 		.Q1(vram_fw_q1),
@@ -132,7 +140,7 @@ module ddram
 		.WADDR(bladdr[19:11]),
 		.DATA(bin[31:0]),
 		.WREN(bfw),
-		.RADDR(vram_fw_brd || vram_fw_bwr ? vram_fw_baddr[19:11] : vram_fw_raddr1[19:11]),
+		.RADDR(vram_fw_addr1[19:11]),
 		.Q(vram_fw_data)
 	);
 	
@@ -343,7 +351,11 @@ module ddram
 						rpos        <= {1'b0,burst_raddr[9:3]};
 						state       <= 4'd2;
 					end
-					else if (write_lpend && write_rpend && write_laddr == write_raddr) begin 
+					else if ((write_lpend || write_rpend) && vram_fw_qaddr != (write_lpend ? write_laddr[19:3] : write_raddr[19:3])) begin
+						// Game Bub port: the flag/colour lookup above is not yet for
+						// this write's address (e.g. right after a burst): wait a cycle
+					end
+					else if (write_lpend && write_rpend && write_laddr == write_raddr) begin
 						{write_lpend,write_rpend} <= '0;
 						{write_lbusy,write_rbusy} <= '0;
 						lcache_wren <= !write_lcache_update ? 4'b0000 : {write_lbe[7:6],write_lbe[3:2]};
@@ -575,7 +587,12 @@ module ddram
 	
 	
 	assign bout = dout;
-	assign busy = write_lbusy | write_rbusy | read_lbusy | read_rbusy;
+	// Game Bub port: a write that has not been issued yet keeps MADAM paused.
+	// write_*busy only reflects whether ddram.sv was busy when the write was
+	// latched; if a burst (served first) started right after, the write
+	// waited without a pause and the next CEL-engine write (one per MCLK)
+	// replaced it.
+	assign busy = write_lbusy | write_rbusy | write_lpend | write_rpend | read_lbusy | read_rbusy;
 	assign bbusy = burst_read_lbusy | burst_read_rbusy | burst_write_lbusy | burst_write_rbusy;
 	
 	assign io_dout = io_rbuf;

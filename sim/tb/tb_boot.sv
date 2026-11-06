@@ -8,18 +8,21 @@
 // formatting, CD drive emulation and byte-order handling run as on hardware.
 //
 // Output:
-//   * framework video frames as PPM files (build/sim/frames/frame_NNNN.ppm)
+//   * framework video frames as PPM files (<out>/frames/frame_NNNN.ppm)
 //   * every CD controller command the BIOS sends and every sector delivered
 //   * CPU address samples, pause statistics, SDRAM model errors
 //   * streamed discs: every sector sent to the CD controller is checked
 //     against the image at the LBA the BIOS asked for
-//   * build/sim/cpu_trace.txt: the last 32768 CPU bus cycles (or, with
+//   * random VRAM writes to the SDRAM tier (CPU, CEL engine): none may be
+//     lost in ddram.sv's posted write port or completed with another
+//     address's flash-write state (counted as TB errors)
+//   * <out>/cpu_trace.txt: the last 32768 CPU bus cycles (or, with
 //     +trace_from_ms=<n>, all from n ms on) before the CPU first runs outside
 //     the 3DO memory map (a crash), with CLIO's interrupt state at each FIQ
 //
 // Plusargs: +bios=<file> (required), +iso=<file> or +disc_bin=<file>,
 //           +disc_latency_us=<n> (default 800), +trace_from_ms=<n>, +run_ms=<n> (default 1000),
-//           +frame_every=<n> (default 10)
+//           +frame_every=<n> (default 10), +out=<dir> (default build/sim)
 //
 // Copyright (c) 2026 Adam Polkosnik
 // SPDX-License-Identifier: GPL-3.0-or-later
@@ -27,6 +30,8 @@
 `timescale 1ns/1ps
 
 module tb_boot;
+	string outdir = "build/sim";   // +out=<dir>: frames/, cpu_trace.txt
+	initial void'($value$plusargs("out=%s", outdir));
 	reg clk_mem = 0;
 	reg clk_sys = 0;
 	reg clk_vid = 0;
@@ -315,7 +320,7 @@ module tb_boot;
 	// MiSTer's own debug hooks pair CPU_A with CPU_DI). The last TR_N are kept
 	// in a ring buffer; with +trace_from_ms=<n> every cycle from n ms on is
 	// written instead. When the CPU has addressed outside the 3DO memory map
-	// for TR_WILD samples in a row, the trace goes to build/sim/cpu_trace.txt:
+	// for TR_WILD samples in a row, the trace goes to <out>/cpu_trace.txt:
 	// time (ns), address, data (read: CPU_DI, write: CPU_DO), and the flags
 	// nMREQ SEQ nOPC nRW. Each fetch from the FIQ vector is preceded by a
 	// comment line with CLIO's pending-and-enabled interrupt bits and the CPSR.
@@ -341,9 +346,9 @@ module tb_boot;
 			f = {dut.p3do.CPU_nMREQ, dut.p3do.CPU_SEQ, dut.p3do.CPU_nOPC, dut.p3do.CPU_nRW};
 			if (!dut.p3do.CPU_nOPC && dut.p3do.CPU_A == 32'h0000001C) fiq_count++;
 			if (trace_from_ms >= 0 && $time >= trace_from_ms * 1000000 && tr_fd == 0) begin
-				tr_fd = $fopen("build/sim/cpu_trace.txt", "w");
+				tr_fd = $fopen({outdir, "/cpu_trace.txt"}, "w");
 				$fdisplay(tr_fd, "# time_ns address data nMREQ SEQ nOPC nRW");
-				$display("[%0t] CPU bus trace started (build/sim/cpu_trace.txt)", $realtime);
+				$display("[%0t] CPU bus trace started (%s/cpu_trace.txt)", $realtime, outdir);
 			end
 			if (tr_fd != 0) begin
 				if (!dut.p3do.CPU_nOPC && dut.p3do.CPU_A == 32'h0000001C)
@@ -362,7 +367,7 @@ module tb_boot;
 			if (tr_wild == TR_WILD) begin
 				tr_done = 1;
 				if (tr_fd == 0) begin
-					tr_fd = $fopen("build/sim/cpu_trace.txt", "w");
+					tr_fd = $fopen({outdir, "/cpu_trace.txt"}, "w");
 					$fdisplay(tr_fd, "# time_ns address data nMREQ SEQ nOPC nRW");
 					for (int k = 0; k < TR_N; k++) begin
 						int j;
@@ -373,8 +378,8 @@ module tb_boot;
 					end
 				end
 				$fclose(tr_fd);
-				$display("[%0t] CPU addressed outside the memory map (A=%08h) after %0d FIQs: trace in build/sim/cpu_trace.txt",
-				         $realtime, dut.p3do.CPU_A, fiq_count);
+				$display("[%0t] CPU addressed outside the memory map (A=%08h) after %0d FIQs: trace in %s/cpu_trace.txt",
+				         $realtime, dut.p3do.CPU_A, fiq_count, outdir);
 			end
 		end
 	end
@@ -441,6 +446,83 @@ module tb_boot;
 	end
 	final $display("tb_boot: serial reads during transfers: %0d ok, %0d stale (in %0d transfers): %0d CLUT/VDL, %0d video",
 	               good_reads, stale_reads, stale_rts, stale_kind_clut, stale_kind_vid);
+
+	// Random VRAM writes to the SDRAM tier (ddram.sv's posted write port,
+	// one entry per half). Two hazards are counted:
+	//  * lost write: a new write is latched while the previous write of the
+	//    same half has not been issued yet (it overwrites it);
+	//  * flash-write lookup for the wrong address: when a write is issued,
+	//    the flash-write flag and row colour used to complete the 64-bit
+	//    word must be the ones of the written address.
+	// Both count as TB errors (the summary line).
+	function automatic bit fw_flag(input [17:1] a);
+		case (a[4:1])
+			4'h0: return dut.ddram.vram_fw.g_lane[ 0].mem[a[17:5]];
+			4'h1: return dut.ddram.vram_fw.g_lane[ 1].mem[a[17:5]];
+			4'h2: return dut.ddram.vram_fw.g_lane[ 2].mem[a[17:5]];
+			4'h3: return dut.ddram.vram_fw.g_lane[ 3].mem[a[17:5]];
+			4'h4: return dut.ddram.vram_fw.g_lane[ 4].mem[a[17:5]];
+			4'h5: return dut.ddram.vram_fw.g_lane[ 5].mem[a[17:5]];
+			4'h6: return dut.ddram.vram_fw.g_lane[ 6].mem[a[17:5]];
+			4'h7: return dut.ddram.vram_fw.g_lane[ 7].mem[a[17:5]];
+			4'h8: return dut.ddram.vram_fw.g_lane[ 8].mem[a[17:5]];
+			4'h9: return dut.ddram.vram_fw.g_lane[ 9].mem[a[17:5]];
+			4'hA: return dut.ddram.vram_fw.g_lane[10].mem[a[17:5]];
+			4'hB: return dut.ddram.vram_fw.g_lane[11].mem[a[17:5]];
+			4'hC: return dut.ddram.vram_fw.g_lane[12].mem[a[17:5]];
+			4'hD: return dut.ddram.vram_fw.g_lane[13].mem[a[17:5]];
+			4'hE: return dut.ddram.vram_fw.g_lane[14].mem[a[17:5]];
+			default: return dut.ddram.vram_fw.g_lane[15].mem[a[17:5]];
+		endcase
+	endfunction
+	bit        vw_old_lwe = 0, vw_old_rwe = 0, vw_old_lras = 0, vw_old_rras = 0, vw_issued_d = 0;
+	bit [17:1] vw_fw_a1 = '0, vw_fw_a1_d = '0;
+	int        vw_writes = 0, vw_deferred = 0, vw_lost = 0, vw_fw_wrong = 0, vw_fw_wrong_effect = 0;
+	always @(posedge clk_mem) begin
+		bit lw, rw, issued;
+		bit [19:3] wa;
+		lw = |dut.ddram.lwe && !vw_old_lwe && dut.ddram.lras && vw_old_lras;
+		rw = |dut.ddram.rwe && !vw_old_rwe && dut.ddram.rras && vw_old_rras;
+		vw_writes += int'(lw) + int'(rw);
+		if ((lw && dut.ddram.write_lpend) || (rw && dut.ddram.write_rpend)) begin
+			vw_lost++;
+			errors++;
+			if (vw_lost <= 20)
+				$display("[%0t] VRAM write lost: %s write to %05h (data %04h) overwritten by a write to %05h, ddram state %0d busy %b bursts %b%b%b%b",
+				         $realtime, lw && dut.ddram.write_lpend ? "L" : "R",
+				         lw && dut.ddram.write_lpend ? dut.ddram.write_laddr : dut.ddram.write_raddr,
+				         lw && dut.ddram.write_lpend ? dut.ddram.write_ldata : dut.ddram.write_rdata,
+				         lw && dut.ddram.write_lpend ? dut.ddram.laddr : dut.ddram.raddr,
+				         dut.ddram.state, dut.ddram.DDRAM_BUSY, dut.ddram.burst_write_lbusy, dut.ddram.burst_write_rbusy,
+				         dut.ddram.burst_read_lbusy, dut.ddram.burst_read_rbusy);
+		end
+		// A random VRAM write was issued at the previous edge (ddram.sv then
+		// sits in state 6 with the DDRAM write command up). It completed the
+		// 64-bit word with the flag/colour read for the port-1 address of
+		// the edge before that.
+		issued = dut.ddram.state == 6 && dut.ddram.ram_write;
+		if (issued && !vw_issued_d) begin
+			wa = dut.ddram.ram_address[18:2];
+			if (vw_fw_a1_d != wa) begin
+				vw_fw_wrong++;
+				errors++;
+				// the flag used differs from the written word's own
+				if (fw_flag(vw_fw_a1_d) != fw_flag(wa)) vw_fw_wrong_effect++;
+				if (vw_fw_wrong <= 20)
+					$display("[%0t] VRAM write to %05h issued with the flash-write lookup of %05h (flags %b/%b)",
+					         $realtime, {wa, 1'b0}, {vw_fw_a1_d, 1'b0}, fw_flag(wa), fw_flag(vw_fw_a1_d));
+			end
+		end
+		vw_issued_d <= issued;
+		vw_fw_a1_d <= vw_fw_a1;
+		if ((lw && (dut.ddram.state != 0 || dut.ddram.DDRAM_BUSY)) || (rw && (dut.ddram.state != 0 || dut.ddram.DDRAM_BUSY)))
+			vw_deferred++;
+		vw_old_lwe <= |dut.ddram.lwe;  vw_old_lras <= dut.ddram.lras;
+		vw_old_rwe <= |dut.ddram.rwe;  vw_old_rras <= dut.ddram.rras;
+		vw_fw_a1 <= dut.ddram.vram_fw.ADDR1;
+	end
+	final $display("tb_boot: SDRAM-tier VRAM writes %0d (%0d latched while ddram.sv was busy), %0d lost, %0d issued with another address's flash-write lookup (%0d with a different flag)",
+	               vw_writes, vw_deferred, vw_lost, vw_fw_wrong, vw_fw_wrong_effect);
 	// where CLUT/VDL and video transfers point (64 KiB VRAM blocks)
 	int blk_clut [16], blk_vid [16];
 	reg clut_d = 0, vid_d = 0;
@@ -522,8 +604,9 @@ module tb_boot;
 	end
 	initial forever begin
 		#1ms;
-		$display("[%0t] cpu A=%08h  pause %0d%%  frames %0d  CD sectors %0d  SDRAM errors %0d", $realtime,
-		         dut.p3do.CPU_A, cycles ? int'(pause_cycles * 100 / cycles) : 0, frames, sectors_sent, sdram.errors);
+		$display("[%0t] cpu A=%08h  pause %0d%%  frames %0d  CD sectors %0d  SDRAM errors %0d  VRAM writes lost %0d, bad FW lookups %0d",
+		         $realtime, dut.p3do.CPU_A, cycles ? int'(pause_cycles * 100 / cycles) : 0, frames, sectors_sent, sdram.errors,
+		         vw_lost, vw_fw_wrong_effect);
 	end
 
 	// framework video -> PPM frames
@@ -546,7 +629,7 @@ module tb_boot;
 	task automatic save_frame(input int n);
 		int fd;
 		bit any;
-		fd = $fopen($sformatf("build/sim/frames/frame_%04d.ppm", n), "wb");
+		fd = $fopen($sformatf("%s/frames/frame_%04d.ppm", outdir, n), "wb");
 		if (fd == 0) return;
 		$fwrite(fd, "P6\n320 240\n255\n");
 		any = 0;
@@ -639,7 +722,7 @@ module tb_boot;
 		$display("[%0t] core running", $realtime);
 
 		#(run_ms * 1ms);
-		dump_vram_fb(32'h000000, 1638, "build/sim/frames/vram_all.ppm");
+		dump_vram_fb(32'h000000, 1638, {outdir, "/frames/vram_all.ppm"});
 		$display("tb_boot: %0d frames, %0d CD sectors (%0d served by the firmware model), SDRAM model errors %0d, TB errors %0d",
 		         frames, sectors_sent, served, sdram.errors, errors);
 		if (chk_fd != 0)

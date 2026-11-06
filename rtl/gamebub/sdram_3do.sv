@@ -29,7 +29,11 @@
 module sdram_3do #(
 	parameter int CLK_HZ         = 100_000_000,
 	parameter int POWERUP_US     = 200,
-	parameter int REFRESH_CYCLES = 750,     // SEC-side refresh period when the 3DO does not refresh (7.5 us)
+	// The SDRAM is refreshed by the 3DO's own refresh cycles (as on MiSTer).
+	// If none is seen for REFRESH_CYCLES (3DO in reset, or its BIOS has not
+	// enabled DRAM refresh yet) the SEC part inserts one, pausing the 3DO if
+	// it is running and closing/re-opening its open pages around it.
+	parameter int REFRESH_CYCLES = 1500,    // 15 us
 	// Pipeline stage at which read data is taken. With READ_STAGE = 5 the
 	// DQ sampling instant and the cycle in which `dout` updates are exactly
 	// those of MiSTer's sdram.sv (DQ sampled about 40 ns after the READ
@@ -166,25 +170,40 @@ module sdram_3do #(
 		bit [ 1:0] BE;
 		bit        RFS;
 		bit        SEC;   // read belongs to the secondary port
+		bit        ALL;   // precharge all banks
 	} state_t;
 	state_t state[8];      // state[0] is the mux of tdm_s0/sec_s0 below
 	state_t tdm_s0, sec_s0; // registered command from each part (MiSTer's state[0])
 	reg     sec_own;        // sec_active delayed: which part produced the current state[0]
 
 	// ------------------------------------------------------------------
-	// MCLK slot counter (unchanged from MiSTer)
+	// MCLK slots
+	//
+	// MiSTer runs a free counter from the PHASE1 rising edge: slot 0 is the
+	// cycle in which the rise is seen, slots 1-3 follow, slots 4-7 fall in
+	// PHASE2. That is only correct if PHASE2 starts exactly 4 cycles after
+	// PHASE1. When the 3DO is paused with PHASE1 high (which the secondary
+	// port does at arbitrary times), the counter would run through slots
+	// 4-7 during the freeze and park, and the PHASE2 work after the pause
+	// (DRAM writes, RAS) would be lost. Here slots 0-3 start at the PHASE1
+	// rise and slots 4-7 at the PHASE1 fall, parking (SLOT_PARK) in between.
+	// In normal operation the slot sequence is cycle-identical to MiSTer.
 	// ------------------------------------------------------------------
-	reg [3:0] st_num;
-	reg       sync_old;
+	localparam bit [3:0] SLOT_PARK = 4'd8;
+	reg  [3:0] slot_cnt;
+	reg        sync_old;
+	wire       sync_rise = sync && !sync_old;
+	wire       sync_fall = !sync && sync_old;
+	wire [3:0] slot = sync_rise ? 4'd0 : sync_fall ? 4'd4 : slot_cnt;
 	always @(posedge clk) begin
 		sync_old <= sync;
-		if (!init_done) begin
-			st_num <= 4'd8;
-		end else begin
-			if (st_num < 4'd8) st_num <= st_num + 4'd1;
-			if (sync && !sync_old) st_num <= 4'd1;
-		end
+		if (!init_done)                         slot_cnt <= SLOT_PARK;
+		else if (sync_rise)                     slot_cnt <= 4'd1;
+		else if (sync_fall)                     slot_cnt <= 4'd5;
+		else if (slot_cnt == 4'd3 || slot_cnt == 4'd7) slot_cnt <= SLOT_PARK;
+		else if (slot_cnt != SLOT_PARK)         slot_cnt <= slot_cnt + 4'd1;
 	end
+	wire parked = (slot == SLOT_PARK);
 
 	// ------------------------------------------------------------------
 	// TDM part: 3DO DRAM in banks 0 (left) and 1 (right)
@@ -193,6 +212,11 @@ module sdram_3do #(
 	reg [12:0] lpage_row, rpage_row;
 	reg        sec_active;                  // SEC owns the command bus
 	reg        tdm_refresh_seen;
+	reg        r_pre_slot3;                 // right page was closed at slot 3 in this MCLK
+	// Cycles since an ACTIVE was issued to bank 0/1 (by either part),
+	// measured on the issued command stream (state[0]); a command decided
+	// now is issued act_cnt + 2 cycles after that ACTIVE.
+	reg  [3:0] act_cnt [2];
 
 	always @(posedge clk) begin
 		state_t t;
@@ -204,38 +228,37 @@ module sdram_3do #(
 			                                    CTRL_IDLE;
 			t.RFS = 1;
 		end else if (!sec_active) begin
-			if (lras && lcode == 4'h8 && st_num[2:0] == 3'd5) begin
+			if (lras && lcode == 4'h8 && slot == 4'd5) begin
 				t.CMD  = CTRL_RAS;
 				t.ROW  = laddr[22:11];
 				t.BANK = 2'd0;
 				lpage_opened <= 1;
 				lpage_row    <= laddr[22:11];
 			end
-			if (rras && rcode == 4'h8 && st_num[2:0] == 3'd6) begin
+			if (rras && rcode == 4'h8 && slot == 4'd6) begin
 				t.CMD  = CTRL_RAS;
 				t.ROW  = raddr[22:11];
 				t.BANK = 2'd1;
 				rpage_opened <= 1;
 				rpage_row    <= raddr[22:11];
 			end
-			// Slot 0 is the first cycle of PHASE1. MiSTer re-issues this read on
-			// every cycle while the 3DO is paused with PHASE1 high (slot counter
-			// parked at 8), which overwrites the right half of `dout` with left
-			// data before MADAM samples it after the pause. Only the real slot 0
-			// (PHASE1 rising) issues the read here.
-			if (lras && lcode == 4'h1 && st_num[2:0] == 3'd0 && sync && !sync_old && lpage_opened) begin
+			// Slot 0 is the first cycle of PHASE1. MiSTer's parked counter also
+			// matched here and re-issued this read on every cycle of a pause
+			// with PHASE1 high, overwriting the right half of `dout` with left
+			// data before MADAM samples it; here it is issued once.
+			if (lras && lcode == 4'h1 && slot == 4'd0 && lpage_opened) begin
 				t.CMD  = CTRL_CAS;
 				t.COL  = laddr[10:2];
 				t.RD   = 1;
 				t.BANK = 2'd0;
 			end
-			if (rras && rcode == 4'h1 && st_num[2:0] == 3'd1 && rpage_opened) begin
+			if (rras && rcode == 4'h1 && slot == 4'd1 && rpage_opened) begin
 				t.CMD  = CTRL_CAS;
 				t.COL  = raddr[10:2];
 				t.RD   = 1;
 				t.BANK = 2'd1;
 			end
-			if (lras && lcode == 4'h2 && (st_num[2:0] == 3'd2 || st_num[2:0] == 3'd6) && lpage_opened) begin
+			if (lras && lcode == 4'h2 && (slot == 4'd2 || slot == 4'd6) && lpage_opened) begin
 				t.CMD  = CTRL_CAS;
 				t.COL  = laddr[10:2];
 				t.WE   = 1;
@@ -243,7 +266,7 @@ module sdram_3do #(
 				t.DATA = din[31:16];
 				t.BANK = 2'd0;
 			end
-			if (rras && rcode == 4'h2 && (st_num[2:0] == 3'd3 || st_num[2:0] == 3'd7) && rpage_opened) begin
+			if (rras && rcode == 4'h2 && (slot == 4'd3 || slot == 4'd7) && rpage_opened) begin
 				t.CMD  = CTRL_CAS;
 				t.COL  = raddr[10:2];
 				t.WE   = 1;
@@ -251,28 +274,36 @@ module sdram_3do #(
 				t.DATA = din[15:0];
 				t.BANK = 2'd1;
 			end
-			if (lras && (lcode == 4'h4 || lcode == 4'hC) && st_num[2:0] == 3'd4) begin
+			// 3DO refresh. Skipped if it would follow a deferred slot-3
+			// precharge by one cycle (tRP); the SEC refresh covers any gap.
+			if (lras && (lcode == 4'h4 || lcode == 4'hC) && slot == 4'd4 && !r_pre_slot3) begin
 				t.CMD  = CTRL_RAS;
 				t.BANK = 2'd0;
 				t.RFS  = 1;
 				tdm_refresh_seen <= 1;
 			end
-			else if (!lras && !rras && (lcode == 4'h2) && st_num[2:0] == 3'd4) begin
+			else if (!lras && !rras && (lcode == 4'h2) && slot == 4'd4 && !r_pre_slot3) begin
 				t.CMD  = CTRL_RAS;
 				t.BANK = 2'd0;
 				t.RFS  = 1;
 				tdm_refresh_seen <= 1;
 			end
-			if (!lras && lpage_opened && st_num[2:0] == 3'd0) begin
+			// Page close: slot 0/1 as MiSTer, and while parked (MiSTer's parked
+			// counter matched slot 0 too) so pages close in reset/pauses.
+			// tRAS: if the page was opened only in the previous MCLK (slot 5/6
+			// -> slot 0/1 would be 30 ns), the precharge moves to slot 2/3.
+			if (!lras && lpage_opened && (((slot == 4'd0 || parked) && act_cnt[0] >= 4'd3) || slot == 4'd2)) begin
 				t.CMD  = CTRL_PRE;
 				t.BANK = 2'd0;
 				lpage_opened <= 0;
 			end
-			if (!rras && rpage_opened && st_num[2:0] == 3'd1) begin
+			if (!rras && rpage_opened && (((slot == 4'd1 || (parked && !(!lras && lpage_opened))) && act_cnt[1] >= 4'd3) || slot == 4'd3)) begin
 				t.CMD  = CTRL_PRE;
 				t.BANK = 2'd1;
 				rpage_opened <= 0;
+				r_pre_slot3 <= (slot == 4'd3);
 			end
+			if (slot == 4'd0) r_pre_slot3 <= 0;
 		end
 		tdm_s0 <= t;
 	end
@@ -293,6 +324,7 @@ module sdram_3do #(
 		S_RP,
 		S_REOPEN,
 		S_REOPEN_WAIT,
+		S_REF_RP,
 		S_REFRESH,
 		S_REFRESH_WAIT,
 		S_DONE
@@ -310,6 +342,7 @@ module sdram_3do #(
 	reg  [10:0] ref_cnt;
 	reg         ref_due;
 	reg         reopen_l, reopen_r;
+	reg         op_refresh;
 	reg         paused_s, core_rst_s;
 
 	always @(posedge clk) begin
@@ -323,16 +356,15 @@ module sdram_3do #(
 	// precharge); those are harmless and are muted once SEC takes the bus.
 	// The first SEC data command is issued >5 cycles after sec_active, so the
 	// last TDM read still in the pipeline completes undisturbed.
-	wire tdm_idle = (st_num == 4'd8);
+	wire tdm_idle = parked;
 
 	assign SEC_HOLD = (sst != S_IDLE) || (sec_req && init_done) || ref_due;
 
-	// SEC-side refresh: needed while the 3DO is in reset (it issues no
-	// refresh cycles then). Done only when all TDM pages are closed.
+	// SEC-side refresh, see REFRESH_CYCLES.
 	always @(posedge clk) begin
 		if (!init_done || tdm_refresh_seen || (sst == S_REFRESH)) ref_cnt <= '0;
 		else if (ref_cnt != '1) ref_cnt <= ref_cnt + 1'd1;
-		ref_due <= init_done && (ref_cnt >= REFRESH_CYCLES) && core_rst_s;
+		ref_due <= init_done && (ref_cnt >= REFRESH_CYCLES);
 	end
 
 	always @(posedge clk) begin
@@ -369,14 +401,23 @@ module sdram_3do #(
 
 				S_DRAIN: begin
 					if (wait_cnt) wait_cnt <= wait_cnt - 1'd1;
-					else if (ref_due && !lpage_opened && !rpage_opened) begin
-						// Refresh first (the 3DO is in reset, so its pages are
-						// closed); the pending transfer follows from S_IDLE.
-						sst <= S_REFRESH;
-					end else if (!sec_req) begin
-						// only a refresh was due, but a TDM page is still open
-						sst <= S_IDLE;
+					else if (ref_due) begin
+						// Refresh first; a pending transfer follows from S_IDLE.
+						// AUTO REFRESH needs all banks closed: close the 3DO's
+						// pages and re-open them afterwards.
+						op_refresh <= 1;
+						reopen_l <= lpage_opened;
+						reopen_r <= rpage_opened;
+						if (lpage_opened || rpage_opened) begin
+							sec_cmd.CMD = CTRL_PRE;
+							sec_cmd.ALL = 1;
+							wait_cnt <= 4'd2;
+							sst <= S_REF_RP;
+						end else begin
+							sst <= S_REFRESH;
+						end
 					end else begin
+						op_refresh <= 0;
 						cur_bank <= sec_addr[23:22];
 						cur_row  <= sec_addr[21:9];
 						col      <= sec_addr[8:0];
@@ -467,36 +508,41 @@ module sdram_3do #(
 				end
 
 				S_REOPEN: begin
-					// Re-activate the TDM page that was closed for this access.
-					if (reopen_l) begin
+					// Re-activate the 3DO page(s) closed for this access/refresh
+					// (tRRD between the two ACTIVEs, tRCD before the 3DO resumes).
+					if (wait_cnt) wait_cnt <= wait_cnt - 1'd1;
+					else if (reopen_l) begin
 						sec_cmd.CMD  = CTRL_RAS;
 						sec_cmd.BANK = 2'd0;
 						sec_cmd.ROW  = lpage_row;
 						reopen_l <= 0;
 						wait_cnt <= 4'd2;
-						sst <= S_DONE;
 					end else if (reopen_r) begin
 						sec_cmd.CMD  = CTRL_RAS;
 						sec_cmd.BANK = 2'd1;
 						sec_cmd.ROW  = rpage_row;
 						reopen_r <= 0;
 						wait_cnt <= 4'd2;
-						sst <= S_DONE;
 					end else begin
-						wait_cnt <= 4'd0;
 						sst <= S_DONE;
 					end
+				end
+
+				S_REF_RP: begin
+					if (wait_cnt) wait_cnt <= wait_cnt - 1'd1;
+					else sst <= S_REFRESH;
 				end
 
 				S_REFRESH: begin
 					sec_cmd.CMD  = CTRL_RAS;
 					sec_cmd.RFS  = 1;
-					wait_cnt <= 4'd7; // tRC
+					wait_cnt <= 4'd7; // tRFC
 					sst <= S_REFRESH_WAIT;
 				end
 
 				S_REFRESH_WAIT: begin
 					if (wait_cnt) wait_cnt <= wait_cnt - 1'd1;
+					else if (reopen_l || reopen_r) sst <= S_REOPEN;   // ends in S_DONE
 					else sst <= S_IDLE;
 				end
 
@@ -504,7 +550,7 @@ module sdram_3do #(
 					// tRCD after a re-open so the 3DO can CAS right away
 					if (wait_cnt) wait_cnt <= wait_cnt - 1'd1;
 					else begin
-						sec_done   <= 1;
+						sec_done   <= !op_refresh;   // a refresh completes no client transfer
 						sec_active <= 0;
 						sst <= S_IDLE;
 					end
@@ -528,6 +574,13 @@ module sdram_3do #(
 	// delayed copy never drops a command at a hand-over.
 	always @(posedge clk) sec_own <= sec_active;
 	always_comb state[0] = sec_own ? sec_s0 : tdm_s0;
+
+	always @(posedge clk) begin
+		for (int b = 0; b < 2; b++) begin
+			if (state[0].CMD == CTRL_RAS && !state[0].RFS && state[0].BANK == 2'(b)) act_cnt[b] <= '0;
+			else if (act_cnt[b] != '1) act_cnt[b] <= act_cnt[b] + 1'd1;
+		end
+	end
 
 	always @(posedge clk) begin
 		state[1] <= state[0];
@@ -606,7 +659,7 @@ module sdram_3do #(
 				{1'bX,CTRL_RAS}: SDRAM_A <= ctrl_row;
 				{1'b0,CTRL_CAS}: SDRAM_A <= {4'b0000, ctrl_col};
 				{1'b1,CTRL_CAS}: begin SDRAM_A <= {4'b0000, ctrl_col}; SDRAM_DQM <= dqm; end
-				{1'bX,CTRL_PRE}: SDRAM_A <= 13'b0000000000000; // A10=0: precharge the selected bank
+				{1'bX,CTRL_PRE}: SDRAM_A <= {2'b00, state[0].ALL, 10'b0000000000}; // A10: all banks
 			endcase
 		end
 		else if (mode == MODE_LDM && ctrl_cmd == CTRL_RAS) SDRAM_A <= MODE;

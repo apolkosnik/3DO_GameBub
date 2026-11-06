@@ -133,9 +133,18 @@ module tb_sdram;
 	// MADAM_AG: read codes are gated with PHASE1, write codes with PHASE2
 	// (LCODE = {START, REF, ACCESS&WE&PHASE2, ACCESS&~WE&PHASE1}). All bus
 	// signals of an MCLK change together with the PHASE1 rise.
+	int bfm_pauses = 0;
 	task automatic mclk_cycle(input [3:0] lc, input [3:0] rc, input [20:2] a,
 	                          input [31:0] d, input [1:0] we, input bit ras_l, input bit ras_r);
 		@(posedge clk_mem);
+		// Like the core: SEC_HOLD pauses the 3DO at the next phase boundary
+		if (sec_hold && !core_rst) begin
+			bfm_pauses++;
+			frozen = 1;
+			while (sec_hold) @(posedge clk_mem);
+			frozen = 0;
+			@(posedge clk_mem);
+		end
 		sync  <= 1;
 		laddr <= {2'b00, a}; raddr <= {2'b00, a};
 		din   <= d; lwe <= we; rwe <= we;
@@ -227,19 +236,54 @@ module tb_sdram;
 		end
 		$display("[%0t] phase 2 (3DO DRAM) done, errors=%0d", $realtime, errors);
 
+		// 2b) 80 us of traffic in one open page without any 3DO refresh: the
+		//     controller must pause the 3DO and refresh on its own, closing
+		//     and re-opening the open pages around it.
+		begin
+			bit [20:2] base;
+			base = {10'd300, 9'd0};
+			dram_open(base);
+			for (int i = 0; i < 64; i++) dram_write(base + i, $urandom());
+			for (int k = 0; k < 1000; k++) begin
+				int i;
+				i = $urandom() % 64;
+				if (k % 3 == 0) dram_write(base + i, $urandom());
+				else            dram_read_check(base + i);
+			end
+			dram_close();
+		end
+		$display("[%0t] phase 2b (no 3DO refresh) done, errors=%0d, pauses=%0d", $realtime, errors, bfm_pauses);
+
 		// 3) Pause with a 3DO page open in banks 0/1, SEC accesses to banks
 		//    0..3 (forcing TDM page close/re-open), resume and keep using the
 		//    page. The core pauses on a phase boundary: either in PHASE2 (after
 		//    a write) or in PHASE1 (after the reads of an MCLK were issued; MADAM
 		//    samples the data only after the pause).
-		for (int r = 0; r < 8; r++) begin
+		for (int r = 0; r < 12; r++) begin
 			bit [20:2] base;
 			bit [23:0] aa;
 			base = {10'(r + 100), 9'd0};
 			aa   = {2'(r % 4), 13'(1024 + 37 * r), 9'(r * 13)};
 			dram_open(base);
 			for (int i = 0; i < 4; i++) dram_write(base + i, $urandom());
-			if (r[0] == 0) begin
+			if (r % 3 == 2) begin
+				// frozen in PHASE1 of a WRITE MCLK: the write code (PHASE2)
+				// only appears after the pause; the write must not be lost
+				bit [31:0] d;
+				d = $urandom();
+				@(posedge clk_mem);
+				sync <= 1; laddr <= {2'b00, base + 3}; raddr <= {2'b00, base + 3};
+				lcode <= 4'h0; rcode <= 4'h0; lwe <= 2'b11; rwe <= 2'b11; din <= d;
+				repeat (4) @(posedge clk_mem);
+				frozen = 1;
+				sec_write_check(aa, 64);
+				sec_read_check(aa, 64);
+				frozen = 0;
+				@(posedge clk_mem); sync <= 0; lcode <= 4'h2; rcode <= 4'h2;
+				repeat (4) @(posedge clk_mem);    // full PHASE2 half (slots 4-7)
+				lwe <= 0; rwe <= 0; lcode <= 4'h0; rcode <= 4'h0;
+				dram_ref[base + 3] = d;
+			end else if (r[0] == 0) begin
 				// frozen in PHASE2 after the last write (PHASE1 stays low)
 				@(posedge clk_mem);
 				frozen = 1;
@@ -281,6 +325,8 @@ module tb_sdram;
 		core_rst = 1;
 
 		repeat (100) @(posedge clk_mem);
+		$display("tb_sdram: 3DO BFM paused %0d times for SEC refresh", bfm_pauses);
+		if (bfm_pauses == 0) fail("SEC refresh while running was not exercised");
 		$display("tb_sdram: TB errors=%0d, SDRAM model errors=%0d", errors, model.errors);
 		if (errors == 0 && model.errors == 0) $display("tb_sdram: PASS");
 		else                                  $display("tb_sdram: FAIL");

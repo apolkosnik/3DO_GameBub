@@ -1,0 +1,323 @@
+// System testbench for the Game Bub 3DO core (p3do_gamebub).
+//
+// The complete core runs: ARM60 CPU, MADAM, CLIO, VRAM, ddram.sv, the DDR
+// bridge, the SDRAM controller (against the timing-checking SDRAM model),
+// the CD back end and the host interface. A host BFM implements the Game
+// Bub framework's host protocol exactly as SpiReceiverFifo drives it
+// (enable held until done, done ignored in the first cycle) and the HostV0
+// command sequence the MCU uses: file transfers, SetupComplete, CoreRun.
+//
+// The BIOS is sim/tb/testrom.S (see there for the checks it performs). Its
+// verdict is written to NVRAM and read back here through FileReadStart(3)
+// while the core is running (host SDRAM access with the 3DO paused).
+// Video timing towards the framework is checked as well (320 pixels per
+// line, 240 lines per frame).
+//
+// Plusargs: +rom=<file> (default build/sim/testrom.bin), +be (host sends
+//           big-endian words; detected by the core from the ISO header),
+//           +iso (load a small ISO image), +frames=<n> video frames to check
+//
+// Copyright (c) 2026 Adam Polkosnik
+// SPDX-License-Identifier: GPL-3.0-or-later
+
+`timescale 1ns/1ps
+
+module tb_top;
+	// clk_sys 50 MHz and clk_mem 100 MHz are phase aligned (same MMCM)
+	reg clk_mem = 0;
+	reg clk_sys = 0;
+	reg clk_vid = 0;
+	// independent generators with coincident edges (no delta-cycle skew
+	// between the two domains, as with a real MMCM)
+	always #5  clk_mem = ~clk_mem;
+	always #10 clk_sys = ~clk_sys;
+	always #10.191 clk_vid = ~clk_vid;     // 49.0625 MHz
+
+	reg reset = 1;
+
+	// host interface
+	reg         h_enable = 0, h_write = 0;
+	reg  [31:0] h_addr = 0, h_wdata = 0;
+	wire [31:0] h_rdata;
+	wire        h_done;
+	reg         h_req = 0;
+	wire        h_busy, h_cdone, h_err;
+
+	// video / audio
+	wire [5:0]  vr, vg, vb;
+	wire        vde, vvbl, vhbl;
+	wire [15:0] al, ar;
+
+	// SDRAM
+	wire        s_clk, s_cke, s_cs, s_ras, s_cas, s_we, s_oe;
+	wire [ 1:0] s_dqm, s_ba;
+	wire [12:0] s_a;
+	wire [15:0] s_dq_out, s_dq_in;
+
+	reg  [11:0] buttons = 0;
+
+	p3do_gamebub #(.DISPLAY_DIVIDER(31)) dut (
+		.clock(clk_sys), .reset(reset),
+		.clocks_clockIn50M(1'b0),
+		.clocks_clockOutSystem(), .clocks_clockOutDisplay(), .clocks_clockOutSpi(), .clocks_locked(),
+		.video_data_r(vr), .video_data_g(vg), .video_data_b(vb),
+		.video_dataEnable(vde), .video_vblank(vvbl), .video_hblank(vhbl),
+		.audio_left(al), .audio_right(ar),
+		.host_mem_enable(h_enable), .host_mem_write(h_write), .host_mem_done(h_done),
+		.host_mem_address(h_addr), .host_mem_dataRead(h_rdata), .host_mem_dataWrite(h_wdata),
+		.host_commandHost_request(h_req), .host_commandHost_busy(h_busy),
+		.host_commandHost_done(h_cdone), .host_commandHost_error(h_err),
+		.host_commandCore_request(), .host_commandCore_busy(1'b0),
+		.host_commandCore_done(1'b0), .host_commandCore_error(1'b0),
+		.input_buttons_a(buttons[0]), .input_buttons_b(buttons[1]), .input_buttons_x(buttons[2]),
+		.input_buttons_y(buttons[3]), .input_buttons_up(buttons[4]), .input_buttons_down(buttons[5]),
+		.input_buttons_left(buttons[6]), .input_buttons_right(buttons[7]), .input_buttons_l(buttons[8]),
+		.input_buttons_r(buttons[9]), .input_buttons_start(buttons[10]), .input_buttons_select(buttons[11]),
+		.sdram_clock(s_clk), .sdram_cke(s_cke), .sdram_cs(s_cs), .sdram_ras(s_ras), .sdram_cas(s_cas),
+		.sdram_we(s_we), .sdram_dqm(s_dqm), .sdram_bank(s_ba), .sdram_address(s_a),
+		.sdram_dataIn(s_dq_in), .sdram_dataOut(s_dq_out), .sdram_dataDir(s_oe)
+	);
+
+	sdram_model sdram (
+		.clk(s_clk), .cke(s_cke), .cs_n(s_cs), .ras_n(s_ras), .cas_n(s_cas), .we_n(s_we),
+		.dqm(s_dqm), .ba(s_ba), .a(s_a), .dq_from_fpga(s_dq_out), .dq_oe_fpga(s_oe),
+		.dq_to_fpga(s_dq_in)
+	);
+
+	int errors = 0;
+	task automatic fail(input string m);
+		errors++;
+		$display("[%0t] TB ERROR: %s", $realtime, m);
+	endtask
+
+	// ------------------------------------------------------------------
+	// Host BFM (framework SpiReceiverFifo behaviour)
+	// ------------------------------------------------------------------
+	task automatic host_access(input bit wr, input [31:0] a, input [31:0] d, output [31:0] q);
+		int to;
+		@(posedge clk_sys);
+		h_enable <= 1; h_write <= wr; h_addr <= a; h_wdata <= d;
+		@(posedge clk_sys);              // first cycle: done is not looked at
+		to = 0;
+		while (!h_done) begin
+			@(posedge clk_sys);
+			if (++to > 2_000_000) begin fail($sformatf("host access %08h timed out", a)); break; end
+		end
+		q = h_rdata;
+		h_enable <= 0;
+	endtask
+
+	task automatic host_wr(input [31:0] a, input [31:0] d);
+		bit [31:0] q;
+		host_access(1, a, d, q);
+	endtask
+	task automatic host_rd(input [31:0] a, output [31:0] q);
+		host_access(0, a, 32'h0, q);
+	endtask
+
+	task automatic host_cmd(input [15:0] op, input [31:0] p1, input [31:0] p2, input [31:0] p3,
+	                        output [31:0] result, output bit error);
+		int to;
+		host_wr(32'hF000_0004, p1);
+		host_wr(32'hF000_0008, p2);
+		host_wr(32'hF000_000C, p3);
+		host_wr(32'hF000_0000, {16'h0, op});
+		@(posedge clk_sys);
+		h_req <= 1;
+		to = 0;
+		while (!(h_cdone || h_err)) begin
+			@(posedge clk_sys);
+			if (++to > 100000) begin fail($sformatf("command %04h timed out", op)); break; end
+		end
+		error = h_err;
+		host_rd(32'hF000_0000, result);
+		@(posedge clk_sys);
+		h_req <= 0;
+		while (h_cdone || h_err) @(posedge clk_sys);
+	endtask
+
+	// ------------------------------------------------------------------
+	// Files
+	// ------------------------------------------------------------------
+	bit        host_be;
+	bit [7:0]  rom [int];
+	int        rom_len;
+	bit [7:0]  iso [int];
+	int        iso_len;
+
+	function automatic [31:0] host_word(input [7:0] b0, input [7:0] b1, input [7:0] b2, input [7:0] b3);
+		host_word = host_be ? {b0, b1, b2, b3} : {b3, b2, b1, b0};
+	endfunction
+
+	task automatic send_file(input int id, input [31:0] base, ref bit [7:0] data [int], input int len);
+		bit [31:0] r;
+		bit e;
+		host_cmd(16'h0300, id, 0, 0, r, e);
+		if (e) fail($sformatf("FileWriteStart(%0d) error", id));
+		for (int o = 0; o < len; o += 4)
+			host_wr(base + o, host_word(data.exists(o) ? data[o] : 8'h00, data.exists(o+1) ? data[o+1] : 8'h00,
+			                            data.exists(o+2) ? data[o+2] : 8'h00, data.exists(o+3) ? data[o+3] : 8'h00));
+		host_cmd(16'h0301, id, len, 0, r, e);
+		if (e) fail($sformatf("FileWriteEnd(%0d) error", id));
+	endtask
+
+	// Read the NVRAM file back as the MCU does on exit
+	bit [7:0] nvram [32768];
+	task automatic read_nvram(input int bytes);
+		bit [31:0] r, w;
+		bit e;
+		host_cmd(16'h0302, 3, 0, 0, r, e);
+		if (e) fail("FileReadStart(3) error");
+		if (r != 32'h8000) fail($sformatf("FileReadStart(3) size %08h", r));
+		for (int o = 0; o < bytes; o += 4) begin
+			host_rd(32'h3000_0000 + o, w);
+			if (host_be) {nvram[o], nvram[o+1], nvram[o+2], nvram[o+3]} = w;
+			else         {nvram[o+3], nvram[o+2], nvram[o+1], nvram[o]} = w;
+		end
+		host_cmd(16'h0303, 3, 0, 0, r, e);
+	endtask
+
+	// ------------------------------------------------------------------
+	// Video timing monitor (framework side)
+	// ------------------------------------------------------------------
+	int px_in_line = 0, lines_in_frame = 0, frames = 0, bad_lines = 0, bad_frames = 0;
+	reg vhbl_d = 0, vvbl_d = 0;
+	always @(posedge clk_sys) begin
+		vhbl_d <= vhbl; vvbl_d <= vvbl;
+		if (vde) px_in_line++;
+		if (vhbl && !vhbl_d) begin
+			if (px_in_line != 320) begin
+				bad_lines++;
+				if (bad_lines < 5) $display("[%0t] video: line %0d has %0d pixels", $realtime, lines_in_frame, px_in_line);
+			end
+			px_in_line = 0;
+			lines_in_frame++;
+		end
+		if (vvbl && !vvbl_d) begin
+			if (frames > 0 && lines_in_frame != 240) begin
+				bad_frames++;
+				$display("[%0t] video: frame %0d has %0d lines", $realtime, frames, lines_in_frame);
+			end
+			frames++;
+			lines_in_frame = 0;
+			px_in_line = 0;
+		end
+	end
+
+	// ------------------------------------------------------------------
+	// Debug trace (+trace): CPU bus activity and pause state
+	// ------------------------------------------------------------------
+	bit trace;
+	initial trace = $test$plusargs("trace");
+	always @(posedge clk_sys) begin
+		if (trace && dut.p3do.MCLK_PH2 && !dut.p3do.CPU_nMREQ)
+			$display("[%0t] CPU %s %08h %08h %s", $realtime, dut.p3do.CPU_nRW ? "W" : "R", dut.p3do.CPU_A,
+			         dut.p3do.CPU_nRW ? dut.p3do.CPU_DO : dut.p3do.CPU_DI, dut.p3do.CPU_nOPC ? "" : "op");
+	end
+
+	initial if ($test$plusargs("state")) forever begin
+		#20us;
+		$display("[%0t] state: reset_3do=%b halt=%b bios=%b pause=%b sec_hold=%b sec_paused=%b core_rst_lock=%b PH1=%b sst=%0d nMREQ=%b CPU_A=%08h ioBusy=%b ddrBusy=%b LRDY=%b RRDY=%b",
+		         $realtime, dut.reset_3do, dut.core_halt, dut.bios_loaded, dut.pause, dut.sec_hold, dut.sec_paused,
+		         dut.core_rst_lock, dut.MCLK_CE, dut.sdram.sst, dut.p3do.CPU_nMREQ, dut.p3do.CPU_A,
+		         dut.ddr_io_busy, dut.ddr_busy, dut.VRAM_LRDY, dut.VRAM_RRDY);
+		$display("          ddram.state=%0d io_read_busy=%b bridge.st=%0d DDRAM_BUSY=%b ddr_sec_req=%b arb.busy=%b arb.sel=%0d m_req=%b",
+		         dut.ddram.state, dut.ddram.io_read_busy, dut.ddr_bridge.st, dut.DDRAM_BUSY, dut.ddr_sec_req,
+		         dut.arb.busy, dut.arb.sel, dut.m_req);
+	end
+
+	// ------------------------------------------------------------------
+	initial begin
+		string romfile;
+		int fd, c, n_frames;
+		bit [31:0] r;
+		bit e;
+		bit done;
+
+		if (!$value$plusargs("rom=%s", romfile)) romfile = "build/sim/testrom.bin";
+		if (!$value$plusargs("frames=%d", n_frames)) n_frames = 2;
+		host_be = $test$plusargs("be");
+
+		fd = $fopen(romfile, "rb");
+		if (fd == 0) begin $display("cannot open %s", romfile); $finish; end
+		rom_len = 0;
+		while ((c = $fgetc(fd)) != -1) rom[rom_len++] = c[7:0];
+		$fclose(fd);
+		rom_len = (rom_len + 3) & ~3;
+		$display("tb_top: BIOS %s, %0d bytes, host %s-endian", romfile, rom_len, host_be ? "big" : "little");
+
+		// A small ISO: sector 0 starts with the Opera volume header so the
+		// core can detect the host byte order, plus a recognisable pattern.
+		iso_len = 4 * 2048;
+		for (int i = 0; i < iso_len; i++) iso[i] = 8'((i * 7 + (i >> 11)) & 8'hFF);
+		iso[0] = 8'h01; iso[1] = 8'h5A; iso[2] = 8'h5A; iso[3] = 8'h5A; iso[4] = 8'h5A; iso[5] = 8'h5A; iso[6] = 8'h01;
+
+		repeat (20) @(posedge clk_sys);
+		reset <= 0;
+
+		// GetStatus until the core is ready for setup
+		do begin
+			host_cmd(16'h0000, 0, 0, 0, r, e);
+		end while (r != 2);
+		$display("[%0t] core status: setup", $realtime);
+
+		// files in files.json order
+		if ($test$plusargs("iso") || host_be) send_file(0, 32'h1000_0000, iso, iso_len);
+		send_file(1, 32'h2000_0000, rom, rom_len);
+
+		host_cmd(16'h0102, 0, 0, 0, r, e);   // SetupComplete
+		do begin
+			host_cmd(16'h0000, 0, 0, 0, r, e);
+		end while (r != 3);
+		$display("[%0t] core status: halted (setup complete)", $realtime);
+
+		// The blank NVRAM must have been formatted (save file not supplied)
+		read_nvram(16);
+		if ({nvram[0], nvram[1], nvram[2], nvram[3]} != 32'h015A5A5A || nvram[6] != 8'h02)
+			fail($sformatf("NVRAM not formatted: %02h %02h %02h %02h .. %02h", nvram[0], nvram[1], nvram[2], nvram[3], nvram[6]));
+
+		host_cmd(16'h0200, 1, 0, 0, r, e);   // NotifyFocus(1)
+		host_cmd(16'h0100, 0, 0, 0, r, e);   // CoreRun
+		$display("[%0t] core running", $realtime);
+		if ($test$plusargs("short")) begin #300us; $finish; end
+
+		// Poll the verdict in NVRAM bytes 0x100..0x10F
+		done = 0;
+		for (int t = 0; t < 400 && !done; t++) begin
+			#100us;
+			read_nvram(16'h110);
+			if ({nvram[256], nvram[257], nvram[258], nvram[259]} == "PASS" ||
+			    {nvram[256], nvram[257], nvram[258], nvram[259]} == "FAIL") done = 1;
+		end
+		if (!done) fail("test ROM did not report a result");
+		else begin
+			bit [31:0] test, addr, checks;
+			test   = {nvram[260], nvram[261], nvram[262], nvram[263]};
+			addr   = {nvram[264], nvram[265], nvram[266], nvram[267]};
+			checks = {nvram[268], nvram[269], nvram[270], nvram[271]};
+			$display("[%0t] test ROM: %s test=%0d addr=%08h checks=%0d", $realtime,
+			         {nvram[256], nvram[257], nvram[258], nvram[259]}, test, addr, checks);
+			if ({nvram[256], nvram[257], nvram[258], nvram[259]} != "PASS") fail("test ROM reported FAIL");
+			if (checks != 64*4 + 1 + 64*5 + 2 + 16) fail($sformatf("unexpected number of checks %0d", checks));
+			for (int i = 0; i < 16; i++)
+				if (nvram[8'h80 + i] != 8'(8'hA5 + 8'h13 * i)) fail($sformatf("NVRAM byte %02h = %02h", 8'h80 + i, nvram[8'h80 + i]));
+		end
+
+		// video timing towards the framework
+		while (frames < n_frames + 1) @(posedge clk_sys);
+		$display("[%0t] video: %0d frames, bad lines %0d, bad frames %0d", $realtime, frames, bad_lines, bad_frames);
+		if (bad_lines || bad_frames) fail("video timing");
+
+		$display("tb_top: TB errors=%0d, SDRAM model errors=%0d", errors, sdram.errors);
+		if (errors == 0 && sdram.errors == 0) $display("tb_top: PASS");
+		else                                  $display("tb_top: FAIL");
+		$finish;
+	end
+
+	initial begin
+		#200ms;
+		$display("tb_top: TIMEOUT");
+		$display("tb_top: FAIL");
+		$finish;
+	end
+endmodule

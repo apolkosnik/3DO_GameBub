@@ -85,20 +85,63 @@ module gb_host (
 
 	localparam NVRAM_BYTES = 32'h8000;
 
+	// NVRAM formatting (blank 3DO NVRAM, from Main_MiSTer support/3do/3do.cpp)
+	function automatic [7:0] blank_byte(input [7:0] i);
+		case (i)
+			8'h00: blank_byte = 8'h01; 8'h01: blank_byte = 8'h5A; 8'h02: blank_byte = 8'h5A; 8'h03: blank_byte = 8'h5A;
+			8'h04: blank_byte = 8'h5A; 8'h05: blank_byte = 8'h5A; 8'h06: blank_byte = 8'h02;
+			8'h28: blank_byte = 8'h4E; 8'h29: blank_byte = 8'h56; 8'h2A: blank_byte = 8'h52; 8'h2B: blank_byte = 8'h41; 8'h2C: blank_byte = 8'h4D;
+			8'h48: blank_byte = 8'hFF; 8'h49: blank_byte = 8'hFF; 8'h4A: blank_byte = 8'hFF; 8'h4B: blank_byte = 8'hFF;
+			8'h4F: blank_byte = 8'h01;
+			8'h52: blank_byte = 8'h80;
+			8'h54: blank_byte = 8'hFF; 8'h55: blank_byte = 8'hFF; 8'h56: blank_byte = 8'hFF; 8'h57: blank_byte = 8'hFE;
+			8'h5F: blank_byte = 8'h01;
+			8'h67: blank_byte = 8'h84;
+			8'h84: blank_byte = 8'h85; 8'h85: blank_byte = 8'h5A; 8'h86: blank_byte = 8'h02; 8'h87: blank_byte = 8'hB6;
+			8'h8B: blank_byte = 8'h98;
+			8'h8F: blank_byte = 8'h98;
+			8'h93: blank_byte = 8'h14;
+			8'h97: blank_byte = 8'h14;
+			8'h98: blank_byte = 8'h7A; 8'h99: blank_byte = 8'hA5; 8'h9A: blank_byte = 8'h65; 8'h9B: blank_byte = 8'hBD;
+			8'h9F: blank_byte = 8'h84;
+			8'hA3: blank_byte = 8'h84;
+			8'hA6: blank_byte = 8'h7F; 8'hA7: blank_byte = 8'h68;
+			8'hAB: blank_byte = 8'h14;
+			default: blank_byte = 8'h00;
+		endcase
+	endfunction
+
+	// Blank-NVRAM word w (SDRAM word index from the NVRAM base) in host
+	// storage order (see the header): little-endian host words put file
+	// bytes {2w+3,2w+2} in even and {2w-1,2w-2} in odd SDRAM words.
+	function automatic [15:0] fmt_word(input [13:0] w, input le);
+		bit [14:0] n;
+		n = {w, 1'b0};
+		if (n >= 15'h100)       fmt_word = 16'h0000;
+		else if (!le)           fmt_word = {blank_byte(n[7:0]), blank_byte(n[7:0] + 8'd1)};
+		else if (!w[0])         fmt_word = {blank_byte(n[7:0] + 8'd3), blank_byte(n[7:0] + 8'd2)};
+		else                    fmt_word = {blank_byte(n[7:0] - 8'd1), blank_byte(n[7:0] - 8'd2)};
+	endfunction
+
 	// ------------------------------------------------------------------
 	// SDRAM access engine (clk_sys request, clk_mem execution)
+	//   normal: one host word = 2 SDRAM words
+	//   format: one SDRAM row (512 words) of the blank NVRAM image
 	// ------------------------------------------------------------------
 	reg         xreq_tgl;        // clk_sys -> clk_mem
 	reg         xdone_tgl;       // clk_mem -> clk_sys
 	reg         x_we;
+	reg         x_fmt;
 	reg  [23:0] x_addr;          // SDRAM word address of the first word
 	reg  [31:0] x_wdata;
 	reg  [31:0] x_rdata;         // written in clk_mem, read after xdone
+	reg  [ 4:0] x_row;           // NVRAM row (format mode)
 
 	reg  [2:0]  xreq_s;
-	reg         x_word;          // which 16-bit half (0 = [31:16])
-	assign sec_len   = 10'd2;
-	assign sec_wdata = x_word ? x_wdata[15:0] : x_wdata[31:16];
+	reg  [ 8:0] x_widx;          // word index within the transfer
+	assign sec_len   = x_fmt ? 10'd512 : 10'd2;
+	assign sec_wdata = x_fmt ? fmt_word({x_row, x_widx}, HOST_LE) :
+	                   x_widx[0] ? x_wdata[15:0] : x_wdata[31:16];
 	assign sec_wbe   = 2'b11;
 
 	always @(posedge clk_mem) begin
@@ -111,15 +154,15 @@ module gb_host (
 			if (!sec_req && (xreq_s[2] != xreq_s[1])) begin
 				sec_we   <= x_we;
 				sec_addr <= x_addr;
-				x_word   <= 0;
+				x_widx   <= '0;
 				sec_req  <= 1;
 			end
 			if (sec_req) begin
-				if (sec_wnext) x_word <= 1;
+				if (sec_wnext) x_widx <= x_widx + 1'd1;
 				if (sec_rvalid) begin
-					x_word <= 1;
-					if (!x_word) x_rdata[31:16] <= sec_rdata;
-					else         x_rdata[15: 0] <= sec_rdata;
+					x_widx <= x_widx + 1'd1;
+					if (!x_widx[0]) x_rdata[31:16] <= sec_rdata;
+					else            x_rdata[15: 0] <= sec_rdata;
 				end
 				if (sec_done) begin
 					sec_req   <= 0;
@@ -152,39 +195,9 @@ module gb_host (
 	reg         mem_pend;
 	reg         mem_pend_rd;
 
-	// NVRAM formatting (blank 3DO NVRAM, from Main_MiSTer support/3do/3do.cpp)
-	function automatic [7:0] blank_byte(input [7:0] i);
-		case (i)
-			8'h00: blank_byte = 8'h01; 8'h01: blank_byte = 8'h5A; 8'h02: blank_byte = 8'h5A; 8'h03: blank_byte = 8'h5A;
-			8'h04: blank_byte = 8'h5A; 8'h05: blank_byte = 8'h5A; 8'h06: blank_byte = 8'h02;
-			8'h28: blank_byte = 8'h4E; 8'h29: blank_byte = 8'h56; 8'h2A: blank_byte = 8'h52; 8'h2B: blank_byte = 8'h41; 8'h2C: blank_byte = 8'h4D;
-			8'h48: blank_byte = 8'hFF; 8'h49: blank_byte = 8'hFF; 8'h4A: blank_byte = 8'hFF; 8'h4B: blank_byte = 8'hFF;
-			8'h4F: blank_byte = 8'h01;
-			8'h52: blank_byte = 8'h80;
-			8'h54: blank_byte = 8'hFF; 8'h55: blank_byte = 8'hFF; 8'h56: blank_byte = 8'hFF; 8'h57: blank_byte = 8'hFE;
-			8'h5F: blank_byte = 8'h01;
-			8'h67: blank_byte = 8'h84;
-			8'h84: blank_byte = 8'h85; 8'h85: blank_byte = 8'h5A; 8'h86: blank_byte = 8'h02; 8'h87: blank_byte = 8'hB6;
-			8'h8B: blank_byte = 8'h98;
-			8'h8F: blank_byte = 8'h98;
-			8'h93: blank_byte = 8'h14;
-			8'h97: blank_byte = 8'h14;
-			8'h98: blank_byte = 8'h7A; 8'h99: blank_byte = 8'hA5; 8'h9A: blank_byte = 8'h65; 8'h9B: blank_byte = 8'hBD;
-			8'h9F: blank_byte = 8'h84;
-			8'hA3: blank_byte = 8'h84;
-			8'hA6: blank_byte = 8'h7F; 8'hA7: blank_byte = 8'h68;
-			8'hAB: blank_byte = 8'h14;
-			default: blank_byte = 8'h00;
-		endcase
-	endfunction
-
 	typedef enum bit [2:0] { F_IDLE, F_CHECK, F_CHECK_WAIT, F_WRITE, F_WRITE_WAIT, F_DONE } fstate_t;
 	fstate_t fst;
-	reg [14:0] f_off;     // NVRAM byte offset (multiple of 4)
 
-	function automatic [31:0] host_word(input [7:0] b0, input [7:0] b1, input [7:0] b2, input [7:0] b3, input le);
-		host_word = le ? {b3, b2, b1, b0} : {b0, b1, b2, b3};
-	endfunction
 
 	// Map a host address to an SDRAM word address; bit 24 = backed by SDRAM
 	function automatic [24:0] map_addr(input [31:0] a);
@@ -274,6 +287,7 @@ module gb_host (
 						if (mem_address[31:24] == 8'h30) nvram_written <= 1;
 					end
 					x_we     <= mem_write;
+					x_fmt    <= 0;
 					x_addr   <= mapped[23:0];
 					x_wdata  <= mem_dataWrite;
 					xreq_tgl <= ~xreq_tgl;
@@ -291,6 +305,7 @@ module gb_host (
 				F_IDLE: ;
 				F_CHECK: if (!mem_pend && !x_busy) begin
 					x_we     <= 0;
+					x_fmt    <= 0;
 					x_addr   <= ddr_word_addr(DDR_NVRAM_BASE);
 					xreq_tgl <= ~xreq_tgl;
 					x_busy   <= 1;
@@ -298,25 +313,24 @@ module gb_host (
 				end
 				F_CHECK_WAIT: if (x_finished) begin
 					if (!nvram_written || x_rdata == 32'hFFFFFFFF) begin
-						f_off <= '0;
+						x_row <= '0;
 						fst <= F_WRITE;
 					end else begin
 						fst <= F_DONE;
 					end
 				end
 				F_WRITE: if (!mem_pend && !x_busy) begin
+					// one 1 KiB SDRAM row of the blank image per request
 					x_we     <= 1;
-					x_addr   <= ddr_word_addr(DDR_NVRAM_BASE + {8'd0, f_off});
-					x_wdata  <= (f_off < 15'h100) ?
-					            host_word(blank_byte(f_off[7:0]), blank_byte(f_off[7:0] + 8'd1),
-					                      blank_byte(f_off[7:0] + 8'd2), blank_byte(f_off[7:0] + 8'd3), HOST_LE) : 32'h0;
+					x_fmt    <= 1;
+					x_addr   <= ddr_word_addr(DDR_NVRAM_BASE + {8'd0, x_row, 10'd0});
 					xreq_tgl <= ~xreq_tgl;
 					x_busy   <= 1;
 					fst <= F_WRITE_WAIT;
 				end
 				F_WRITE_WAIT: if (x_finished) begin
-					f_off <= f_off + 15'd4;
-					fst <= (f_off == 15'h7FFC) ? F_DONE : F_WRITE;
+					x_row <= x_row + 1'd1;
+					fst <= (x_row == 5'd31) ? F_DONE : F_WRITE;
 				end
 				F_DONE: begin
 					finalize_busy <= 0;

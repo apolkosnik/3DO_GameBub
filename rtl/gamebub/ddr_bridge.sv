@@ -147,6 +147,12 @@ module ddr_bridge (
 				end
 
 				B_READ: begin
+					// After the last beat has been seen by ddram.sv (BUSY must be
+					// low in that cycle, it ignores DOUT_READY otherwise), hold off
+					// new commands until the SDRAM transaction has completed.
+					// ddram.sv cannot issue one earlier: it is still in its
+					// read state when it takes the last beat.
+					if (DDRAM_DOUT_READY && rbeats == burst) DDRAM_BUSY <= 1;
 					if (sec_rvalid) begin
 						rword <= rword + 1'd1;
 						case (rword)
@@ -157,9 +163,6 @@ module ddr_bridge (
 								DDRAM_DOUT       <= swap ? {rev32(racc[47:16]), rev32({racc[15:0], sec_rdata})} : {racc, sec_rdata};
 								DDRAM_DOUT_READY <= 1;
 								rbeats <= rbeats + 1'd1;
-								// After the last beat, hold off new commands until
-								// the SDRAM transaction has fully completed.
-								if (rbeats + 1'd1 == burst) DDRAM_BUSY <= 1;
 							end
 						endcase
 					end

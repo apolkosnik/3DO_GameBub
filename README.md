@@ -63,8 +63,6 @@ firmware also when you pause.
   original MiSTer DDR3 logic (`ddram.sv`). Video reads from it go through a prefetching
   cache (below), but CPU and CEL-engine accesses outside the block are slower than on
   MiSTer.
-* In the Wolfenstein 3D boot, a few pixels at the left end of the top line are wrong
-  (a short cyan strip). Not investigated yet.
 * One controller. Buttons: Y/B/A = 3DO A/B/C, Start = P (play), Select/X = X (stop),
   L/R = L/R. They can be remapped in the Game Bub menu.
 
@@ -112,6 +110,21 @@ RAM, and each request prefetches the next two half-rows, because video DMA walks
 framebuffer sequentially. Writes are snooped where they reach SDRAM (and at flash
 writes), which keeps `ddram.sv`'s own ordering. BIOS boot result: 99.9% hits and a clean
 picture.
+
+A video line needs its transfers (one per VRAM half) before it starts shifting out, and a
+fill pauses the 3DO (and so MADAM's video DMA) for about 6 µs. Two cases made a line start
+from the serial register's old contents, the VDL words of the CLUT transfer (a short cyan
+strip at the top of the picture in Wolfenstein 3D):
+
+* The top of a frame: the end of the previous frame does not lead to its first row, so
+  that transfer missed. A VDL entry loads the frame buffer addresses about 7 µs before
+  the first transfer from them. MADAM's address generator now passes them on (`VID_FB_*`,
+  after the entry's own transfers) and the cache fetches the first half-row at once.
+* A prefetch started right after a line's first transfer held back the other half's
+  transfer, which comes ~0.1 µs later. Prefetches now wait until no transfer has been
+  requested for 1.28 µs.
+
+`tb_boot` checks that every video line has had its transfers before it starts.
 
 **Random VRAM writes (fixes to `ddram.sv`).** On MiSTer, framebuffers are normally in
 block RAM (a per-game table moves the on-chip blocks to where a game puts them). On Game
@@ -175,7 +188,7 @@ sim/lint.sh                    # Verilator lint of the whole core
 sim/run_tb.sh tb_div           # MADAM divider vs. LPM_DIVIDE semantics (20k cases)
 sim/run_tb.sh tb_sdram         # SDRAM controller vs. timing-checking SDRAM model
 sim/run_tb.sh tb_rtcache       # VRAM read-transfer cache and ddram.sv: coherence vs. reference VRAM model,
-                               # including CEL-engine framebuffer writes during cache fills
+                               # CEL-engine framebuffer writes during cache fills, VDL frame buffer hints
 sim/build_testrom.sh           # assemble the test BIOS (sim/tb/testrom.S)
 sim/run_tb.sh tb_top           # whole core: boots the test BIOS
 sim/run_tb.sh tb_top +be       # same with a big-endian host
@@ -191,7 +204,8 @@ VARGS="+define+TB_TOP=tb_boot" BUILD=build/sim_boot sim/run_tb.sh tb_boot \
 (`+disc_bin=`, served the way the streaming firmware does) or preloaded from an ISO
 (`+iso=`). It writes framework video frames to `build/sim/frames/` (PPM; `+out=<dir>`
 for another directory), logs every CD command and checks every streamed sector against
-the image, checks every random VRAM write that goes to the SDRAM, dumps VRAM as an image
+the image, checks every random VRAM write that goes to the SDRAM and that every video
+line has had its VRAM transfers before it starts, dumps VRAM as an image
 at the end and measures stale serial reads during VRAM read transfers. If the CPU runs
 outside the memory map, the last CPU bus cycles are written to `cpu_trace.txt`. About
 2.5 ms of 3DO time per second of wall time.

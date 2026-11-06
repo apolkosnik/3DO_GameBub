@@ -84,7 +84,14 @@ module MADAM_AG
 
 	output reg [23: 0] DBG_REG100,DBG_REG104,DBG_REG110,DBG_REG114,
 	output reg [23: 0] DBG_REG120,DBG_REG124,DBG_REG128,DBG_REG12C,
-	output reg         DBG_HOOK
+	output reg         DBG_HOOK,
+	
+	// Game Bub port: framebuffer addresses loaded from a VDL entry (see below)
+	output reg         VID_FB_HINT,
+	output reg [19: 2] VID_FB_CURR,
+	output reg         VID_FB_CURR_V,
+	output reg [19: 2] VID_FB_PREV,
+	output reg         VID_FB_PREV_V
 );
 	 	
 	bit  [23: 2] ADDR_SRC_OUT;
@@ -446,6 +453,46 @@ module MADAM_AG
 	assign ROE_N    = SE_GRANT && CFB_ACCESS ? ~(CFB_OE[0]&CE_F)  : SE_GRANT || EXTP_GRANT || PLAYER_GRANT ? ~(AG_ACCESS & ~|AG_WE  & PHASE2)        : CPU_GRANT ? ~(CPU_ACCESS & ((CPU_RAM_SEL & ~|CPU_WE & PHASE2) | (CPU_SPORT_SEL & ~|CPU_ADDR[14:13] & PHASE1))) : ~((RIGHT_TRANS & PHASE1) | (CLUT_RW & PHASE2));
 	assign RDSF     =                                               SE_GRANT || EXTP_GRANT || PLAYER_GRANT ? 1'b0                                        : CPU_GRANT ? (CPU_ACCESS & CPU_SPORT_SEL & |CPU_ADDR[14:13] /*& PHASE1*/) :  (RIGHT_SPLIT & PHASE1);
 	assign RCODE    = SE_GRANT && CFB_ACCESS ? {CFB_START,1'b0,CFB_WE[0],CFB_OE[0]} :SE_GRANT || EXTP_GRANT || PLAYER_GRANT ? {AG_START,AG_REF,AG_ACCESS&|AG_WE&PHASE2,AG_ACCESS&~|AG_WE&PHASE1} : CPU_GRANT ? {CPU_START,1'b0,CPU_ACCESS&CPU_RAM_SEL&|CPU_WE&PHASE2,CPU_ACCESS&CPU_RAM_SEL&~|CPU_WE&PHASE1}     : 4'b0000;
+	
+	// Game Bub port: framebuffer-address hint for the VRAM read-transfer cache
+	// (vram_rtcache.sv). A VDL entry loads the current and previous frame
+	// buffer addresses (DMA group 0x60, registers 5 and 4) about 7 us before
+	// the video DMA's first read transfers from them. With VRAM in SDRAM those
+	// rows are not cached at the top of a frame, and the fill pauses MADAM past
+	// the start of the line, which then shows the serial register's old
+	// contents. The addresses (VRAM only) are passed on once the bus leaves
+	// the VDL (CLUT) sequence, i.e. after its own transfers have been issued,
+	// so a fill started for them does not delay those.
+	wire         VFB_VRAM = DMA_STACK_IN[23:20] == 4'h2;
+	wire         CLUT_SEQ_FF = BUS_STATE_FF >= CLUT_PREINIT1 && BUS_STATE_FF <= CLUT_MIDTRANS1;
+	wire         CLUT_SEQ    = BUS_STATE    >= CLUT_PREINIT1 && BUS_STATE    <= CLUT_MIDTRANS1;
+	bit          VFB_CURR_LD, VFB_PREV_LD;
+	always @(posedge CLK or negedge RST_N) begin
+		if (!RST_N) begin
+			VID_FB_HINT <= 0;
+			{VID_FB_CURR_V, VID_FB_PREV_V} <= '0;
+			{VFB_CURR_LD, VFB_PREV_LD} <= '0;
+		end
+		else if (EN && CE_R) begin
+			VID_FB_HINT <= 0;
+			// the register writes follow the registered bus state (DMA_CTL of
+			// BUS_STATE_FF); the state itself first writes the VDL pointer (0x60)
+			if (BUS_STATE_FF == CLUT_CURR1 && DMA_STACK_WE && DMA_STACK_WADDR == 7'h65 && VFB_VRAM) begin
+				VID_FB_CURR <= DMA_STACK_IN[19:2];
+				VFB_CURR_LD <= 1;
+			end
+			if (BUS_STATE_FF == CLUT_PREV1 && DMA_STACK_WE && DMA_STACK_WADDR == 7'h64 && VFB_VRAM) begin
+				VID_FB_PREV <= DMA_STACK_IN[19:2];
+				VFB_PREV_LD <= 1;
+			end
+			if (CLUT_SEQ_FF && !CLUT_SEQ) begin
+				VID_FB_HINT   <= VFB_CURR_LD | VFB_PREV_LD;
+				VID_FB_CURR_V <= VFB_CURR_LD;
+				VID_FB_PREV_V <= VFB_PREV_LD;
+				{VFB_CURR_LD, VFB_PREV_LD} <= '0;
+			end
+		end
+	end
 	
 endmodule
 

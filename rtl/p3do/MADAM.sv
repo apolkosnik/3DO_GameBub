@@ -80,6 +80,13 @@ module MADAM
 	
 	output             FIELD,
 	
+	// Game Bub port: framebuffer addresses from the VDL (MADAM_AG.sv)
+	output             VID_FB_HINT,
+	output     [19: 2] VID_FB_CURR,
+	output             VID_FB_CURR_V,
+	output     [19: 2] VID_FB_PREV,
+	output             VID_FB_PREV_V,
+	
 	input              DBG_SPR_EN,
 	input      [ 7: 0] DBG_EXT
 	
@@ -625,6 +632,11 @@ module MADAM
 		.PLAYER_GRANT(PLAYER_GRANT),
 		
 		.LINE0(SPORT_LINE0),
+		.VID_FB_HINT(VID_FB_HINT),//Game Bub port
+		.VID_FB_CURR(VID_FB_CURR),
+		.VID_FB_CURR_V(VID_FB_CURR_V),
+		.VID_FB_PREV(VID_FB_PREV),
+		.VID_FB_PREV_V(VID_FB_PREV_V),
 		.CLUTWR_FORCE(CLUTWR_FORCE),
 		.VIDOUT_PFL(VIDOUT_PFL),
 		.LMIDLINE_REQ(LMIDLINE_REQ),

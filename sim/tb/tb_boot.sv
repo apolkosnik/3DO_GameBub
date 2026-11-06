@@ -13,6 +13,8 @@
 //   * CPU address samples, pause statistics, SDRAM model errors
 //   * streamed discs: every sector sent to the CD controller is checked
 //     against the image at the LBA the BIOS asked for
+//   * every video line must have had its VRAM read transfers (both halves)
+//     before it starts shifting out (counted as TB errors)
 //   * random VRAM writes to the SDRAM tier (CPU, CEL engine): none may be
 //     lost in ddram.sv's posted write port or completed with another
 //     address's flash-write state (counted as TB errors)
@@ -579,6 +581,129 @@ module tb_boot;
 		         lat_hist[0], lat_hist[1], lat_hist[2], lat_hist[3], lat_hist[4], lat_hist[5], lat_hist[6], lat_hist[7]);
 	end
 
+	// Video lines must not start shifting before both VRAM halves have had
+	// their read transfer for the line (requested since the line's video DMA
+	// request). Otherwise the line shows the serial register's old contents,
+	// e.g. the VDL words of the CLUT transfer (counted as TB errors).
+	bit lt_req_d = 0, lt_exec_d = 0, lt_rtl_d = 0, lt_rtr_d = 0, lt_l = 0, lt_r = 0, lt_armed = 0;
+	int late_lines = 0, video_lines = 0;
+	always @(posedge clk_mem) begin
+		if (dut.reset_3do) lt_armed = 0;
+		else begin
+			if (dut.p3do.madam.SPORT.VIDOUT_REQ && !lt_req_d) begin lt_l = 0; lt_r = 0; lt_armed = 1; end
+			if (dut.vram_l.RT_REQ && !lt_rtl_d) lt_l = 1;
+			if (dut.vram_r.RT_REQ && !lt_rtr_d) lt_r = 1;
+			if (dut.p3do.madam.SPORT.VIDEO_TRANS_EXEC && !lt_exec_d && lt_armed) begin
+				video_lines++;
+				if (!lt_l || !lt_r) begin
+					late_lines++;
+					errors++;
+					if (late_lines <= 10)
+						$display("[%0t] TB ERROR: video line %0d started before its read transfer (left %b right %b)",
+						         $realtime, dut.p3do.madam.SPORT.VCOUNT, lt_l, lt_r);
+				end
+			end
+		end
+		lt_req_d <= dut.p3do.madam.SPORT.VIDOUT_REQ;
+		lt_exec_d <= dut.p3do.madam.SPORT.VIDEO_TRANS_EXEC;
+		lt_rtl_d <= dut.vram_l.RT_REQ;
+		lt_rtr_d <= dut.vram_r.RT_REQ;
+	end
+	final $display("tb_boot: video lines %0d, %0d started before their read transfer", video_lines, late_lines);
+
+	// Video DMA sequence (+sport_ms=<start>, one frame): MADAM_SPORT's VDL
+	// (CLUT) and video transfer requests, their bus grants, the VRAM read
+	// transfers they cause, PAUSE, and the first serial words of each line.
+	int sport_ms = -1;
+	initial void'($value$plusargs("sport_ms=%d", sport_ms));
+	bit sp_vz_d, sp_clutreq_d, sp_clutexec_d, sp_vpend_d, sp_vexec_d, sp_vreq_d, sp_vack_d, sp_upd_d, sp_env_d,
+	    sp_pause_d, sp_rtl_d, sp_rtr_d, sp_rtexl_d, sp_lsc_d;
+	int sp_shifts = 0;
+	always @(posedge clk_sys) begin
+		bit win;
+		string bs;
+		win = sport_ms >= 0 && $realtime >= sport_ms * 1ms && $realtime < sport_ms * 1ms + 17ms;
+		bs = dut.p3do.madam.ARB.BUS_ST.name();
+		if (win) begin
+			if (dut.p3do.madam.SPORT.VZ != sp_vz_d)
+				$display("[%0t] SP v%0d h%0d VZ=%b FC=%b", $realtime, dut.p3do.madam.SPORT.VCOUNT, dut.p3do.madam.SPORT.HCOUNT,
+				         dut.p3do.madam.SPORT.VZ, dut.p3do.madam.SPORT.FC);
+			if (dut.p3do.madam.SPORT.CLUTWR_REQ != sp_clutreq_d)
+				$display("[%0t] SP v%0d h%0d CLUTWR_REQ=%b LINE=%0d bus=%s pause=%b", $realtime, dut.p3do.madam.SPORT.VCOUNT,
+				         dut.p3do.madam.SPORT.HCOUNT, dut.p3do.madam.SPORT.CLUTWR_REQ, dut.p3do.madam.SPORT.LINE, bs, dut.pause);
+			if (dut.p3do.madam.SPORT.CLUT_DMACTL_UPDATED && !sp_upd_d)
+				$display("[%0t] SP v%0d h%0d VDL control word %08h (ENVIDDMA %b, LEN %0d, LINE %0d)", $realtime,
+				         dut.p3do.madam.SPORT.VCOUNT, dut.p3do.madam.SPORT.HCOUNT, 32'(dut.p3do.madam.SPORT.CLUT_DMACTL),
+				         dut.p3do.madam.SPORT.CLUT_DMACTL.ENVIDDMA, dut.p3do.madam.SPORT.CLUT_DMACTL.LEN,
+				         dut.p3do.madam.SPORT.CLUT_DMACTL.LINE);
+			if (dut.p3do.madam.SPORT.ENVIDDMA != sp_env_d)
+				$display("[%0t] SP v%0d h%0d ENVIDDMA=%b", $realtime, dut.p3do.madam.SPORT.VCOUNT, dut.p3do.madam.SPORT.HCOUNT,
+				         dut.p3do.madam.SPORT.ENVIDDMA);
+			if (dut.p3do.madam.SPORT.CLUT_TRANS_EXEC != sp_clutexec_d)
+				$display("[%0t] SP v%0d h%0d CLUT_TRANS_EXEC=%b", $realtime, dut.p3do.madam.SPORT.VCOUNT,
+				         dut.p3do.madam.SPORT.HCOUNT, dut.p3do.madam.SPORT.CLUT_TRANS_EXEC);
+			if (dut.p3do.madam.SPORT.VIDEO_TRANS_PEND != sp_vpend_d)
+				$display("[%0t] SP v%0d h%0d VIDEO_TRANS_PEND=%b", $realtime, dut.p3do.madam.SPORT.VCOUNT,
+				         dut.p3do.madam.SPORT.HCOUNT, dut.p3do.madam.SPORT.VIDEO_TRANS_PEND);
+			if (dut.p3do.madam.SPORT.VIDOUT_REQ != sp_vreq_d)
+				$display("[%0t] SP v%0d h%0d VIDOUT_REQ=%b bus=%s pause=%b", $realtime, dut.p3do.madam.SPORT.VCOUNT,
+				         dut.p3do.madam.SPORT.HCOUNT, dut.p3do.madam.SPORT.VIDOUT_REQ, bs, dut.pause);
+			if (dut.p3do.madam.SPORT.VIDOUT_ACK && !sp_vack_d)
+				$display("[%0t] SP v%0d h%0d VIDOUT_ACK bus=%s", $realtime, dut.p3do.madam.SPORT.VCOUNT,
+				         dut.p3do.madam.SPORT.HCOUNT, bs);
+			if (dut.pause != sp_pause_d)
+				$display("[%0t] SP v%0d h%0d pause=%b bus=%s", $realtime, dut.p3do.madam.SPORT.VCOUNT,
+				         dut.p3do.madam.SPORT.HCOUNT, dut.pause, bs);
+			// why: the core's PAUSE sources, and what ddram.sv, the RT cache,
+			// the SDRAM secondary-port clients and the VRAM modules are doing
+			if (dut.pause && !sp_pause_d)
+				$display("[%0t] SP   cause: io_busy %b ddr_busy %b LRDY %b RRDY %b sec_hold %b | ddram state %0d wpend %b%b rbusy %b%b bursts %b%b%b%b io %b%b | rtc fill %b h=%03h dem %b%b pf %b%b | sec req host %b cdd %b ddr %b | L rt/mwt/fw %b%b%b R rt/mwt %b%b | cpu %08h",
+				         $realtime, dut.ddr_io_busy, dut.ddr_busy, dut.VRAM_LRDY, dut.VRAM_RRDY, dut.sec_hold_s,
+				         dut.ddram.state, dut.ddram.write_lpend, dut.ddram.write_rpend, dut.ddram.read_lbusy, dut.ddram.read_rbusy,
+				         dut.ddram.burst_read_lbusy, dut.ddram.burst_read_rbusy, dut.ddram.burst_write_lbusy, dut.ddram.burst_write_rbusy,
+				         dut.ddram.io_read_busy, dut.ddram.io_write_busy,
+				         dut.rtcache.fill_busy, dut.rtcache.fill_h, dut.rtcache.dem_pend[0], dut.rtcache.dem_pend[1],
+				         dut.rtcache.pf_v[0], dut.rtcache.pf_v[1],
+				         dut.host_sec_req, dut.cdd_sec_req, dut.ddr_sec_req,
+				         dut.vram_l.RT_EXEC, dut.vram_l.MWT_EXEC, dut.vram_l.FW_EXEC, dut.vram_r.RT_EXEC, dut.vram_r.MWT_EXEC,
+				         dut.p3do.CPU_A);
+			if (dut.rtcache.fill_issue)
+				$display("[%0t] SP v%0d h%0d   RT cache fill h=%03h (demand %b%b, prefetch queue %b%b)", $realtime,
+				         dut.p3do.madam.SPORT.VCOUNT, dut.p3do.madam.SPORT.HCOUNT, dut.rtcache.fill_h,
+				         dut.rtcache.dem_pend[0], dut.rtcache.dem_pend[1], dut.rtcache.pf_v[0], dut.rtcache.pf_v[1]);
+			if (dut.vram_r.RT_REQ && !sp_rtr_d)
+				$display("[%0t] SP v%0d h%0d RT R A=%05h split=%b int=%b bus=%s", $realtime,
+				         dut.p3do.madam.SPORT.VCOUNT, dut.p3do.madam.SPORT.HCOUNT, {dut.vram_r.MEM_ROW, dut.vram_r.MEM_COL},
+				         dut.vram_r.SPLIT, dut.vram_r.ISTE, bs);
+			if (dut.vram_l.RT_REQ && !sp_rtl_d)
+				$display("[%0t] SP v%0d h%0d RT L A=%05h split=%b int=%b SR_RA=%03h bus=%s", $realtime,
+				         dut.p3do.madam.SPORT.VCOUNT, dut.p3do.madam.SPORT.HCOUNT, {dut.vram_l.MEM_ROW, dut.vram_l.MEM_COL},
+				         dut.vram_l.SPLIT, dut.vram_l.ISTE, dut.vram_l.SR_RA, bs);
+			if (dut.vram_l.RT_EXEC != sp_rtexl_d)
+				$display("[%0t] SP v%0d h%0d RT_EXEC L=%b", $realtime, dut.p3do.madam.SPORT.VCOUNT,
+				         dut.p3do.madam.SPORT.HCOUNT, dut.vram_l.RT_EXEC);
+			if (dut.p3do.madam.SPORT.VIDEO_TRANS_EXEC && !sp_vexec_d) begin
+				$display("[%0t] SP v%0d h%0d VIDEO_TRANS_EXEC (L SR_RA=%03h RT_EXEC=%b)", $realtime, dut.p3do.madam.SPORT.VCOUNT,
+				         dut.p3do.madam.SPORT.HCOUNT, dut.vram_l.SR_RA, dut.vram_l.RT_EXEC);
+				sp_shifts = 0;
+			end
+			// first serial words of a line (left chip), as CLIO receives them
+			if (sp_lsc_d && !dut.vram_l.SC && dut.p3do.madam.SPORT.VIDEO_TRANS_EXEC && sp_shifts < 8) begin
+				$display("[%0t] SP v%0d h%0d   L shift %0d: SR_RA=%03h SQ=%04h RT_EXEC=%b", $realtime, dut.p3do.madam.SPORT.VCOUNT,
+				         dut.p3do.madam.SPORT.HCOUNT, sp_shifts, dut.vram_l.SR_RA, dut.vram_l.SQ, dut.vram_l.RT_EXEC);
+				sp_shifts++;
+			end
+		end
+		sp_vz_d <= dut.p3do.madam.SPORT.VZ;               sp_clutreq_d <= dut.p3do.madam.SPORT.CLUTWR_REQ;
+		sp_clutexec_d <= dut.p3do.madam.SPORT.CLUT_TRANS_EXEC; sp_vpend_d <= dut.p3do.madam.SPORT.VIDEO_TRANS_PEND;
+		sp_vexec_d <= dut.p3do.madam.SPORT.VIDEO_TRANS_EXEC;  sp_vreq_d <= dut.p3do.madam.SPORT.VIDOUT_REQ;
+		sp_vack_d <= dut.p3do.madam.SPORT.VIDOUT_ACK;     sp_upd_d <= dut.p3do.madam.SPORT.CLUT_DMACTL_UPDATED;
+		sp_env_d <= dut.p3do.madam.SPORT.ENVIDDMA;        sp_pause_d <= dut.pause;
+		sp_rtl_d <= dut.vram_l.RT_REQ;                    sp_rtexl_d <= dut.vram_l.RT_EXEC;
+		sp_rtr_d <= dut.vram_r.RT_REQ;
+		sp_lsc_d <= dut.vram_l.SC;
+	end
+
 	// Address sequence of VRAM read transfers (+rtseq_ms=<start>, one frame)
 	int rtseq_ms = -1;
 	initial void'($value$plusargs("rtseq_ms=%d", rtseq_ms));
@@ -727,8 +852,8 @@ module tb_boot;
 		         frames, sectors_sent, served, sdram.errors, errors);
 		if (chk_fd != 0)
 			$display("tb_boot: CD data check: %0d sectors match the image, %0d differ", cd_good, cd_bad);
-		$display("tb_boot: RT cache hits %0d, misses %0d, prefetches %0d, invalidations %0d",
-		         dut.rtc_hits, dut.rtc_misses, dut.rtc_prefetches, dut.rtc_invalidations);
+		$display("tb_boot: RT cache hits %0d, misses %0d, prefetches %0d, invalidations %0d, VDL frame buffer hints %0d",
+		         dut.rtc_hits, dut.rtc_misses, dut.rtc_prefetches, dut.rtc_invalidations, dut.rtc_hints);
 		$finish;
 	end
 endmodule

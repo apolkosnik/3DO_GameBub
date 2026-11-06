@@ -18,6 +18,19 @@
 // sequentially, so displayed rows are normally in the cache before they are
 // needed, wherever the framebuffer is.
 //
+// The top of a frame cannot be predicted from the previous request: when a
+// VDL entry loads new frame buffer addresses, MADAM_AG.sv passes them on
+// (hint) and they are prefetched before anything else that is queued. The
+// video DMA's first transfers from them come ~7 us later, about the time a
+// fill takes; without this the first line's transfer missed, its fill
+// paused MADAM past the start of the line, and the line showed the VDL
+// words left in the serial register.
+//
+// Prefetch fills start only once no transfer request has come for 1.28 us:
+// the video DMA issues a line's transfers (both VRAM halves) within ~0.3 us,
+// and a fill pauses the 3DO for ~6 us, which held the second of them back
+// past the start of the line when a prefetch started after the first.
+//
 // Coherence: writes are snooped where they become visible to later reads,
 // i.e. at ddram.sv's DDRAM write commands for the VRAM area (random writes,
 // MWT write bursts) and at flash-writes (bfw, which ddram.sv applies through
@@ -72,11 +85,20 @@ module vram_rtcache #(
 	input              ddr_we,
 	input      [28: 0] ddr_addr,
 
+	// framebuffer addresses a VDL entry has just loaded (MADAM_AG.sv; level
+	// from the clk_sys domain, new on its rising edge): prefetched first
+	input              hint,
+	input      [17: 0] hint_curr,
+	input              hint_curr_v,
+	input      [17: 0] hint_prev,
+	input              hint_prev_v,
+
 	// statistics (simulation / debug)
 	output reg [31: 0] stat_hits,
 	output reg [31: 0] stat_misses,
 	output reg [31: 0] stat_prefetches,
-	output reg [31: 0] stat_invalidations
+	output reg [31: 0] stat_invalidations,
+	output reg [31: 0] stat_hints
 );
 	localparam int EW = $clog2(ENTRIES);
 
@@ -132,6 +154,7 @@ module vram_rtcache #(
 
 	reg         pf_v [2];         // prefetch queue
 	reg  [ 9:0] pf_h [2];
+	reg         pf_hint [2];      // queued by a VDL hint: not held off
 
 	reg         dl_act  [2];      // delivery per side
 	reg [EW-1:0] dl_e   [2];
@@ -143,6 +166,25 @@ module vram_rtcache #(
 	// would drop a prefetch or allocate a second entry for a cached tag.
 	reg         hit_d [2], hit_p [2];
 	reg         req_d;
+
+	// Prefetch fills wait until no transfer request has come for PF_HOLDOFF
+	// cycles. MADAM's video DMA issues the transfers of a line (both VRAM
+	// halves, previous and current line) within ~0.3 us of each other, and a
+	// fill pauses the 3DO for ~6 us (SDRAM): a prefetch started after the
+	// first of them held the others back past the start of the line, which
+	// then showed the serial register's old contents. Demand fills start at
+	// once. (Counting from the end of fills too was tried: the second half of
+	// a full-row transfer, requested as the first half's fill ends, then
+	// missed instead of hitting its prefetch.)
+	localparam int PF_HOLDOFF = 128;   // clk_mem cycles, 1.28 us
+	reg  [ 7:0] req_age;
+	wire        pf_quiet = req_age >= 8'(PF_HOLDOFF);
+
+	// VDL framebuffer hint: waits for a cycle without a request (requests
+	// write the prefetch queue too), then replaces the queued prefetches.
+	// hint_q blocks fill starts for the cycle after, when hit_p is stale.
+	reg         hint_d, hint_pend, hint_q, hint_v2;
+	reg  [ 9:0] hint_h1, hint_h2;
 
 	// registered snoops
 	reg         sn_we;
@@ -226,6 +268,10 @@ module vram_rtcache #(
 
 		// registered inputs
 		req_d    <= req_v[0] | req_v[1];
+		if (l_esrd || r_esrd || req_v[0] || req_v[1]) req_age <= '0;
+		else if (!pf_quiet) req_age <= req_age + 1'd1;
+		hint_d   <= hint;
+		hint_q   <= 0;
 		req_v[0] <= l_esrd; req_a[0] <= l_esaddr;
 		req_v[1] <= r_esrd; req_a[1] <= r_esaddr;
 		sn_we  <= ddr_we && ddr_addr[24:17] == '0;
@@ -245,10 +291,14 @@ module vram_rtcache #(
 			req_v[0] <= 0; req_v[1] <= 0;
 			dem_pend[0] <= 0; dem_pend[1] <= 0;
 			pf_v[0] <= 0; pf_v[1] <= 0;
+			pf_hint[0] <= 0; pf_hint[1] <= 0;
 			dl_act[0] <= 0; dl_act[1] <= 0;
 			rd_v <= 0;
 			vptr <= '0;
 			stat_hits <= '0; stat_misses <= '0; stat_prefetches <= '0; stat_invalidations <= '0;
+			stat_hints <= '0;
+			hint_pend <= 0;
+			req_age   <= '0;
 		end else begin
 			// ---------------- victim pointer ----------------
 			if (!v_ok) begin
@@ -275,8 +325,8 @@ module vram_rtcache #(
 						dem_h[s]    <= h;
 						dem_beat[s] <= {1'b0, req_a[s][7:1]};
 					end
-					if (!is_internal(10'(h + 1))) begin pf_v[0] <= 1; pf_h[0] <= 10'(h + 1); end
-					if (!is_internal(10'(h + 2))) begin pf_v[1] <= 1; pf_h[1] <= 10'(h + 2); end
+					if (!is_internal(10'(h + 1))) begin pf_v[0] <= 1; pf_h[0] <= 10'(h + 1); pf_hint[0] <= 0; end
+					if (!is_internal(10'(h + 2))) begin pf_v[1] <= 1; pf_h[1] <= 10'(h + 2); pf_hint[1] <= 0; end
 				end
 			end
 
@@ -300,18 +350,18 @@ module vram_rtcache #(
 			// no VRAM write burst or flash write may be starting; not while a
 			// request is being looked up (the victim could be what it hits)
 			if (!fill_busy && !fill_issue && !d_bbusy && !l_eswr && !r_eswr && !l_esfw &&
-			    !req_v[0] && !req_v[1] && !req_d && !l_esrd && !r_esrd && !dres0 && !dres1 && v_ok) begin
+			    !req_v[0] && !req_v[1] && !req_d && !hint_q && !l_esrd && !r_esrd && !dres0 && !dres1 && v_ok) begin
 				bit        go;
 				bit [9:0]  nh;
 				bit        from_pf;
 				go = 0; from_pf = 0; nh = '0;
 				if (dem_pend[0] && !hit_d[0]) begin go = 1; nh = dem_h[0]; end
 				else if (dem_pend[1] && !hit_d[1]) begin go = 1; nh = dem_h[1]; end
-				else if (pf_v[0]) begin
+				else if (pf_v[0] && (pf_quiet || pf_hint[0])) begin
 					from_pf = 1;
 					if (!hit_p[0]) begin go = 1; nh = pf_h[0]; end
 					pf_v[0] <= 0;
-				end else if (pf_v[1]) begin
+				end else if (pf_v[1] && (pf_quiet || pf_hint[1])) begin
 					from_pf = 1;
 					if (!hit_p[1]) begin go = 1; nh = pf_h[1]; end
 					pf_v[1] <= 0;
@@ -331,6 +381,31 @@ module vram_rtcache #(
 					vptr         <= vptr + 1'd1;
 					if (from_pf) stat_prefetches <= stat_prefetches + 1'd1;
 				end
+			end
+
+			// ---------------- VDL framebuffer hint ----------------
+			// The first line needs the first half-row of the current frame
+			// buffer, and that of the previous one (the other VRAM half) if it
+			// is another row. Only those: a second fill (~6 us) would not end
+			// before the line's transfers either. The next half-row is
+			// prefetched by the line's first transfer, as usual. Hinted
+			// prefetches are not held off: the VDL's own transfers have been
+			// issued, and the video DMA's come ~7 us later.
+			if (hint && !hint_d && (hint_curr_v || hint_prev_v)) begin
+				bit [9:0] c, p;
+				c = hint_curr_v ? hint_curr[17:8] : hint_prev[17:8];
+				p = hint_prev_v ? hint_prev[17:8] : c;
+				hint_pend <= 1;
+				hint_h1   <= c;
+				hint_h2   <= p;
+				hint_v2   <= p != c;
+				stat_hints <= stat_hints + 1'd1;
+			end
+			else if (hint_pend && !req_v[0] && !req_v[1]) begin
+				hint_pend <= 0;
+				hint_q    <= 1;
+				pf_v[0] <= !is_internal(hint_h1); pf_h[0] <= hint_h1; pf_hint[0] <= 1;
+				if (hint_v2) begin pf_v[1] <= !is_internal(hint_h2); pf_h[1] <= hint_h2; pf_hint[1] <= 1; end
 			end
 
 			// ---------------- fill progress ----------------

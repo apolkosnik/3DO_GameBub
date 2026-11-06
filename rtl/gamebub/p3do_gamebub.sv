@@ -277,6 +277,9 @@ module p3do_gamebub #(
 	reg PAL = 0;
 	always @(posedge clk_sys) if (reset_3do) PAL <= (region_sel == 2'd0) ? bios_pal : (region_sel == 2'd2);
 
+	wire        VID_FB_HINT, VID_FB_CURR_V, VID_FB_PREV_V;   // frame buffer addresses from the VDL
+	wire [19:2] VID_FB_CURR, VID_FB_PREV;                   // (VRAM word addresses), for vram_rtcache
+
 	P3DO p3do (
 		.RST_N(~reset_3do),
 		.CLK(clk_sys),
@@ -303,6 +306,8 @@ module p3do_gamebub #(
 		.VCE(VCE),
 		.S(VRAM_SQ),
 		.FIELD(P3DO_FIELD),
+		.VID_FB_HINT(VID_FB_HINT), .VID_FB_CURR(VID_FB_CURR), .VID_FB_CURR_V(VID_FB_CURR_V),
+		.VID_FB_PREV(VID_FB_PREV), .VID_FB_PREV_V(VID_FB_PREV_V),
 		.RGB({R,G,B}),
 		.HS_N(HS_N), .VS_N(VS_N), .HBLK_N(HBL_N), .VBLK_N(VBL_N), .DCLK(DCLK),
 		.ACLK_CE(ACLK_CE),
@@ -659,7 +664,7 @@ module p3do_gamebub #(
 
 	// Read transfers from SDRAM-backed VRAM are served from a prefetching
 	// half-row cache (see vram_rtcache.sv for why).
-	wire [31:0] rtc_hits, rtc_misses, rtc_prefetches, rtc_invalidations;
+	wire [31:0] rtc_hits, rtc_misses, rtc_prefetches, rtc_invalidations, rtc_hints;
 	vram_rtcache #(.ENTRIES(16)) rtcache (
 		.clk(clk_mem), .rst(rst_mem | reset_3do),
 		.BRAM1_OFFS(BRAM1_OFFS),
@@ -669,8 +674,10 @@ module p3do_gamebub #(
 		.d_braddr(ddr_braddr), .d_brrd(ddr_brrd), .d_brwr(ddr_brwr),
 		.d_blte(ddr_blte), .d_brte(ddr_brte), .d_bout(ddr_bout), .d_ba(ddr_ba), .d_bbusy(ddr_bbusy),
 		.ddr_we(DDRAM_WE && !DDRAM_BUSY), .ddr_addr(DDRAM_ADDR),
+		.hint(VID_FB_HINT), .hint_curr(VID_FB_CURR), .hint_curr_v(VID_FB_CURR_V),
+		.hint_prev(VID_FB_PREV), .hint_prev_v(VID_FB_PREV_V),
 		.stat_hits(rtc_hits), .stat_misses(rtc_misses), .stat_prefetches(rtc_prefetches),
-		.stat_invalidations(rtc_invalidations)
+		.stat_invalidations(rtc_invalidations), .stat_hints(rtc_hints)
 	);
 
 	ddr_bridge ddr_bridge (

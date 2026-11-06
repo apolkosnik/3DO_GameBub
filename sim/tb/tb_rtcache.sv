@@ -10,6 +10,8 @@
 //   * CEL-engine framebuffer writes (phase 9): one per MCLK, stopped only by
 //     the core's PAUSE (ddram.sv busy, registered at CE_F), into flash-filled
 //     and plain rows while read-transfer fills keep ddram.sv bursting
+//   * VDL frame buffer hints (phase 10), and no prefetch fill right after a
+//     transfer request (invariant)
 // and checks every word shifted out against a reference model of VRAM. The
 // important cases write to rows that are already in the cache.
 //
@@ -66,7 +68,10 @@ module tb_rtcache;
 	wire [ 7:0] DDRAM_BURSTCNT, DDRAM_BE;
 	wire [28:0] DDRAM_ADDR;
 	wire [63:0] DDRAM_DOUT, DDRAM_DIN;
-	wire [31:0] st_hits, st_misses, st_pf, st_inv;
+	wire [31:0] st_hits, st_misses, st_pf, st_inv, st_hints;
+	// VDL frame buffer hint (MADAM_AG.sv in the core)
+	reg         hint = 0, hint_curr_v = 0, hint_prev_v = 0;
+	reg  [17:0] hint_curr = 0, hint_prev = 0;
 
 	vram_rtcache #(.ENTRIES(16)) cache (
 		.clk(clk_mem), .rst(rst), .BRAM1_OFFS(BRAM1_OFFS),
@@ -76,7 +81,9 @@ module tb_rtcache;
 		.d_braddr(ddr_braddr), .d_brrd(ddr_brrd), .d_brwr(ddr_brwr),
 		.d_blte(ddr_blte), .d_brte(ddr_brte), .d_bout(ddr_bout), .d_ba(ddr_ba), .d_bbusy(ddr_bbusy),
 		.ddr_we(DDRAM_WE && !DDRAM_BUSY), .ddr_addr(DDRAM_ADDR),
-		.stat_hits(st_hits), .stat_misses(st_misses), .stat_prefetches(st_pf), .stat_invalidations(st_inv)
+		.hint(hint), .hint_curr(hint_curr), .hint_curr_v(hint_curr_v), .hint_prev(hint_prev), .hint_prev_v(hint_prev_v),
+		.stat_hits(st_hits), .stat_misses(st_misses), .stat_prefetches(st_pf), .stat_invalidations(st_inv),
+		.stat_hints(st_hints)
 	);
 
 	// CPU random writes go straight into ddram.sv's posted write port
@@ -334,6 +341,27 @@ module tb_rtcache;
 		end
 	endtask
 
+	// VDL frame buffer hint: a level change as MADAM_AG.sv makes (clk_sys)
+	task automatic vdl_hint(input [17:0] curr, input bit curr_v, input [17:0] prev, input bit prev_v);
+		@(posedge clk_sys);
+		hint_curr <= curr; hint_curr_v <= curr_v; hint_prev <= prev; hint_prev_v <= prev_v; hint <= 1;
+		@(posedge clk_sys); @(posedge clk_sys);
+		hint <= 0;
+	endtask
+
+	// invariant: no prefetch fill starts within 128 cycles of a transfer
+	// request (the video DMA's other transfers of the line would wait for it)
+	int rq_age = 1000, rq_age_d = 1000;
+	bit [31:0] pf_cnt_d = 0;
+	always @(posedge clk_mem) begin
+		if (!rst && cache.fill_issue && cache.stat_prefetches != pf_cnt_d && rq_age_d < 128 &&
+		    !(cache.fill_h == cache.hint_h1 || (cache.hint_v2 && cache.fill_h == cache.hint_h2)))   // VDL hints are not held off
+			fail($sformatf("prefetch fill h=%03h started %0d cycles after a transfer request", cache.fill_h, rq_age_d));
+		pf_cnt_d <= cache.stat_prefetches;
+		rq_age_d <= rq_age;
+		rq_age = (v_lrd || v_rrd || cache.req_v[0] || cache.req_v[1]) ? 0 : rq_age + 1;
+	end
+
 	// invariant: no two valid entries hold the same half-row
 	always @(posedge clk_mem) if (!rst) begin
 		for (int i = 0; i < 16; i++)
@@ -515,6 +543,99 @@ module tb_rtcache;
 			if (cfb_latched_busy < 100) fail("phase 9 did not exercise writes latched while ddram.sv was busy");
 			if (cfb_latched_at_burst < 5) fail("phase 9 did not exercise writes latched as a fill burst started");
 			$display("[%0t] phase 9: framebuffer writes during bursts, errors=%0d", $realtime, errors - errors0);
+		end
+
+		// 10) VDL frame buffer hint: MADAM_AG.sv passes the frame buffer
+		//     addresses a VDL entry loads ~7 us before the video DMA's first
+		//     transfers from them. Those half-rows must then be in the cache
+		//     and completely filled (else the fill pauses MADAM past the
+		//     start of the line).
+		begin
+			bit [8:0] rows_h [6];
+			int errors0, m0, h0, pf0;
+			errors0 = errors;
+			rows_h = '{9'h0C0, 9'h0C2, 9'h0C4, 9'h0C6, 9'h0C8, 9'h0CA};
+			foreach (rows_h[i]) begin
+				for (int w = 0; w < 512; w += 5) cpu_write({rows_h[i], 9'(w)}, $urandom(), $urandom());
+				wait_idle();
+				if (cache.find({rows_h[i], 1'b0})[4] || cache.find({rows_h[i], 1'b1})[4])
+					fail($sformatf("phase 10: row %03h cached before the test", rows_h[i]));
+			end
+			// control: no hint, the first transfer misses
+			m0 = st_misses;
+			rt_read({rows_h[0], 9'h0}, 0, 320);
+			if (st_misses != m0 + 1) fail("phase 10: transfer without a hint did not miss");
+			// hint (current frame buffer only), then the transfer 7 us later
+			h0 = st_hits; m0 = st_misses;
+			vdl_hint({rows_h[1], 9'h0}, 1, '0, 0);
+			mem_cycles(700);
+			begin
+				bit [4:0] f0, f1;
+				f0 = cache.find({rows_h[1], 1'b0});
+				f1 = cache.find({rows_h[1], 1'b1});
+				if (!f0[4] || cache.filled[f0[3:0]] != 8'd128)
+					fail($sformatf("phase 10: hinted half-row %03h not filled 7 us after the hint", {rows_h[1], 1'b0}));
+				// only what the first line needs: the next half-row is
+				// prefetched by the line's first transfer
+				if (f1[4]) fail($sformatf("phase 10: half-row %03h fetched for the hint as well", {rows_h[1], 1'b1}));
+			end
+			rt_read({rows_h[1], 9'h0}, 0, 320);
+			if (st_misses != m0) fail("phase 10: transfer after the hint missed");
+			if (st_hits == h0) fail("phase 10: transfer after the hint did not hit");
+			// current and previous frame buffers in different rows
+			vdl_hint({rows_h[2], 9'h0}, 1, {rows_h[3], 9'h0}, 1);
+			mem_cycles(1400);
+			if (!cache.find({rows_h[2], 1'b0})[4]) fail("phase 10: current frame buffer row not prefetched");
+			if (!cache.find({rows_h[3], 1'b0})[4]) fail("phase 10: previous frame buffer row not prefetched");
+			m0 = st_misses;
+			rt_read({rows_h[3], 9'h0}, 0, 64);
+			rt_read({rows_h[2], 9'h0}, 0, 64);
+			if (st_misses != m0) fail("phase 10: transfer from a hinted row missed");
+			// on-chip VRAM: no fill
+			pf0 = st_pf;
+			vdl_hint({9'h180, 9'h0}, 1, '0, 0);
+			mem_cycles(1400);
+			if (st_pf != pf0) fail("phase 10: hint for on-chip VRAM started a fill");
+			// a hint in the same cycle as a transfer request is applied after it
+			fork
+				rt_read({rows_h[0], 9'h100}, 1, 32);
+				begin
+					@(posedge clk_mem iff vram_l.RT_REQ);
+					vdl_hint({rows_h[4], 9'h0}, 1, {rows_h[5], 9'h0}, 1);
+				end
+			join
+			mem_cycles(1400);
+			if (!cache.find({rows_h[4], 1'b0})[4] || !cache.find({rows_h[5], 1'b0})[4])
+				fail("phase 10: hint during a transfer request was lost");
+			rt_read({rows_h[4], 9'h0}, 0, 64);
+			rt_read({rows_h[5], 9'h0}, 0, 64);
+			// a hint right after transfer requests (the VDL entry's own CLUT
+			// transfers come just before it) must not be held off like a
+			// prefetch: its fill has to start at once to end before the line
+			begin
+				bit [8:0] rx;
+				bit started;
+				rx = 9'h0CC;
+				for (int w = 0; w < 512; w += 9) cpu_write({rx, 9'(w)}, $urandom(), $urandom());
+				wait_idle();
+				started = 0;
+				fork
+					rt_read({rows_h[4], 9'h0}, 0, 32);
+					begin
+						@(posedge clk_mem iff vram_l.RT_REQ);
+						mem_cycles(30);
+						vdl_hint({rx, 9'h0}, 1, '0, 0);
+						for (int k = 0; k < 50 && !started; k++) begin
+							@(posedge clk_mem);
+							if (cache.fill_issue && cache.fill_h == {rx, 1'b0}) started = 1;
+						end
+						if (!started) fail("phase 10: hinted fill held off after a transfer request");
+					end
+				join
+				wait_idle();
+				rt_read({rx, 9'h0}, 0, 64);
+			end
+			$display("[%0t] phase 10: VDL frame buffer hints (%0d), errors=%0d", $realtime, st_hints, errors - errors0);
 		end
 
 		$display("tb_rtcache: %0d words checked, hits %0d misses %0d prefetches %0d invalidations %0d",

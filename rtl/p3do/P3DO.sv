@@ -77,6 +77,13 @@ module P3DO
 	input      [31: 0] S,
 	
 	output             FIELD,
+	
+	// Game Bub port: framebuffer addresses from the VDL (MADAM_AG.sv)
+	output             VID_FB_HINT,
+	output     [19: 2] VID_FB_CURR,
+	output             VID_FB_CURR_V,
+	output     [19: 2] VID_FB_PREV,
+	output             VID_FB_PREV_V,
 
 	input              VCLK,
 	output     [23: 0] RGB,
@@ -310,6 +317,12 @@ module P3DO
 		.SYSRAM_EN(MADAM_SYSRAM_EN),
 		
 		.FIELD(FIELD),
+		
+		.VID_FB_HINT(VID_FB_HINT),//Game Bub port
+		.VID_FB_CURR(VID_FB_CURR),
+		.VID_FB_CURR_V(VID_FB_CURR_V),
+		.VID_FB_PREV(VID_FB_PREV),
+		.VID_FB_PREV_V(VID_FB_PREV_V),
 		
 		.DBG_SPR_EN(SCRN_EN[1]),
 		.DBG_EXT(DBG_EXT)

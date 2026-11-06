@@ -80,6 +80,13 @@ module ddr_bridge (
 	wire [63:0] din_c = swap ? {rev32(DDRAM_DIN[63:32]), rev32(DDRAM_DIN[31:0])} : DDRAM_DIN;
 	wire [ 7:0] be_c  = swap ? {rev4(DDRAM_BE[7:4]), rev4(DDRAM_BE[3:0])} : DDRAM_BE;
 
+	// Single write port (first beat goes to entry 0) so that Vivado infers
+	// distributed RAM rather than 9k flip-flops.
+	wire        wbuf_we   = (st == B_IDLE) ? (DDRAM_WE && !DDRAM_BUSY) : (st == B_COLLECT && DDRAM_WE && !DDRAM_BUSY);
+	wire [ 6:0] wbuf_wa   = (st == B_IDLE) ? 7'd0 : wcnt;
+	wire [71:0] wbuf_wd   = (st == B_IDLE) ? {be_s, din_s} : {be_c, din_c};
+	always @(posedge clk) if (wbuf_we) wbuf[wbuf_wa] <= wbuf_wd;
+
 	wire [71:0] wb   = wbuf[widx[8:2]];
 	wire [ 1:0] wsel = widx[1:0];
 	assign sec_wdata = wsel == 2'd0 ? wb[63:48] : wsel == 2'd1 ? wb[47:32] : wsel == 2'd2 ? wb[31:16] : wb[15:0];
@@ -97,7 +104,6 @@ module ddr_bridge (
 				B_IDLE: begin
 					DDRAM_BUSY <= 0;
 					if (DDRAM_WE && !DDRAM_BUSY) begin
-						wbuf[0]  <= {be_s, din_s};
 						swap     <= swap_cmd;
 						wcnt     <= 7'd1;
 						burst    <= DDRAM_BURSTCNT;
@@ -127,7 +133,6 @@ module ddr_bridge (
 
 				B_COLLECT: begin
 					if (DDRAM_WE && !DDRAM_BUSY) begin
-						wbuf[wcnt] <= {be_c, din_c};
 						wcnt <= wcnt + 1'd1;
 						if ({1'b0, wcnt} + 8'd1 == burst) begin
 							DDRAM_BUSY <= 1;

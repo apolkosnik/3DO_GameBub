@@ -29,6 +29,22 @@ module cdd_emu (
 	// disc image description (clk_sys, static while disc_present)
 	input              disc_present,
 	input      [24: 0] disc_bytes,       // ISO size in bytes (multiple of 2048)
+
+	// Streaming mode (fork firmware "disc" file, docs/disc_streaming.md):
+	// the host wrote the image's table of contents instead of the data, and
+	// raw 2352-byte sectors are read on request (DISC_READ).
+	input              disc_stream,
+	input              disc_change,      // pulse: a disc was loaded (or swapped while running)
+	input              toc_we,
+	input      [ 8: 0] toc_wa,
+	input      [31: 0] toc_wd,
+	input              sb_we,
+	input      [ 9: 0] sb_wa,
+	input      [31: 0] sb_wd,
+	output     [31: 0] core_cmd_words [4],
+	output reg         core_req,         // HostV0 commandCore
+	input              core_done,
+	input              core_error,
 	output reg [31: 0] disc_id,          // bytes 0x58..0x5B of sector 0 (MiSTer hack table key)
 	output reg [31: 0] disc_msf,         // bytes 4..7 of the info block
 	output reg         disc_info_valid,
@@ -144,7 +160,8 @@ module cdd_emu (
 		C_SEC_WAIT,
 		C_SEC_SEND,
 		C_SEC_CRC,
-		C_SEC_END
+		C_SEC_END,
+		C_STR_WAIT
 	} cstate_t;
 	cstate_t cst;
 
@@ -161,6 +178,134 @@ module cdd_emu (
 	reg [14:0] disc_sectors;
 	reg [ 1:0] rd_phase;         // 3-cycle cadence: set address, BRAM latency, use data
 	reg        zero_sector;
+	reg        q_got;            // streaming: the requested sector has arrived
+	reg        str_cancel;       // streaming: a new command came while waiting
+
+	// ------------------------------------------------------------------
+	// Streaming mode: table of contents, sector buffer, DISC_READ requests
+	// ------------------------------------------------------------------
+	localparam [31:0] CMD_DISC_READ   = 32'h0000_0400;
+	localparam [31:0] SECTOR_BUF_ADDR = 32'h4000_0000;   // host address of sbr
+
+	// Table of contents (fork firmware DiscImage::toc, little-endian words):
+	//   0: track count (7:0); 1: lead-out LBA; 2: lead-out position BCD 00MMSSFF
+	//   4+4n: first LBA, 5+4n: last LBA, 6+4n: index 1 LBA,
+	//   7+4n: index 1 position BCD 00MMSSFF, bit 31 = audio track
+	reg [31:0] tocr [0:511];
+	reg [31:0] toc_q;
+	reg [ 8:0] toc_ra;
+	reg [ 7:0] toc_tracks;
+	reg [23:0] toc_leadout_bcd;
+	always @(posedge clk_sys) begin
+		if (toc_we) tocr[toc_wa] <= toc_wd;
+		toc_q <= tocr[toc_ra];
+	end
+	// A real table of contents has 1..99 tracks, also given in BCD. (With
+	// firmware that does not know "disc" files, a .cue would arrive as text.)
+	reg        toc_valid;
+	always @(posedge clk_sys) begin
+		if (toc_we && toc_wa == 9'd0) begin
+			toc_tracks <= toc_wd[7:0];
+			toc_valid  <= toc_wd[7:0] >= 8'd1 && toc_wd[7:0] <= 8'd99 &&
+			              toc_wd[15:8] == {4'(toc_wd[7:0] / 10), 4'(toc_wd[7:0] % 10)};
+		end
+		if (toc_we && toc_wa == 9'd2) toc_leadout_bcd <= toc_wd[23:0];
+	end
+
+	// Raw sector buffer (588 words used), written by the host
+	(* ram_style = "block" *) reg [31:0] sbr [0:1023];
+	reg [31:0] sbr_q;
+	reg [ 9:0] sbr_ra;
+	always @(posedge clk_sys) begin
+		if (sb_we) sbr[sb_wa] <= sb_wd;
+		sbr_q <= sbr[sbr_ra];
+	end
+	// word k ({byte 2k+1, byte 2k}) of a sector's 2048 user data bytes
+	// (raw bytes 16.., little-endian host words as the fork firmware sends)
+	function automatic [9:0] user_addr(input [9:0] k);
+		user_addr = 10'd4 + {1'b0, k[9:1]};
+	endfunction
+	function automatic [15:0] user_word(input [31:0] q, input bit hi);
+		user_word = hi ? q[31:16] : q[15:0];
+	endfunction
+
+	// Core -> host request (the same handshake as the fork's PSX core):
+	// raise request with the words set, wait for done or error, drop the
+	// request, wait for done and error to clear.
+	typedef enum bit [1:0] { Q_IDLE, Q_WAIT, Q_CLEAR } qstate_t;
+	qstate_t   qst;
+	reg [31:0] q_lba;
+	reg        q_start;          // pulse from the main FSM (latched in q_pend)
+	reg        q_pend;
+	reg        q_finished;       // pulse: answered (q_failed says how)
+	reg        q_failed;
+	reg [27:0] q_timer;
+	assign core_cmd_words[0] = CMD_DISC_READ;
+	assign core_cmd_words[1] = 32'd0;            // disc file id
+	assign core_cmd_words[2] = q_lba;            // absolute LBA (track 1 at 150)
+	assign core_cmd_words[3] = SECTOR_BUF_ADDR;
+
+	always @(posedge clk_sys) begin
+		q_finished <= 0;
+		if (rst_sys) begin
+			// a request may still be answered after a reset: start by
+			// waiting for the answer to clear
+			core_req <= 0;
+			q_pend   <= 0;
+			qst <= Q_CLEAR;
+		end else begin
+			if (q_start) q_pend <= 1;
+			case (qst)
+				Q_IDLE: if (q_pend) begin
+					q_pend   <= 0;
+					core_req <= 1;
+					q_timer  <= '0;
+					qst <= Q_WAIT;
+				end
+				Q_WAIT: begin
+					q_timer <= q_timer + 1'd1;
+					if (core_done || core_error || &q_timer) begin
+						// no answer in ~5 s (e.g. stock firmware): fail
+						q_failed   <= !core_done;
+						q_finished <= 1;
+						core_req   <= 0;
+						qst <= Q_CLEAR;
+					end
+				end
+				Q_CLEAR: if (!core_done && !core_error) qst <= Q_IDLE;
+				default: qst <= Q_IDLE;
+			endcase
+		end
+	end
+
+	function automatic [7:0] bcd2bin(input [7:0] x);
+		bcd2bin = x[7:4] * 8'd10 + x[3:0];
+	endfunction
+
+	// Disc-info word k ({byte 2k+1, byte 2k}) from the table of contents
+	// (GetDiscInfo in 3docdd.cpp; positions in binary MSF). For track
+	// entries `t` is TOC word 7+4i (or the lead-out position word).
+	function automatic [15:0] info_word_toc(input [9:0] k, input [7:0] ntr, input [23:0] lo_bcd,
+	                                        input [31:0] t, input [15:0] sw);
+		bit [7:0] m, sec, f, e;
+		info_word_toc = 16'h0000;
+		if (k == 10'd1) info_word_toc = {ntr, 8'h01};                          // first, last track
+		else if (k == 10'd2) info_word_toc = {bcd2bin(lo_bcd[15:8]), bcd2bin(lo_bcd[23:16])};
+		else if (k == 10'd3) info_word_toc = {8'h00, bcd2bin(lo_bcd[7:0])};
+		else if (k >= 10'd8 && k < 10'd512) begin
+			e = 8'(k[9:3]) - 8'd1;                                             // entry: track e+1
+			if (e <= ntr) begin
+				m = bcd2bin(t[23:16]); sec = bcd2bin(t[15:8]); f = bcd2bin(t[7:0]);
+				case (k[2:0])
+					3'd1: info_word_toc = {8'(e + 8'd1), (e == ntr || t[31]) ? 8'h00 : 8'h04};
+					3'd2: info_word_toc = {m, 8'h00};
+					3'd3: info_word_toc = {f, sec};
+					default: ;
+				endcase
+			end
+		end
+		else if (k >= 10'd512 && k < 10'd576) info_word_toc = sw;              // sector 0, bytes 0..127
+	endfunction
 
 	// MSF of an absolute LBA (binary, like LBAToMSF in 3docdd.cpp)
 	function automatic [23:0] lba2msf(input [23:0] lba);
@@ -204,6 +349,7 @@ module cdd_emu (
 		CDD_WR <= 0;
 		cmd_new <= 0;
 
+		q_start <= 0;
 		if (rst_sys) begin
 			cst          <= C_IDLE;
 			CDD_DTEN     <= 0;
@@ -215,6 +361,13 @@ module cdd_emu (
 			disc_info_valid <= 0;
 		end else begin
 			disc_sectors <= {1'b0, disc_bytes[24:11]};
+
+			// a disc was loaded or swapped: send its info block again (the
+			// controller then reports a media change, as on MiSTer)
+			if (disc_change) begin
+				info_sent <= 0;
+				read_pend <= 0;
+			end
 
 			// New command from the controller (CD_IN_MSB toggled)
 			if (cd_comm[64] != comm_tgl_old) begin
@@ -245,20 +398,40 @@ module cdd_emu (
 
 			case (cst)
 				C_IDLE: begin
-					if (disc_present && !info_sent) begin
-						fetch_lba_sys <= '0;
-						fetch_tgl_sys <= ~fetch_tgl_sys;
+					if (disc_present && !info_sent && (!disc_stream || toc_valid)) begin
+						if (disc_stream) begin
+							q_lba   <= 32'd150;          // sector 0 of track 1
+							q_start <= 1;
+						end else begin
+							fetch_lba_sys <= '0;
+							fetch_tgl_sys <= ~fetch_tgl_sys;
+						end
 						cst <= C_INFO_WAIT;
 					end else if (read_pend && info_sent) begin
 						delay_cnt <= sector_delay;
-						cst <= C_SEC_DELAY;
+						if (disc_stream) begin
+							// request now, so the firmware's latency overlaps the
+							// drive's sector time
+							bit [23:0] l;
+							l = cur_lba[23] ? 24'd0 : cur_lba;  // pregap reads sector 0 (3docdd.cpp)
+							q_lba      <= {8'd0, l} + 32'd150;   // absolute LBA
+							q_start    <= 1;
+							q_got      <= 0;
+							str_cancel <= 0;
+							read_pend  <= 0;
+							cst <= C_STR_WAIT;
+						end else begin
+							cst <= C_SEC_DELAY;
+						end
 					end
 				end
 
 				// ---- disc-info block ----
-				C_INFO_WAIT: if (fetch_done) begin
+				C_INFO_WAIT: if (disc_stream ? q_finished : fetch_done) begin
 					// MiSTer hack-table key and MSF, as 3DO.sv extracts them
-					disc_msf <= {leadout_msf, 8'h00};
+					disc_msf <= disc_stream ? {bcd2bin(toc_leadout_bcd[23:16]), bcd2bin(toc_leadout_bcd[15:8]),
+					                           bcd2bin(toc_leadout_bcd[7:0]), 8'h00} : {leadout_msf, 8'h00};
+					zero_sector <= disc_stream && q_failed;
 					CDD_DIEN <= 1;
 					widx     <= '0;
 					sbuf_ra  <= 10'd0;
@@ -271,11 +444,18 @@ module cdd_emu (
 					rd_phase <= (rd_phase == 2'd2) ? 2'd0 : rd_phase + 1'd1;
 					if (rd_phase == 2'd0) begin
 						sbuf_ra <= (widx >= 11'h200 && widx < 11'h240) ? cdda(10'(widx - 11'h200), host_le) : 10'd0;
+						sbr_ra  <= user_addr(10'(widx - 11'h200));
+						// TOC word of the track entry this info word belongs to
+						toc_ra  <= (8'(widx[9:3]) - 8'd1 >= toc_tracks) ? 9'd2 : 9'(7 + 4 * (widx[9:3] - 1));
 					end else if (rd_phase == 2'd2) begin
 						bit [15:0] cw;
-						cw = cddw(sbuf_q, host_le);
-						CDD_DATA <= {info_byte({widx[9:0], 1'b1}, leadout_msf, cw),
-						             info_byte({widx[9:0], 1'b0}, leadout_msf, cw)};
+						cw = disc_stream ? (zero_sector ? 16'h0000 : user_word(sbr_q, widx[0])) : cddw(sbuf_q, host_le);
+						if (disc_stream)
+							CDD_DATA <= info_word_toc(widx[9:0], toc_tracks, toc_leadout_bcd,
+							                          (8'(widx[9:3]) - 8'd1 >= toc_tracks) ? {8'h00, toc_leadout_bcd} : toc_q, cw);
+						else
+							CDD_DATA <= {info_byte({widx[9:0], 1'b1}, leadout_msf, cw),
+							             info_byte({widx[9:0], 1'b0}, leadout_msf, cw)};
 						CDD_WR   <= 1;
 						if (widx == 11'h22C) disc_id[31:16] <= {cw[7:0], cw[15:8]};   // sector0 bytes 0x58,0x59
 						if (widx == 11'h22D) disc_id[15: 0] <= {cw[7:0], cw[15:8]};   // sector0 bytes 0x5A,0x5B
@@ -306,6 +486,28 @@ module cdd_emu (
 					end
 				end
 
+				// streaming: sector time and the firmware's answer, whichever
+				// comes last. A command in between (a new READ, a stop) drops
+				// the sector, as MiSTer's next poll would.
+				C_STR_WAIT: begin
+					if (delay_cnt) delay_cnt <= delay_cnt - 1'd1;
+					if (cmd_new && comm[0] != 8'h00) str_cancel <= 1;
+					if (q_finished) begin
+						q_got       <= 1;
+						zero_sector <= q_failed;              // a failed read reads as zeros
+					end
+					if (q_got && delay_cnt == 0) begin
+						if (str_cancel || disc_change) cst <= C_IDLE;
+						else begin
+							CDD_DTEN <= 1;
+							widx     <= '0;
+							crc      <= '0;
+							rd_phase <= '0;
+							cst <= C_SEC_SEND;
+						end
+					end
+				end
+
 				C_SEC_WAIT: if (fetch_done) begin
 					CDD_DTEN <= 1;
 					widx     <= '0;
@@ -319,9 +521,10 @@ module cdd_emu (
 					rd_phase <= (rd_phase == 2'd2) ? 2'd0 : rd_phase + 1'd1;
 					if (rd_phase == 2'd0) begin
 						sbuf_ra <= cdda(widx[9:0], host_le);
+						sbr_ra  <= user_addr(widx[9:0]);
 					end else if (rd_phase == 2'd2) begin
 						bit [15:0] w;
-						w = zero_sector ? 16'h0000 : cddw(sbuf_q, host_le);
+						w = zero_sector ? 16'h0000 : disc_stream ? user_word(sbr_q, widx[0]) : cddw(sbuf_q, host_le);
 						CDD_DATA <= w;                     // ioctl order: low byte first
 						CDD_WR   <= 1;
 						crc  <= crc + w[15:8] + w[7:0];

@@ -48,6 +48,22 @@ module gb_host (
 	output reg         bios_loaded,
 	output reg         kanji_loaded,
 	output reg [ 1: 0] cd_speed,
+	output reg [ 1: 0] region_sel,       // 0 by BIOS, 1 NTSC, 2 PAL
+	output             bios_pal,         // the loaded BIOS is a PAL one (MiSTer checksums)
+
+	// disc streaming (fork firmware "disc" files, see docs/disc_streaming.md)
+	output reg         disc_stream,      // disc file 0 is a table of contents: sectors on request
+	output reg         disc_change,      // pulse: FileWriteEnd for the disc file (load or swap)
+	output             toc_we,           // host writes to the first 2 KiB of the disc file
+	output     [ 8: 0] toc_wa,
+	output     [31: 0] toc_wd,
+	output             sb_we,            // host writes to the sector buffer (0x4000_0000)
+	output     [ 9: 0] sb_wa,
+	output     [31: 0] sb_wd,
+	input      [31: 0] core_cmd_words [4],  // core -> host request words (0xF000_1000)
+
+	// NVRAM written by the 3DO (save changed since loaded)
+	input              nvram_wr,
 
 	// SDRAM secondary port client (clk_mem)
 	input              clk_mem,
@@ -187,6 +203,16 @@ module gb_host (
 	reg         nvram_written;
 	reg         iso_first_seen;
 	reg  [31:0] cur_file;
+	reg         nvram_dirty;
+	reg  [31:0] bios_sum_le, bios_sum_be;
+
+	// MiSTer's 3DO.sv recognises PAL BIOSes by the sum of the file's 16-bit
+	// little-endian words: Panasonic FZ-1 (E) and its unencrypted dump.
+	function automatic bit pal_sum(input [31:0] cs);
+		pal_sum = (cs == 32'hD63EC5E9) || (cs == 32'hD5CFD1C5);
+	endfunction
+	assign bios_pal = bios_loaded && pal_sum(HOST_LE ? bios_sum_le : bios_sum_be);
+
 
 	assign cmd_busy  = (cmd_state == 2'd1);
 	assign cmd_done  = (cmd_state == 2'd2);
@@ -216,10 +242,21 @@ module gb_host (
 
 	wire [24:0] mapped = map_addr(mem_address);
 
+	// host write strobes into cdd_emu (accepted in the cycle mem_done is set)
+	wire host_wr_now = mem_enable && !mem_done && !mem_pend && mem_write;
+	assign toc_we = host_wr_now && mem_address[31:28] == 4'h1 && mem_address[27:11] == '0 && (fst == F_IDLE);
+	assign toc_wa = mem_address[10:2];
+	assign toc_wd = mem_dataWrite;
+	assign sb_we  = host_wr_now && mem_address[31:12] == 20'h40000;
+	assign sb_wa  = mem_address[11:2];
+	assign sb_wd  = mem_dataWrite;
+
 	always @(posedge clk) begin
 		xdone_s <= {xdone_s[1:0], xdone_tgl};
 		mem_done <= 0;
 		core_reset_pulse <= 0;
+		disc_change <= 0;
+		if (nvram_wr) nvram_dirty <= 1;
 
 		if (reset) begin
 			cmd_state     <= 2'd0;
@@ -235,6 +272,11 @@ module gb_host (
 			nvram_written <= 0;
 			iso_first_seen<= 0;
 			cd_speed      <= 2'd1;
+			region_sel    <= 2'd0;
+			disc_stream   <= 0;
+			nvram_dirty   <= 0;
+			bios_sum_le   <= '0;
+			bios_sum_be   <= '0;
 			mem_pend      <= 0;
 			x_busy        <= 0;
 			fst           <= F_IDLE;
@@ -253,13 +295,21 @@ module gb_host (
 				end
 			end else if (mem_enable && !mem_done && (fst == F_IDLE || !mapped[24])) begin
 				if (mem_address[31:28] == 4'hF) begin
-					// command parameter / result words
+					// command parameter / result words: host -> core at
+					// 0xF000_0000, core -> host requests at 0xF000_1000
 					if (mem_address[27:4] == 24'h0) begin
 						if (mem_write) cmd_reg[mem_address[3:2]] <= mem_dataWrite;
 						else           mem_dataRead <= cmd_reg[mem_address[3:2]];
+					end else if (mem_address[27:4] == 24'h000100) begin
+						mem_dataRead <= mem_write ? 32'h0 : core_cmd_words[mem_address[3:2]];
 					end else begin
 						mem_dataRead <= 32'h0;
 					end
+					mem_done <= 1;
+				end else if (mem_address[31:12] == 20'h40000) begin
+					// disc sector buffer (written by the firmware's DISC_READ;
+					// the data goes to cdd_emu through sb_we)
+					mem_dataRead <= 32'h0;
 					mem_done <= 1;
 				end else if (mem_address[31:8] == 24'h000010) begin
 					// settings
@@ -267,12 +317,14 @@ module gb_host (
 						case (mem_address[7:0])
 							8'h00: cd_speed <= mem_dataWrite[1:0];
 							8'h04: if (mem_dataWrite[0]) core_reset_pulse <= 1;
+							8'h08: region_sel <= mem_dataWrite[1:0];
 							default: ;
 						endcase
 						mem_dataRead <= 32'h0;
 					end else begin
 						case (mem_address[7:0])
 							8'h00: mem_dataRead <= {30'd0, cd_speed};
+							8'h08: mem_dataRead <= {30'd0, region_sel};
 							default: mem_dataRead <= 32'h0;
 						endcase
 					end
@@ -286,6 +338,10 @@ module gb_host (
 							if (mem_dataWrite == 32'h5A5A5A01) HOST_LE <= 1;
 						end
 						if (mem_address[31:24] == 8'h30) nvram_written <= 1;
+						if (mem_address[31:20] == 12'h200) begin
+							bios_sum_le <= bios_sum_le + mem_dataWrite[15:0] + mem_dataWrite[31:16];
+							bios_sum_be <= bios_sum_be + {mem_dataWrite[7:0], mem_dataWrite[15:8]} + {mem_dataWrite[23:16], mem_dataWrite[31:24]};
+						end
 					end
 					x_we     <= mem_write;
 					x_fmt    <= 0;
@@ -330,6 +386,7 @@ module gb_host (
 					fst <= F_WRITE_WAIT;
 				end
 				F_WRITE_WAIT: if (x_finished) begin
+					nvram_dirty <= 1;
 					x_row <= x_row + 1'd1;
 					fst <= (x_row == 5'd31) ? F_DONE : F_WRITE;
 				end
@@ -358,27 +415,38 @@ module gb_host (
 						CMD_CORE_RUN:  core_halt <= 0;
 						CMD_CORE_HALT: core_halt <= 1;
 						CMD_NOTIFY_FOCUS: focus <= cmd_reg[1][0];
-						CMD_FILE_WRITE_START: cur_file <= cmd_reg[1];
+						CMD_FILE_WRITE_START: begin
+							cur_file <= cmd_reg[1];
+							if (cmd_reg[1] == FILE_BIOS) begin bios_sum_le <= '0; bios_sum_be <= '0; end
+						end
 						CMD_FILE_WRITE_END: begin
 							case (cmd_reg[1])
 								FILE_ISO: begin
+									// A file under one sector is the fork firmware's
+									// table of contents ("disc" file): sectors are
+									// then read on request. Otherwise an ISO image
+									// was loaded into SDRAM.
 									disc_present <= (cmd_reg[2] != 0);
+									disc_stream  <= (cmd_reg[2] != 0) && (cmd_reg[2] < 32'd2048);
+									disc_change  <= 1;
 									disc_bytes   <= (cmd_reg[2] > ISO_MAX_BYTES) ? 25'(ISO_MAX_BYTES) : cmd_reg[2][24:0];
 								end
 								FILE_BIOS:  bios_loaded  <= 1;
 								FILE_KANJI: kanji_loaded <= 1;
-								FILE_NVRAM: nvram_written <= 1;
+								FILE_NVRAM: begin nvram_written <= 1; nvram_dirty <= 0; end
 								default: ;
 							endcase
 							cur_file <= '1;
 						end
 						CMD_FILE_READ_START: begin
 							case (cmd_reg[1])
-								FILE_NVRAM: cmd_reg[0] <= NVRAM_BYTES;
+								// 0 = unchanged since loaded/saved (the fork firmware
+								// then leaves the file alone, e.g. for save_on_pause)
+								FILE_NVRAM: cmd_reg[0] <= nvram_dirty ? NVRAM_BYTES : 32'd0;
 								default:    cmd_state <= 2'd3;
 							endcase
 						end
-						CMD_FILE_READ_END: ;
+						CMD_FILE_READ_END: if (cmd_reg[1] == FILE_NVRAM) nvram_dirty <= 0;
 						default: cmd_state <= 2'd3;
 					endcase
 				end

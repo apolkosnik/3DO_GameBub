@@ -36,6 +36,8 @@ module tb_boot;
 	wire        h_done;
 	reg         h_req = 0;
 	wire        h_busy, h_cdone, h_err;
+	wire        c_req;
+	reg         c_done = 0, c_err = 0;
 
 	wire [5:0]  vr, vg, vb;
 	wire        vde, vvbl, vhbl;
@@ -57,8 +59,8 @@ module tb_boot;
 		.host_mem_address(h_addr), .host_mem_dataRead(h_rdata), .host_mem_dataWrite(h_wdata),
 		.host_commandHost_request(h_req), .host_commandHost_busy(h_busy),
 		.host_commandHost_done(h_cdone), .host_commandHost_error(h_err),
-		.host_commandCore_request(), .host_commandCore_busy(1'b0),
-		.host_commandCore_done(1'b0), .host_commandCore_error(1'b0),
+		.host_commandCore_request(c_req), .host_commandCore_busy(1'b0),
+		.host_commandCore_done(c_done), .host_commandCore_error(c_err),
 		.input_buttons_a(1'b0), .input_buttons_b(1'b0), .input_buttons_x(1'b0),
 		.input_buttons_y(1'b0), .input_buttons_up(1'b0), .input_buttons_down(1'b0),
 		.input_buttons_left(1'b0), .input_buttons_right(1'b0), .input_buttons_l(1'b0),
@@ -81,8 +83,11 @@ module tb_boot;
 	endtask
 
 	// ---------------- host BFM (as tb_top) ----------------
+	bit host_lock = 0;
 	task automatic host_access(input bit wr, input [31:0] a, input [31:0] d, output [31:0] q);
 		int to;
+		while (host_lock) @(posedge clk_sys);
+		host_lock = 1;
 		@(posedge clk_sys);
 		h_enable <= 1; h_write <= wr; h_addr <= a; h_wdata <= d;
 		@(posedge clk_sys);
@@ -93,6 +98,7 @@ module tb_boot;
 		end
 		q = h_rdata;
 		h_enable <= 0;
+		host_lock = 0;
 	endtask
 	task automatic host_wr(input [31:0] a, input [31:0] d);
 		bit [31:0] q;
@@ -157,6 +163,38 @@ module tb_boot;
 		$fclose(fd);
 	endtask
 
+	// ---------------- disc-streaming firmware model ----------------
+	// +disc_bin=<file>: a single-track MODE1/2352 .bin, served like the
+	// fork firmware (table of contents, then raw sectors on DISC_READ).
+	int  bin_fd = 0;
+	int  bin_sectors = 0;
+	int  disc_latency_us = 800;
+	int  served = 0;
+	function automatic [7:0] bcd(input int x); return 8'(((x / 10) << 4) | (x % 10)); endfunction
+	function automatic [31:0] msf_bcd(input int lba);
+		return {8'h00, bcd(lba / 75 / 60), bcd((lba / 75) % 60), bcd(lba % 75)};
+	endfunction
+	initial forever begin
+		bit [31:0] w [4];
+		bit [7:0]  sec [2352];
+		@(posedge clk_sys);
+		if (bin_fd != 0 && c_req && !c_done && !c_err) begin
+			for (int i = 0; i < 4; i++) host_rd(32'hF000_1000 + 4 * i, w[i]);
+			foreach (sec[i]) sec[i] = 8'h00;
+			if (w[2] >= 150 && w[2] < 150 + bin_sectors) begin
+				int n;
+				void'($fseek(bin_fd, longint'(w[2] - 150) * 2352, 0));
+				n = $fread(sec, bin_fd);
+			end
+			#(disc_latency_us * 1us);
+			for (int i = 0; i < 2352; i += 4) host_wr(w[3] + i, {sec[i+3], sec[i+2], sec[i+1], sec[i]});
+			served++;
+			c_done <= 1;
+			while (c_req) @(posedge clk_sys);
+			c_done <= 0;
+		end
+	end
+
 	// ---------------- monitors ----------------
 	// CD controller commands from the BIOS and sector deliveries
 	always @(posedge clk_sys) begin
@@ -173,10 +211,10 @@ module tb_boot;
 		if (dut.cdd_dten && !cdd_dten_d) begin
 			sectors_sent++;
 			if (sectors_sent <= 40 || sectors_sent % 100 == 0)
-				$display("[%0t] CD sector %0d (lba %0d)", $realtime, sectors_sent, dut.cdd.fetch_lba_sys);
+				$display("[%0t] CD sector %0d (%s %0d)", $realtime, sectors_sent, dut.cdd.disc_stream ? "abs lba" : "lba", dut.cdd.disc_stream ? dut.cdd.q_lba : 32'(dut.cdd.fetch_lba_sys));
 		end
 		if (!dut.cdd_dien && cdd_dien_d)
-			$display("[%0t] CD disc-info block sent (id %08h, lead-out %06h)", $realtime, dut.cdd.disc_id, dut.cdd.leadout_msf);
+			$display("[%0t] CD disc-info block sent (id %08h, lead-out MSF %06h)", $realtime, dut.cdd.disc_id, dut.cdd.disc_msf[31:8]);
 	end
 	// command bytes the BIOS writes to the drive (CD bus write strobes)
 	reg cdhwr_d = 1;
@@ -399,7 +437,14 @@ module tb_boot;
 		place_file(bios, 0, 23'h400000, bios_len);
 		$display("tb_boot: BIOS %s (%0d bytes) placed", bios, bios_len);
 		iso_len = 0;
-		if ($value$plusargs("iso=%s", iso)) begin
+		void'($value$plusargs("disc_latency_us=%d", disc_latency_us));
+		if ($value$plusargs("disc_bin=%s", iso)) begin
+			bin_fd = $fopen(iso, "rb");
+			if (bin_fd == 0) begin $display("cannot open %s", iso); $finish; end
+			void'($fseek(bin_fd, 0, 2));
+			bin_sectors = $ftell(bin_fd) / 2352;
+			$display("tb_boot: streaming %s (%0d raw sectors), firmware latency %0d us", iso, bin_sectors, disc_latency_us);
+		end else if ($value$plusargs("iso=%s", iso)) begin
 			place_file(iso, 1, 23'h0, iso_len);
 			$display("tb_boot: ISO %s (%0d bytes, %0d sectors) placed", iso, iso_len, iso_len / 2048);
 		end
@@ -411,6 +456,15 @@ module tb_boot;
 			host_cmd(16'h0300, 0, 0, 0, r, e);
 			host_cmd(16'h0301, 0, iso_len, 0, r, e);
 		end
+		if (bin_fd != 0) begin
+			bit [31:0] toc [8];
+			toc[0] = {16'h0, bcd(1), 8'd1};
+			toc[1] = 150 + bin_sectors; toc[2] = msf_bcd(150 + bin_sectors); toc[3] = 0;
+			toc[4] = 150; toc[5] = 150 + bin_sectors - 1; toc[6] = 150; toc[7] = msf_bcd(150);
+			host_cmd(16'h0300, 0, 0, 0, r, e);
+			for (int i = 0; i < 8; i++) host_wr(32'h1000_0000 + 4 * i, toc[i]);
+			host_cmd(16'h0301, 0, 32, 0, r, e);
+		end
 		host_cmd(16'h0300, 1, 0, 0, r, e);
 		host_cmd(16'h0301, 1, bios_len, 0, r, e);
 		host_cmd(16'h0102, 0, 0, 0, r, e);
@@ -421,8 +475,8 @@ module tb_boot;
 
 		#(run_ms * 1ms);
 		dump_vram_fb(32'h000000, 1638, "build/sim/frames/vram_all.ppm");
-		$display("tb_boot: %0d frames, %0d CD sectors, SDRAM model errors %0d, TB errors %0d",
-		         frames, sectors_sent, sdram.errors, errors);
+		$display("tb_boot: %0d frames, %0d CD sectors (%0d served by the firmware model), SDRAM model errors %0d, TB errors %0d",
+		         frames, sectors_sent, served, sdram.errors, errors);
 		$display("tb_boot: RT cache hits %0d, misses %0d, prefetches %0d, invalidations %0d",
 		         dut.rtc_hits, dut.rtc_misses, dut.rtc_prefetches, dut.rtc_invalidations);
 		$finish;

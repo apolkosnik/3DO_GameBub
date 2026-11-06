@@ -110,6 +110,15 @@ module p3do_gamebub #(
 	wire        disc_present, bios_loaded, kanji_loaded;
 	wire [24:0] disc_bytes;
 	wire [ 1:0] cd_speed;
+	wire [ 1:0] region_sel;
+	wire        bios_pal;
+	wire        disc_stream, disc_change;
+	wire        toc_we, sb_we;
+	wire [ 8:0] toc_wa;
+	wire [ 9:0] sb_wa;
+	wire [31:0] toc_wd, sb_wd;
+	wire [31:0] core_cmd_words [4];
+	wire        nvram_wr;
 
 	wire        host_sec_req, host_sec_we;
 	wire [23:0] host_sec_addr;
@@ -140,6 +149,18 @@ module p3do_gamebub #(
 		.bios_loaded     (bios_loaded),
 		.kanji_loaded    (kanji_loaded),
 		.cd_speed        (cd_speed),
+		.region_sel      (region_sel),
+		.bios_pal        (bios_pal),
+		.disc_stream     (disc_stream),
+		.disc_change     (disc_change),
+		.toc_we          (toc_we),
+		.toc_wa          (toc_wa),
+		.toc_wd          (toc_wd),
+		.sb_we           (sb_we),
+		.sb_wa           (sb_wa),
+		.sb_wd           (sb_wd),
+		.core_cmd_words  (core_cmd_words),
+		.nvram_wr        (nvram_wr),
 		.clk_mem         (clk_mem),
 		.rst_mem         (rst_mem),
 		.sec_req         (host_sec_req),
@@ -153,7 +174,7 @@ module p3do_gamebub #(
 		.sec_rvalid      (host_sec_rvalid),
 		.sec_done        (host_sec_done)
 	);
-	assign host_commandCore_request = 1'b0;
+	// host_commandCore_request: disc sector requests from cdd_emu (below)
 
 	// SDRAM SEC hold request, seen in clk_sys
 	wire sec_hold;
@@ -251,6 +272,11 @@ module p3do_gamebub #(
 	reg pause;
 	reg sec_paused;
 
+	// NTSC / PAL: the "Region" setting, or by BIOS (MiSTer's checksums of
+	// the PAL Panasonic FZ-1 dumps). Taken while the 3DO is in reset.
+	reg PAL = 0;
+	always @(posedge clk_sys) if (reset_3do) PAL <= (region_sel == 2'd0) ? bios_pal : (region_sel == 2'd2);
+
 	P3DO p3do (
 		.RST_N(~reset_3do),
 		.CLK(clk_sys),
@@ -258,7 +284,7 @@ module p3do_gamebub #(
 		.EN(1'b1),
 		.PAUSE(pause),
 		.DSP_PAUSE(pause & NEED_DSP_PAUSE),
-		.PAL(1'b0),
+		.PAL(PAL),
 		.CE_F(CE_F),
 		.CE_R(CE_R),
 		.PON(POWER_ON),
@@ -340,6 +366,18 @@ module p3do_gamebub #(
 		.host_le        (HOST_LE),
 		.disc_present   (disc_present),
 		.disc_bytes     (disc_bytes),
+		.disc_stream    (disc_stream),
+		.disc_change    (disc_change),
+		.toc_we         (toc_we),
+		.toc_wa         (toc_wa),
+		.toc_wd         (toc_wd),
+		.sb_we          (sb_we),
+		.sb_wa          (sb_wa),
+		.sb_wd          (sb_wd),
+		.core_cmd_words (core_cmd_words),
+		.core_req       (host_commandCore_request),
+		.core_done      (host_commandCore_done),
+		.core_error     (host_commandCore_error),
 		.disc_id        (disc_id),
 		.disc_msf       (disc_msf),
 		.disc_info_valid(disc_info_valid),
@@ -544,6 +582,11 @@ module p3do_gamebub #(
 	);
 
 	assign RAM_DI = !LRAS0_N || !RRAS0_N ? VRAM_Q : sdr_dout;
+
+	// the 3DO wrote its NVRAM (save changed since loaded)
+	reg sramw_n_d = 1;
+	always @(posedge clk_sys) sramw_n_d <= SRAMW_N;
+	assign nvram_wr = !SRAMW_N && sramw_n_d;
 	assign PDI = !SRAMR_N ? (ddr_io_do>>{~PA[3:2],3'b000}) & 32'h000000FF : ddr_io_do;
 
 	/////////////////////////  "DDR" (VRAM overflow, ROMs, NVRAM)  ///////////

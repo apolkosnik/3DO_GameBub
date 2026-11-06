@@ -43,6 +43,8 @@ module tb_top;
 	wire        h_done;
 	reg         h_req = 0;
 	wire        h_busy, h_cdone, h_err;
+	wire        c_req;                      // core -> host request (disc sectors)
+	reg         c_done = 0, c_err = 0;
 
 	// video / audio
 	wire [5:0]  vr, vg, vb;
@@ -68,8 +70,8 @@ module tb_top;
 		.host_mem_address(h_addr), .host_mem_dataRead(h_rdata), .host_mem_dataWrite(h_wdata),
 		.host_commandHost_request(h_req), .host_commandHost_busy(h_busy),
 		.host_commandHost_done(h_cdone), .host_commandHost_error(h_err),
-		.host_commandCore_request(), .host_commandCore_busy(1'b0),
-		.host_commandCore_done(1'b0), .host_commandCore_error(1'b0),
+		.host_commandCore_request(c_req), .host_commandCore_busy(1'b0),
+		.host_commandCore_done(c_done), .host_commandCore_error(c_err),
 		.input_buttons_a(buttons[0]), .input_buttons_b(buttons[1]), .input_buttons_x(buttons[2]),
 		.input_buttons_y(buttons[3]), .input_buttons_up(buttons[4]), .input_buttons_down(buttons[5]),
 		.input_buttons_left(buttons[6]), .input_buttons_right(buttons[7]), .input_buttons_l(buttons[8]),
@@ -94,8 +96,13 @@ module tb_top;
 	// ------------------------------------------------------------------
 	// Host BFM (framework SpiReceiverFifo behaviour)
 	// ------------------------------------------------------------------
+	// The MCU does one SPI transaction at a time: serialise the BFM's users
+	// (main sequence and the disc-read handler).
+	bit host_lock = 0;
 	task automatic host_access(input bit wr, input [31:0] a, input [31:0] d, output [31:0] q);
 		int to;
+		while (host_lock) @(posedge clk_sys);
+		host_lock = 1;
 		@(posedge clk_sys);
 		h_enable <= 1; h_write <= wr; h_addr <= a; h_wdata <= d;
 		@(posedge clk_sys);              // first cycle: done is not looked at
@@ -106,6 +113,7 @@ module tb_top;
 		end
 		q = h_rdata;
 		h_enable <= 0;
+		host_lock = 0;
 	endtask
 
 	task automatic host_wr(input [31:0] a, input [31:0] d);
@@ -162,14 +170,81 @@ module tb_top;
 		if (e) fail($sformatf("FileWriteEnd(%0d) error", id));
 	endtask
 
+	// ------------------------------------------------------------------
+	// Disc-streaming firmware model (+stream): the fork firmware's
+	// send_disc (table of contents to the disc file's address) and
+	// disc_read (raw 2352-byte sectors on DISC_READ requests).
+	// ------------------------------------------------------------------
+	bit stream_mode;
+	int sectors_served = 0;
+	int disc_latency_us = 300;
+
+	function automatic [7:0] bcd(input int x); return 8'(((x / 10) << 4) | (x % 10)); endfunction
+	function automatic [31:0] msf_bcd(input int lba);
+		return {8'h00, bcd(lba / 75 / 60), bcd((lba / 75) % 60), bcd(lba % 75)};
+	endfunction
+
+	// raw sector at absolute LBA: sync, header (BCD MSF, mode 1), user data
+	function automatic [7:0] raw_byte(input int lba, input int i);
+		int l;
+		l = lba - 150;
+		if (l < 0 || l * 2048 >= iso_len) return 8'h00;
+		if (i == 0 || i == 11) return 8'h00;
+		if (i < 11) return 8'hFF;
+		if (i == 12) return msf_bcd(lba)[23:16];
+		if (i == 13) return msf_bcd(lba)[15:8];
+		if (i == 14) return msf_bcd(lba)[7:0];
+		if (i == 15) return 8'h01;
+		if (i < 16 + 2048) return iso[l * 2048 + i - 16];
+		return 8'h00;   // EDC/ECC not modelled
+	endfunction
+
+	task automatic send_toc();
+		bit [31:0] r, toc [8];
+		bit e;
+		int sectors;
+		sectors = iso_len / 2048;
+		toc[0] = {16'h0, bcd(1), 8'd1};
+		toc[1] = 150 + sectors;
+		toc[2] = msf_bcd(150 + sectors);
+		toc[3] = 0;
+		toc[4] = 150; toc[5] = 150 + sectors - 1; toc[6] = 150; toc[7] = msf_bcd(150);
+		host_cmd(16'h0300, 0, 0, 0, r, e);
+		for (int i = 0; i < 8; i++) host_wr(32'h1000_0000 + 4 * i, toc[i]);
+		host_cmd(16'h0301, 0, 32, 0, r, e);
+	endtask
+
+	initial forever begin
+		bit [31:0] w [4];
+		@(posedge clk_sys);
+		if (stream_mode && c_req && !c_done && !c_err) begin
+			for (int i = 0; i < 4; i++) host_rd(32'hF000_1000 + 4 * i, w[i]);
+			#(disc_latency_us * 1us);
+			if (w[0] != 32'h0400 || w[1] != 0) begin
+				fail($sformatf("unexpected core request %08h %08h", w[0], w[1]));
+				c_err <= 1;
+			end else begin
+				for (int i = 0; i < 2352; i += 4)
+					host_wr(w[3] + i, {raw_byte(w[2], i + 3), raw_byte(w[2], i + 2), raw_byte(w[2], i + 1), raw_byte(w[2], i)});
+				sectors_served++;
+				c_done <= 1;
+			end
+			while (c_req) @(posedge clk_sys);
+			c_done <= 0; c_err <= 0;
+		end
+	end
+
 	// Read the NVRAM file back as the MCU does on exit
 	bit [7:0] nvram [32768];
+	bit [31:0] nvram_size;       // FileReadStart's answer: 0x8000, or 0 when unchanged
 	task automatic read_nvram(input int bytes);
 		bit [31:0] r, w;
 		bit e;
 		host_cmd(16'h0302, 3, 0, 0, r, e);
 		if (e) fail("FileReadStart(3) error");
-		if (r != 32'h8000) fail($sformatf("FileReadStart(3) size %08h", r));
+		if (r != 32'h8000 && r != 0) fail($sformatf("FileReadStart(3) size %08h", r));
+		nvram_size = r;
+		// the testbench reads the memory either way (the firmware would skip it on 0)
 		for (int o = 0; o < bytes; o += 4) begin
 			host_rd(32'h3000_0000 + o, w);
 			if (host_be) {nvram[o], nvram[o+1], nvram[o+2], nvram[o+3]} = w;
@@ -234,10 +309,14 @@ module tb_top;
 		bit [31:0] r;
 		bit e;
 		bit done;
+		bit nvram_changed;
 
 		if (!$value$plusargs("rom=%s", romfile)) romfile = "build/sim/testrom.bin";
 		if (!$value$plusargs("frames=%d", n_frames)) n_frames = 2;
 		host_be = $test$plusargs("be");
+		stream_mode = $test$plusargs("stream");
+		void'($value$plusargs("disc_latency_us=%d", disc_latency_us));
+		if (stream_mode && host_be) begin $display("+stream uses little-endian host words"); $finish; end
 
 		fd = $fopen(romfile, "rb");
 		if (fd == 0) begin $display("cannot open %s", romfile); $finish; end
@@ -263,7 +342,8 @@ module tb_top;
 		$display("[%0t] core status: setup", $realtime);
 
 		// files in files.json order
-		send_file(0, 32'h1000_0000, iso, iso_len);
+		if (stream_mode) send_toc();
+		else             send_file(0, 32'h1000_0000, iso, iso_len);
 		send_file(1, 32'h2000_0000, rom, rom_len);
 
 		host_cmd(16'h0102, 0, 0, 0, r, e);   // SetupComplete
@@ -272,8 +352,13 @@ module tb_top;
 		end while (r != 3);
 		$display("[%0t] core status: halted (setup complete)", $realtime);
 
-		// The blank NVRAM must have been formatted (save file not supplied)
+		// The blank NVRAM must have been formatted (save file not supplied),
+		// and reported as changed (a new save file is due); afterwards it is
+		// unchanged until the 3DO writes it.
 		read_nvram(16);
+		if (nvram_size != 32'h8000) fail("freshly formatted NVRAM not reported as changed");
+		read_nvram(16);
+		if (nvram_size != 0) fail("unchanged NVRAM reported as changed");
 		if ({nvram[0], nvram[1], nvram[2], nvram[3]} != 32'h015A5A5A || nvram[6] != 8'h02)
 			fail($sformatf("NVRAM not formatted: %02h %02h %02h %02h .. %02h", nvram[0], nvram[1], nvram[2], nvram[3], nvram[6]));
 
@@ -285,13 +370,16 @@ module tb_top;
 
 		// Poll the verdict in NVRAM bytes 0x100..0x10F
 		done = 0;
+		nvram_changed = 0;
 		for (int t = 0; t < 1200 && !done; t++) begin
 			#100us;
 			read_nvram(16'h110);
+			if (nvram_size != 0) nvram_changed = 1;
 			if ({nvram[256], nvram[257], nvram[258], nvram[259]} == "PASS" ||
 			    {nvram[256], nvram[257], nvram[258], nvram[259]} == "FAIL") done = 1;
 		end
 		if (!done) fail("test ROM did not report a result");
+		if (!nvram_changed) fail("NVRAM written by the 3DO was never reported as changed");
 		else begin
 			bit [31:0] test, addr, checks;
 			test   = {nvram[260], nvram[261], nvram[262], nvram[263]};
@@ -310,6 +398,10 @@ module tb_top;
 		$display("[%0t] video: %0d frames, bad lines %0d, bad frames %0d", $realtime, frames, bad_lines, bad_frames);
 		if (bad_lines || bad_frames) fail("video timing");
 
+		if (stream_mode) begin
+			$display("tb_top: %0d disc sectors served by the firmware model", sectors_served);
+			if (sectors_served < 3) fail("streaming mode: the core did not request the sectors");
+		end
 		$display("tb_top: TB errors=%0d, SDRAM model errors=%0d", errors, sdram.errors);
 		if (errors == 0 && sdram.errors == 0) $display("tb_top: PASS");
 		else                                  $display("tb_top: FAIL");

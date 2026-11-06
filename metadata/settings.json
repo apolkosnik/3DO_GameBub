@@ -6,11 +6,41 @@
 			"address": "0x00001000",
 			"type": "list",
 			"items": [
-				{"label": "2x (Original)", "value": "0x0"},
-				{"label": "MiSTer (3 ms)", "value": "0x1"},
-				{"label": "Fast (0.5 ms)", "value": "0x2"}
+				{
+					"label": "2x (Original)",
+					"value": "0x0"
+				},
+				{
+					"label": "MiSTer (3 ms)",
+					"value": "0x1"
+				},
+				{
+					"label": "Fast (0.5 ms)",
+					"value": "0x2"
+				}
 			],
 			"default": "0x1"
+		},
+		{
+			"id": 3,
+			"label": "Region",
+			"address": "0x00001008",
+			"type": "list",
+			"items": [
+				{
+					"label": "By BIOS",
+					"value": "0x0"
+				},
+				{
+					"label": "NTSC",
+					"value": "0x1"
+				},
+				{
+					"label": "PAL",
+					"value": "0x2"
+				}
+			],
+			"default": "0x0"
 		},
 		{
 			"id": 2,

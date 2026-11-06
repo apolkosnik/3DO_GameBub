@@ -5,10 +5,25 @@ A port of the [MiSTer 3DO core](https://github.com/MiSTer-devel/3DO_MiSTer) (by 
 [Game Bub core framework](https://docs.gamebub.net/developing-cores/overview/)
 (XC7A100T FPGA, one 32 MiB SDRAM chip).
 
-**Status: experimental.** The core passes its simulation test suite (see below), but it
-has not yet been run on Game Bub hardware. The SDRAM read capture timing in particular
+**Status: experimental, not yet playable.** The core passes its simulation test suite
+(see below) and the real Panasonic FZ-10 BIOS boots in simulation: it decompresses its
+kernel into DRAM, runs from DRAM and draws the 3DO logo correctly into VRAM. The
+displayed picture is corrupted, though, and this is a known architectural limit rather
+than a bug to be hunted:
+
+* On MiSTer, VRAM that does not fit into block RAM lives in DDR3 (about 800 MB/s). Here
+  it lives in the single 16-bit SDRAM (about 200 MB/s), and the framework's double
+  framebuffer leaves only about 80 KB of block RAM for VRAM, not enough for one 150 KB
+  3DO framebuffer. A 128-beat video read transfer takes ~5.5 µs instead of ~1.3 µs and
+  often queues behind SPORT row writes, so CLIO shifts out stale data (measured with
+  `tb_boot`: most serial reads during a transfer hit words not yet delivered).
+* Fixing this needs either a faster or wider VRAM backing store (the 512 KiB SRAM and
+  the SDRAM used as parallel channels, plus a redesigned VRAM tier), or a framework that
+  wires the second SDRAM chip / frees block RAM.
+
+The core has not been run on Game Bub hardware. The SDRAM read capture timing
 (`READ_STAGE` in `rtl/gamebub/sdram_3do.sv`) follows the MiSTer design and may need
-tuning on real hardware.
+tuning there.
 
 ## Installing
 
@@ -112,6 +127,16 @@ sim/build_testrom.sh           # assemble the test BIOS (sim/tb/testrom.S)
 sim/run_tb.sh tb_top           # whole core: boots the test BIOS
 sim/run_tb.sh tb_top +be       # same with a big-endian host
 ```
+
+```
+VARGS="+define+TB_TOP=tb_boot" BUILD=build/sim_boot sim/run_tb.sh tb_boot \
+    +bios=/path/to/panafz10.bin +iso=/path/to/disc.iso +run_ms=1000 +frame_every=6
+```
+
+`tb_boot` boots a real BIOS (and optional ISO, converted with `tools/cue2iso.py`,
+truncated to 22 MiB if needed), writes framework video frames to `build/sim/frames/`
+(PPM), logs every CD command, dumps VRAM as an image at the end and measures stale
+serial reads during VRAM read transfers. About 1 ms of 3DO time per second of wall time.
 
 `tb_top` runs the complete core against an SDRAM model that checks every SDRAM timing
 parameter and refresh. A host model follows the framework's MCU protocol: it loads the

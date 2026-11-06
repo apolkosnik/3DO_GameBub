@@ -15,7 +15,8 @@
 //
 // Plusargs: +rom=<file> (default build/sim/testrom.bin), +be (host sends
 //           big-endian words; detected by the core from the ISO header),
-//           +iso (load a small ISO image), +frames=<n> video frames to check
+//           +frames=<n> video frames to check, +trace (CPU bus), +state
+//           (core control state), +sdram_verbose (SDRAM commands)
 //
 // Copyright (c) 2026 Adam Polkosnik
 // SPDX-License-Identifier: GPL-3.0-or-later
@@ -262,7 +263,7 @@ module tb_top;
 		$display("[%0t] core status: setup", $realtime);
 
 		// files in files.json order
-		if ($test$plusargs("iso") || host_be) send_file(0, 32'h1000_0000, iso, iso_len);
+		send_file(0, 32'h1000_0000, iso, iso_len);
 		send_file(1, 32'h2000_0000, rom, rom_len);
 
 		host_cmd(16'h0102, 0, 0, 0, r, e);   // SetupComplete
@@ -276,6 +277,7 @@ module tb_top;
 		if ({nvram[0], nvram[1], nvram[2], nvram[3]} != 32'h015A5A5A || nvram[6] != 8'h02)
 			fail($sformatf("NVRAM not formatted: %02h %02h %02h %02h .. %02h", nvram[0], nvram[1], nvram[2], nvram[3], nvram[6]));
 
+		host_wr(32'h0000_1000, 32'h2);       // setting: CD speed "Fast (0.5 ms)"
 		host_cmd(16'h0200, 1, 0, 0, r, e);   // NotifyFocus(1)
 		host_cmd(16'h0100, 0, 0, 0, r, e);   // CoreRun
 		$display("[%0t] core running", $realtime);
@@ -283,7 +285,7 @@ module tb_top;
 
 		// Poll the verdict in NVRAM bytes 0x100..0x10F
 		done = 0;
-		for (int t = 0; t < 400 && !done; t++) begin
+		for (int t = 0; t < 1200 && !done; t++) begin
 			#100us;
 			read_nvram(16'h110);
 			if ({nvram[256], nvram[257], nvram[258], nvram[259]} == "PASS" ||
@@ -298,7 +300,7 @@ module tb_top;
 			$display("[%0t] test ROM: %s test=%0d addr=%08h checks=%0d", $realtime,
 			         {nvram[256], nvram[257], nvram[258], nvram[259]}, test, addr, checks);
 			if ({nvram[256], nvram[257], nvram[258], nvram[259]} != "PASS") fail("test ROM reported FAIL");
-			if (checks != 64*4 + 1 + 64*5 + 2 + 16) fail($sformatf("unexpected number of checks %0d", checks));
+			if (checks != 64*4 + 1 + 64*5 + 2 + 16 + 1 + 2) fail($sformatf("unexpected number of checks %0d", checks));
 			for (int i = 0; i < 16; i++)
 				if (nvram[8'h80 + i] != 8'(8'hA5 + 8'h13 * i)) fail($sformatf("NVRAM byte %02h = %02h", 8'h80 + i, nvram[8'h80 + i]));
 		end
@@ -315,7 +317,7 @@ module tb_top;
 	end
 
 	initial begin
-		#200ms;
+		#400ms;
 		$display("tb_top: TIMEOUT");
 		$display("tb_top: FAIL");
 		$finish;

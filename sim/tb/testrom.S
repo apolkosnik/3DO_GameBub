@@ -8,6 +8,8 @@
 @   4. VRAM in the SDRAM overflow tier (0x200000, 0x2A0000) via ddram.sv
 @   5. ROM data reads (literal table in ROM)
 @   6. NVRAM byte writes/reads (0x03140000, one byte per word, low byte)
+@   7. CD-ROM through CLIO XBUS -> OSA -> 3DO_CDROM -> cdd_emu -> SDRAM:
+@      "read capacity" (disc-info block) and a 2-sector data read (NEXT)
 @ Result record in NVRAM bytes 0x100..0x10F (read back by the testbench over
 @ the host interface, FileReadStart(3)):
 @   0x100: 'P','A','S','S' or 'F','A','I','L'
@@ -130,6 +132,77 @@ entry:
 	subs	r1, r1, #1
 	bne	5b
 
+	@ ---- 7. CD-ROM via XBUS: read capacity, then 2 sectors (LBA 1, 2) ----
+	@ The testbench loads a 4-sector ISO whose byte i of sector L is
+	@ (7*i + L) & 0xFF (sector 0 starts with an Opera volume header).
+	mov	r12, #7
+	ldr	r0, =0x03400500		@ XBUS select: device 0 (CD drive)
+	mov	r1, #0
+	str	r1, [r0]
+	@ Read capacity (0x85): status 85 00 mm ss ff stat; lead-out of a
+	@ 4-sector disc is LBA 154 = 00:02:04
+	mov	r1, #0x85
+	bl	cd_cmd
+	mov	r1, #0
+	mov	r3, #6
+8:	bl	cd_cmd			@ 6 parameter bytes (zeros)
+	subs	r3, r3, #1
+	bne	8b
+	bl	cd_wait_stat
+	bl	cd_stat			@ 0x85
+	cmp	r6, #0x85
+	bne	fail
+	bl	cd_stat			@ 0x00
+	bl	cd_stat			@ mm
+	mov	r9, r6, lsl #16
+	bl	cd_stat			@ ss
+	orr	r9, r9, r6, lsl #8
+	bl	cd_stat			@ ff
+	orr	r9, r9, r6
+	bl	cd_stat			@ status
+	mov	r2, r9
+	ldr	r5, =0x00000204
+	cmp	r9, r5
+	bne	fail
+	add	r11, r11, #1
+
+	@ Read data (0x10): LBA mode, address 151 (= sector 1), 2 blocks
+	mov	r1, #0x10
+	bl	cd_cmd
+	mov	r1, #0
+	bl	cd_cmd
+	bl	cd_cmd
+	mov	r1, #151
+	bl	cd_cmd
+	mov	r1, #1			@ LBA addressing
+	bl	cd_cmd
+	mov	r1, #0
+	bl	cd_cmd
+	mov	r1, #2
+	bl	cd_cmd
+	mov	r8, #1			@ sector being read
+9:	ldr	r0, =0x03400540		@ poll until data is available
+10:	ldr	r1, [r0]
+	tst	r1, #0x20
+	beq	10b
+	ldr	r0, =0x034005C0
+	mov	r3, #0
+11:	ldr	r6, [r0]
+	and	r6, r6, #0xFF
+	rsb	r5, r3, r3, lsl #3	@ 7 * i
+	add	r5, r5, r8
+	and	r5, r5, #0xFF
+	cmp	r5, r6
+	orrne	r2, r3, r8, lsl #16
+	bne	fail
+	add	r3, r3, #1
+	cmp	r3, #2048
+	bne	11b
+	add	r11, r11, #1
+	add	r8, r8, #1
+	cmp	r8, #3
+	bne	9b
+
 	@ ---- all passed ----
 	mov	r12, #0
 	mov	r2, #0
@@ -154,6 +227,27 @@ report:
 	str	r12, [r0, #4]
 	str	r11, [r0, #8]
 done:	b	done
+
+@ CD command byte r1 -> XBUS command register (keeps r1)
+cd_cmd:
+	ldr	r10, =0x03400580
+	str	r1, [r10]
+	mov	pc, lr
+
+@ wait until the drive has status (poll bit 4)
+cd_wait_stat:
+	ldr	r10, =0x03400540
+12:	ldr	r6, [r10]
+	tst	r6, #0x10
+	beq	12b
+	mov	pc, lr
+
+@ next status byte -> r6
+cd_stat:
+	ldr	r10, =0x03400580
+	ldr	r6, [r10]
+	and	r6, r6, #0xFF
+	mov	pc, lr
 
 @ store r8 as 4 NVRAM bytes (big-endian) at r0, r0 += 16
 put_word:

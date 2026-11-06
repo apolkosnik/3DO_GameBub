@@ -63,6 +63,10 @@ firmware also when you pause.
   original MiSTer DDR3 logic (`ddram.sv`). Video reads from it go through a prefetching
   cache (below), but CPU and CEL-engine accesses outside the block are slower than on
   MiSTer.
+* While the BIOS reads the disc, a few video lines per second start before their VRAM
+  transfer (17 in the first 2.3 s of the Wolfenstein 3D boot, out of 12,295): MADAM
+  serves the CPU's accesses to CLIO, here load-multiples from the XBUS data port, before
+  the video DMA. This is MiSTer's arbitration, unchanged.
 * One controller. Buttons: Y/B/A = 3DO A/B/C, Start = P (play), Select/X = X (stop),
   L/R = L/R. They can be remapped in the Game Bub menu.
 
@@ -123,8 +127,14 @@ strip at the top of the picture in Wolfenstein 3D):
 * A prefetch started right after a line's first transfer held back the other half's
   transfer, which comes ~0.1 µs later. Prefetches now wait until no transfer has been
   requested for 1.28 µs.
+* When the VDL entry itself is processed late (in the BIOS: its VDL is in SDRAM, and the
+  CPU's CLIO accesses come first), its addresses come too close to the line. The cache
+  also fetches the first half-rows of the last two frame buffers at the start of every
+  frame (MADAM's `LINE0`, in vertical blanking).
 
-`tb_boot` checks that every video line has had its transfers before it starts.
+`tb_boot` checks that every video line has had its transfers before it starts: a late line
+while the 3DO was paused (the port's memory system) is an error; one delayed by MADAM's
+own bus arbitration is counted separately (see *Limitations*).
 
 **Random VRAM writes (fixes to `ddram.sv`).** On MiSTer, framebuffers are normally in
 block RAM (a per-game table moves the on-chip blocks to where a game puts them). On Game

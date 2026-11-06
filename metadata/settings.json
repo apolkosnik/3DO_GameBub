@@ -1,0 +1,23 @@
+{
+	"settings": [
+		{
+			"id": 1,
+			"label": "CD Speed",
+			"address": "0x00001000",
+			"type": "list",
+			"items": [
+				{"label": "2x (Original)", "value": "0x0"},
+				{"label": "MiSTer (3 ms)", "value": "0x1"},
+				{"label": "Fast (0.5 ms)", "value": "0x2"}
+			],
+			"default": "0x1"
+		},
+		{
+			"id": 2,
+			"label": "Reset",
+			"address": "0x00001004",
+			"type": "action",
+			"value": "0x1"
+		}
+	]
+}

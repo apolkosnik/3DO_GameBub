@@ -1,0 +1,43 @@
+{
+	"files": [
+		{
+			"id": 0,
+			"label": "Disc (ISO)",
+			"extensions": ["iso"],
+			"user_selected": true,
+			"optional": false,
+			"read_only": true,
+			"address": "0x10000000",
+			"max_size": "0x1600000",
+			"max_transfer_speed": 4000
+		},
+		{
+			"id": 1,
+			"label": "BIOS",
+			"filename": "bios.bin",
+			"optional": false,
+			"read_only": true,
+			"address": "0x20000000",
+			"exact_size": "0x100000"
+		},
+		{
+			"id": 2,
+			"label": "Kanji ROM",
+			"filename": "kanji.rom",
+			"optional": true,
+			"read_only": true,
+			"address": "0x21000000",
+			"exact_size": "0x100000"
+		},
+		{
+			"id": 3,
+			"label": "NVRAM",
+			"extensions": ["sav"],
+			"dependent_on_0": true,
+			"optional": true,
+			"initialize": true,
+			"address": "0x30000000",
+			"exact_size": "0x8000"
+		}
+	]
+}

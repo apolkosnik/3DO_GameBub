@@ -287,6 +287,22 @@ code and the CPU crashed (Wolfenstein 3D with the FZ-10 BIOS, 4.8 s after power-
 
 Upstream files that were modified are marked with `GameBub` / `Game Bub port` comments.
 
+**Upstream version.** The core follows the MiSTer 3DO core up to commit `2cf0583`
+(2026-11-07), except `3ec27de`; the port was made from `b419cbb` (2026-11-05). Merged
+since:
+
+* CLIO RandSeed (0x38) and RandSample (0x3C), which had read as 0: the BIOS's audio CD
+  player hung drawing a random track order (`6fcc997`, `af289c3`).
+* ARM6: the MSR CPSR instruction, ASR #32, and the carry of zero-count shifts
+  (`4970e53`).
+
+Not merged: `3ec27de`, MADAM's address decoding for other DRAM sizes (4 or 8 MB, an
+experimental menu option). On Game Bub the extra DRAM would be in SDRAM banks 0/1 above
+row 1023, where a preloaded ISO goes, so the option could not be offered; and its
+comparators against size-dependent limits put MADAM's DMA address path into the SDRAM
+controller 1.1 ns over its 10 ns budget. With the standard 2 MB + 1 MB both decode the
+same addresses, except one word just past the end of VRAM that the new code also selects.
+
 ## Building
 
 Requirements: Vivado 2023.2 or later (as the framework documents), a JDK (11 or later),

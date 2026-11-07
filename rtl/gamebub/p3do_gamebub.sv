@@ -113,6 +113,7 @@ module p3do_gamebub #(
 	wire [ 1:0] cd_speed;
 	wire [ 1:0] region_sel;
 	wire        bios_pal;
+	wire        button_layout;
 	wire        disc_stream, disc_change;
 	wire        toc_we, sb_we;
 	wire [ 8:0] toc_wa;
@@ -152,6 +153,7 @@ module p3do_gamebub #(
 		.cd_speed        (cd_speed),
 		.region_sel      (region_sel),
 		.bios_pal        (bios_pal),
+		.button_layout   (button_layout),
 		.disc_stream     (disc_stream),
 		.disc_change     (disc_change),
 		.toc_we          (toc_we),
@@ -415,17 +417,25 @@ module p3do_gamebub #(
 	/////////////////////////  PAD  //////////////////////////////////////////
 	// MiSTer joystick bits: 0 right, 1 left, 2 down, 3 up, 4 A, 5 B, 6 C,
 	// 7 P (play/pause), 8 X (stop), 9 R, 10 L.
-	// Game Bub (SNES-style face buttons): Y/B/A -> 3DO A/B/C (left to right),
-	// Start -> P, Select or X -> X, L -> L, R -> R.
+	// "Buttons" setting (button_layout):
+	//   0: Game Bub (SNES-style face buttons): Y/B/A -> 3DO A/B/C (left to
+	//      right), X -> X;
+	//   1: a pad with A B C D in a row (Neo Geo style) that the dock reports as
+	//      A B X Y: A/B/X -> 3DO A/B/C, Y -> X.
+	// Both: Start -> P, Select -> X, L -> L, R -> R.
+	wire pad_a = button_layout ? input_buttons_a : input_buttons_y;
+	wire pad_b = input_buttons_b;
+	wire pad_c = button_layout ? input_buttons_x : input_buttons_a;
+	wire pad_x = input_buttons_select | (button_layout ? input_buttons_y : input_buttons_x);
 	wire [12:0] joy0 = {
 		2'b00,
 		input_buttons_l,
 		input_buttons_r,
-		input_buttons_select | input_buttons_x,
+		pad_x,
 		input_buttons_start,
-		input_buttons_a,
-		input_buttons_b,
-		input_buttons_y,
+		pad_c,
+		pad_b,
+		pad_a,
 		input_buttons_up,
 		input_buttons_down,
 		input_buttons_left,

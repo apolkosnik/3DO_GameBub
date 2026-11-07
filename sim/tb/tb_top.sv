@@ -253,6 +253,35 @@ module tb_top;
 		host_cmd(16'h0303, 3, 0, 0, r, e);
 	endtask
 
+	// "Buttons" setting (0x100C): each Game Bub button held alone gives one
+	// 3DO button in the control pad word the player bus sends (HPS2PAD:
+	// 1 0 0 Down Up Right Left A B C P X R L 0 0, a pressed button is 1).
+	// Layout 0: Y B A -> A B C, X -> X; layout 1: A B X -> A B C, Y -> X;
+	// both: Select -> X, Start -> P, L/R, directions.
+	localparam int PD_DOWN = 12, PD_UP = 11, PD_RIGHT = 10, PD_LEFT = 9, PD_A = 8, PD_B = 7,
+	               PD_C = 6, PD_P = 5, PD_X = 4, PD_R = 3, PD_L = 2;
+	int pad_checks = 0;
+	task automatic check_buttons(input bit layout);
+		// in the order of `buttons`: A B X Y Up Down Left Right L R Start Select
+		int map0 [12] = '{PD_C, PD_B, PD_X, PD_A, PD_UP, PD_DOWN, PD_LEFT, PD_RIGHT, PD_L, PD_R, PD_P, PD_X};
+		int map1 [12] = '{PD_A, PD_B, PD_C, PD_X, PD_UP, PD_DOWN, PD_LEFT, PD_RIGHT, PD_L, PD_R, PD_P, PD_X};
+		string names [12] = '{"A", "B", "X", "Y", "Up", "Down", "Left", "Right", "L", "R", "Start", "Select"};
+		bit [31:0] q;
+		bit [15:0] got, exp;
+		host_rd(32'h0000_100C, q);
+		if (q != {31'd0, layout}) fail($sformatf("Buttons setting reads %08h, written %0d", q, layout));
+		for (int i = 0; i <= 12; i++) begin
+			buttons = (i < 12) ? 12'(1) << i : 12'd0;
+			repeat (4) @(posedge clk_sys);
+			exp = 16'h8000 | ((i < 12) ? 16'(1) << (layout ? map1[i] : map0[i]) : 16'h0);
+			got = dut.pad.IN_DATA[255:240];
+			pad_checks++;
+			if (got !== exp)
+				fail($sformatf("Buttons setting %0d: %s held gives pad word %04h, expected %04h",
+				               layout, (i < 12) ? names[i] : "nothing", got, exp));
+		end
+	endtask
+
 	// ------------------------------------------------------------------
 	// Video timing monitor (framework side)
 	// ------------------------------------------------------------------
@@ -383,6 +412,12 @@ module tb_top;
 			fail($sformatf("NVRAM not formatted: %02h %02h %02h %02h .. %02h", nvram[0], nvram[1], nvram[2], nvram[3], nvram[6]));
 
 		host_wr(32'h0000_1000, 32'h2);       // setting: CD speed "Fast (0.5 ms)"
+		check_buttons(0);                    // "Buttons": the default, then the other layout and back
+		host_wr(32'h0000_100C, 32'h1);
+		check_buttons(1);
+		host_wr(32'h0000_100C, 32'h0);
+		check_buttons(0);
+		$display("[%0t] Buttons setting: %0d pad words checked", $realtime, pad_checks);
 		host_cmd(16'h0200, 1, 0, 0, r, e);   // NotifyFocus(1)
 		host_cmd(16'h0100, 0, 0, 0, r, e);   // CoreRun
 		$display("[%0t] core running", $realtime);

@@ -43,6 +43,23 @@
 			"default": "0x0"
 		},
 		{
+			"id": 4,
+			"label": "Buttons",
+			"address": "0x0000100C",
+			"type": "list",
+			"items": [
+				{
+					"label": "Y B A = A B C",
+					"value": "0x0"
+				},
+				{
+					"label": "A B X = A B C",
+					"value": "0x1"
+				}
+			],
+			"default": "0x0"
+		},
+		{
 			"id": 2,
 			"label": "Reset",
 			"address": "0x00001004",

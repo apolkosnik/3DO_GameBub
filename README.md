@@ -91,8 +91,10 @@ firmware also when you pause.
   are not all gone: before the two fixes there, the Wolfenstein 3D boot had 247 in its
   first 12.5 s, 216 of them from the CPU's CLIO accesses; the remaining ones in its 3D
   intro, where the 3DO is paused for the SDRAM a lot, are being measured.
-* One controller. Buttons: Y/B/A = 3DO A/B/C, Start = P (play), Select/X = X (stop),
-  L/R = L/R. They can be remapped in the Game Bub menu.
+* One controller (the handheld's buttons and the dock's gamepads all drive it). Buttons:
+  see the Buttons setting; Start = P (play), Select = X (stop), L/R = L/R. The firmware
+  has no button remapping of its own; its "Swap A/B and X/Y" setting swaps those of the
+  dock's gamepads before the core sees them.
 
 ### Settings
 
@@ -101,6 +103,12 @@ firmware also when you pause.
 * **Region**: NTSC or PAL video timing, either by BIOS (a PAL Panasonic FZ-1 BIOS is
   recognised by its checksum, as on MiSTer) or set by hand. Takes effect at the next
   reset.
+* **Buttons**: which Game Bub buttons are the 3DO's A, B, C and X (stop).
+  `Y B A = A B C` (default): Y, B, A are A, B, C, left to right as on a 3DO pad, and X
+  is stop. `A B X = A B C`: A, B, X are A, B, C and Y is stop, for a pad with A B C D in
+  a row (Neo Geo style) that the dock reports as A B X Y. Which names the dock gives a
+  pad's buttons is up to the dock; the 3DO Controller Test shows the result. Takes
+  effect at once.
 * **Reset**: resets the 3DO.
 
 ## How the port works
@@ -376,7 +384,7 @@ sim/run_tb.sh tb_rtcache       # VRAM read-transfer cache and ddram.sv: coherenc
                                # page copies with video transfers between their read and write transfers,
                                # a line's two transfers apart with the first missing
 sim/build_testrom.sh           # assemble the test BIOS (sim/tb/testrom.S) and sim/tb/arm6_isa.S
-sim/run_tb.sh tb_top           # whole core: boots the test BIOS
+sim/run_tb.sh tb_top           # whole core: boots the test BIOS; checks the Buttons setting
 sim/run_tb.sh tb_top +be       # same with a big-endian host
 sim/run_tb.sh tb_top +stream   # same, with the disc read through a model of the streaming firmware
 ```

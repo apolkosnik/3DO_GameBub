@@ -93,8 +93,8 @@ module tb_div;
 			run(n, d);
 		end
 		$display("tb_div: %0d divisions, %0d errors", checks, errors);
-		if (errors == 0) $display("tb_div: PASS");
-		else             $display("tb_div: FAIL");
-		$finish;
+		// a failure ends with a non-zero exit status ($fatal), so scripts see it
+		if (errors == 0) begin $display("tb_div: PASS"); $finish; end
+		else $fatal(1, "tb_div: FAIL");
 	end
 endmodule

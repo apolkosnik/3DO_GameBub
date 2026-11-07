@@ -336,10 +336,10 @@ module tb_top;
 		host_be = $test$plusargs("be");
 		stream_mode = $test$plusargs("stream");
 		void'($value$plusargs("disc_latency_us=%d", disc_latency_us));
-		if (stream_mode && host_be) begin $display("+stream uses little-endian host words"); $finish; end
+		if (stream_mode && host_be) $fatal(1, "tb_top: +stream uses little-endian host words");
 
 		fd = $fopen(romfile, "rb");
-		if (fd == 0) begin $display("cannot open %s", romfile); $finish; end
+		if (fd == 0) $fatal(1, "tb_top: cannot open %s", romfile);
 		rom_len = 0;
 		while ((c = $fgetc(fd)) != -1) rom[rom_len++] = c[7:0];
 		$fclose(fd);
@@ -386,7 +386,7 @@ module tb_top;
 		host_cmd(16'h0200, 1, 0, 0, r, e);   // NotifyFocus(1)
 		host_cmd(16'h0100, 0, 0, 0, r, e);   // CoreRun
 		$display("[%0t] core running", $realtime);
-		if ($test$plusargs("short")) begin #300us; $finish; end
+		if ($test$plusargs("short")) begin #300us; $display("tb_top: +short: stopped at 300 us, nothing checked (no PASS/FAIL)"); $finish; end
 
 		// Poll the verdict in NVRAM bytes 0x100..0x10F
 		done = 0;
@@ -426,15 +426,14 @@ module tb_top;
 			if (sectors_served < 3) fail("streaming mode: the core did not request the sectors");
 		end
 		$display("tb_top: TB errors=%0d, SDRAM model errors=%0d", errors, sdram.errors);
-		if (errors == 0 && sdram.errors == 0) $display("tb_top: PASS");
-		else                                  $display("tb_top: FAIL");
-		$finish;
+		// a failure ends with a non-zero exit status ($fatal), so scripts see it
+		if (errors == 0 && sdram.errors == 0) begin $display("tb_top: PASS"); $finish; end
+		else $fatal(1, "tb_top: FAIL");
 	end
 
 	initial begin
 		#400ms;
 		$display("tb_top: TIMEOUT");
-		$display("tb_top: FAIL");
-		$finish;
+		$fatal(1, "tb_top: FAIL");
 	end
 endmodule

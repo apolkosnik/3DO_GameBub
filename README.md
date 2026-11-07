@@ -381,6 +381,9 @@ sim/run_tb.sh tb_top +be       # same with a big-endian host
 sim/run_tb.sh tb_top +stream   # same, with the disc read through a model of the streaming firmware
 ```
 
+Each testbench ends with `PASS` or `FAIL`; a failure (or a missing file or argument)
+ends the simulation with `$fatal`, so `run_tb.sh` exits with a non-zero status.
+
 ```
 VARGS="+define+TB_TOP=tb_boot" BUILD=build/sim_boot sim/run_tb.sh tb_boot \
     +bios=/path/to/panafz10.bin "+disc_bin=/path/to/game.bin" +run_ms=16000 +frame_every=30
@@ -394,7 +397,8 @@ the image, checks every random VRAM write that goes to the SDRAM and that every 
 line has had its VRAM transfers before it starts, dumps VRAM as an image
 at the end and measures stale serial reads during VRAM read transfers. If the CPU runs
 outside the memory map, the last CPU bus cycles are written to `cpu_trace.txt`. About
-2.5 ms of 3DO time per second of wall time.
+2.5 ms of 3DO time per second of wall time. It fails on any TB error (a video line that
+started late while the 3DO was paused is one, see *Limitations*) or SDRAM model error.
 
 It also keeps a shadow of VRAM, updated from the VRAM bus by its semantics (random
 writes, flash writes, read and write transfers, with the CPU's SPORT transfers on their own

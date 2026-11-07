@@ -176,7 +176,7 @@ module tb_boot;
 		int fd, n;
 		bit [7:0] b [4];
 		fd = $fopen(fname, "rb");
-		if (fd == 0) begin $display("cannot open %s", fname); $finish; end
+		if (fd == 0) $fatal(1, "tb_boot: cannot open %s", fname);
 		len = 0;
 		forever begin
 			n = $fread(b, fd);
@@ -1013,7 +1013,13 @@ module tb_boot;
 				pb_expect = dut.pad.IN_DATA[255:224];
 			end
 			if (pb_active) begin
-				if (!dut.p3do.madam.PLAYER.PBCLK && pb_clk_d && dut.p3do.madam.V_CNT >= 10'd16 && dut.p3do.madam.V_CNT <= 10'd239) pb_falls++;
+				// a data bit's falling edge: every 200 video clocks in the line, the
+				// last at 1558 (not the one MADAM forces when the DMA has ended and
+				// it drops ENABLE with PBCLK high, which carries no bit)
+				if (!dut.p3do.madam.PLAYER.PBCLK && pb_clk_d && dut.p3do.madam.V_CNT >= 10'd16 && dut.p3do.madam.V_CNT <= 10'd239 &&
+				    ((dut.p3do.madam.H_CNT <= 11'd1402 && (dut.p3do.madam.H_CNT % 200 >= 198 || dut.p3do.madam.H_CNT % 200 <= 2)) ||
+				     (dut.p3do.madam.H_CNT >= 11'd1557 && dut.p3do.madam.H_CNT <= 11'd1561)))
+					pb_falls++;
 				// the first word is in SHF_REG one cycle after its 32nd shift
 				if (pb_check_next) begin
 					pb_check_next = 0;
@@ -1399,7 +1405,7 @@ module tb_boot;
 		int bios_len, iso_len, run_ms;
 		bit [31:0] r;
 		bit e;
-		if (!$value$plusargs("bios=%s", bios)) begin $display("+bios=<file> required"); $finish; end
+		if (!$value$plusargs("bios=%s", bios)) $fatal(1, "tb_boot: +bios=<file> required");
 		if (!$value$plusargs("run_ms=%d", run_ms)) run_ms = 1000;
 		if (!$value$plusargs("frame_every=%d", frame_every)) frame_every = 10;
 
@@ -1410,7 +1416,7 @@ module tb_boot;
 		void'($value$plusargs("trace_from_ms=%d", trace_from_ms));
 		if ($value$plusargs("disc_bin=%s", iso)) begin
 			bin_fd = $fopen(iso, "rb");
-			if (bin_fd == 0) begin $display("cannot open %s", iso); $finish; end
+			if (bin_fd == 0) $fatal(1, "tb_boot: cannot open %s", iso);
 			void'($fseek(bin_fd, 0, 2));
 			bin_sectors = $ftell(bin_fd) / 2352;
 			chk_fd = $fopen(iso, "rb");
@@ -1458,6 +1464,9 @@ module tb_boot;
 			$display("tb_boot: CD data check: %0d sectors match the image, %0d differ", cd_good, cd_bad);
 		$display("tb_boot: RT cache hits %0d, misses %0d, prefetches %0d, invalidations %0d, VDL frame buffer hints %0d",
 		         dut.rtc_hits, dut.rtc_misses, dut.rtc_prefetches, dut.rtc_invalidations, dut.rtc_hints);
-		$finish;
+		// any TB error (late video lines included) or SDRAM model error fails the
+		// run, with a non-zero exit status ($fatal) so scripts see it
+		if (errors == 0 && sdram.errors == 0) begin $display("tb_boot: PASS"); $finish; end
+		else $fatal(1, "tb_boot: FAIL");
 	end
 endmodule

@@ -827,15 +827,14 @@ module tb_rtcache;
 		$display("tb_rtcache: %0d words checked, hits %0d misses %0d prefetches %0d invalidations %0d",
 		         checks, st_hits, st_misses, st_pf, st_inv);
 		$display("tb_rtcache: TB errors=%0d, SDRAM model errors=%0d", errors, model.errors);
-		if (errors == 0 && model.errors == 0 && st_inv > 0) $display("tb_rtcache: PASS");
-		else                                                  $display("tb_rtcache: FAIL");
-		$finish;
+		// a failure ends with a non-zero exit status ($fatal), so scripts see it
+		if (errors == 0 && model.errors == 0 && st_inv > 0) begin $display("tb_rtcache: PASS"); $finish; end
+		else $fatal(1, "tb_rtcache: FAIL");
 	end
 
 	initial begin
 		#80ms;
 		$display("tb_rtcache: TIMEOUT");
-		$display("tb_rtcache: FAIL");
-		$finish;
+		$fatal(1, "tb_rtcache: FAIL");
 	end
 endmodule

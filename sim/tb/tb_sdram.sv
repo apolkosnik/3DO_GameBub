@@ -381,15 +381,14 @@ module tb_sdram;
 		$display("tb_sdram: 3DO BFM paused %0d times for SEC refresh", bfm_pauses);
 		if (bfm_pauses == 0) fail("SEC refresh while running was not exercised");
 		$display("tb_sdram: TB errors=%0d, SDRAM model errors=%0d", errors, model.errors);
-		if (errors == 0 && model.errors == 0) $display("tb_sdram: PASS");
-		else                                  $display("tb_sdram: FAIL");
-		$finish;
+		// a failure ends with a non-zero exit status ($fatal), so scripts see it
+		if (errors == 0 && model.errors == 0) begin $display("tb_sdram: PASS"); $finish; end
+		else $fatal(1, "tb_sdram: FAIL");
 	end
 
 	initial begin
 		#20ms;
 		$display("tb_sdram: TIMEOUT");
-		$display("tb_sdram: FAIL");
-		$finish;
+		$fatal(1, "tb_sdram: FAIL");
 	end
 endmodule

@@ -19,6 +19,9 @@
 module tb_sdram;
 	reg clk_mem = 0;
 	always #5 clk_mem = ~clk_mem;          // 100 MHz
+	// the MMCM's SDRAM clock: clk_mem delayed by 67.5 degrees (gb_clocks.sv)
+	reg clk_sdram = 0;
+	always @(clk_mem) clk_sdram <= #1.875 clk_mem;
 
 	reg rst = 1;
 
@@ -52,7 +55,7 @@ module tb_sdram;
 	wire        sec_rvalid, sec_done;
 
 	sdram_3do #(.POWERUP_US(2)) dut (
-		.clk(clk_mem), .rst(rst),
+		.clk(clk_mem), .clk_sdram(clk_sdram), .rst(rst),
 		.SDRAM_CLK(s_clk), .SDRAM_CKE(s_cke), .SDRAM_nCS(s_cs), .SDRAM_nRAS(s_ras),
 		.SDRAM_nCAS(s_cas), .SDRAM_nWE(s_we), .SDRAM_DQM(s_dqm), .SDRAM_BA(s_ba),
 		.SDRAM_A(s_a), .SDRAM_DQ_IN(s_dq_in), .SDRAM_DQ_OUT(s_dq_out), .SDRAM_DQ_OE(s_oe),

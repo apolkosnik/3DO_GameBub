@@ -34,14 +34,21 @@ module sdram_3do #(
 	// enabled DRAM refresh yet) the SEC part inserts one, pausing the 3DO if
 	// it is running and closing/re-opening its open pages around it.
 	parameter int REFRESH_CYCLES = 1500,    // 15 us
-	// Pipeline stage at which read data is taken. With READ_STAGE = 5 the
-	// DQ sampling instant and the cycle in which `dout` updates are exactly
-	// those of MiSTer's sdram.sv (DQ sampled about 40 ns after the READ
-	// command leaves the FPGA, SDRAM clocked on the inverted clk_mem); the
-	// newest word comes straight from the IOB input register.
-	parameter int READ_STAGE     = 5
+	// Pipeline stage at which read data is taken: the IOB input register
+	// samples DQ 10 * (READ_STAGE - 1) ns after the clk_mem edge that issues
+	// the READ (the newest word comes straight from that register). The
+	// SDRAM runs on the inverted clk_mem, so with the command registers in
+	// the IOBs it takes the READ half a cycle (plus the output delay) later,
+	// and at CL2 the word is valid around the third clk_mem edge after the
+	// READ: 26.7-33.2 ns at the slow corner of the routed design (see
+	// p3do.xdc, which times exactly this capture, and sim/models/sdram_model.sv).
+	// READ_STAGE = 4 samples at 30 ns. MiSTer's sdram.sv uses 5 (40 ns),
+	// which matches the longer delays of its add-on SDRAM board; on Game Bub
+	// that sample is the next READ's data, or the bus after it turned off.
+	parameter int READ_STAGE     = 4
 )(
 	input              clk,                // clk_mem
+	input              clk_sdram,          // clk_mem delayed 1.875 ns (MMCM), for the SDRAM clock only
 	input              rst,                // asynchronous-to-start reset (synchronised inside)
 
 	// SDRAM pins (via the Game Bub framework SdramV0 bundle)
@@ -610,8 +617,11 @@ module sdram_3do #(
 	wire [ 1:0] ctrl_bank = state[0].BANK;
 	wire        ctrl_rfs  = state[0].RFS;
 
-	// Read data capture, same timing as MiSTer: the DQ pins are registered
-	// every cycle (rbuf) and picked up when the command reaches stage 5.
+	// Read data capture: the DQ pins are registered every cycle in the IOBs
+	// and picked up when the command reaches stage READ_STAGE (see above).
+	// The output registers below (command, address, DQM, write data) are
+	// placed in the IOBs by p3do.xdc, so that their timing at the pins does
+	// not depend on placement.
 	(* IOB = "TRUE" *) reg [15:0] dq_in_r;
 	reg [15:0] dq_prev;
 	always @(posedge clk) begin
@@ -678,15 +688,18 @@ module sdram_3do #(
 
 	assign SDRAM_CKE = 1'b1;
 
-	// SDRAM clock: inverted copy of clk_mem through an output DDR register
-	// (MiSTer uses altddio_out with datain_h=0/datain_l=1 for the same).
+	// SDRAM clock: inverted copy of clk_sdram (clk_mem delayed by 1.875 ns)
+	// through an output DDR register (MiSTer uses altddio_out with
+	// datain_h=0/datain_l=1 on clk_mem for the same). The delay moves the
+	// read data later against the capture edge: without it the hold margin
+	// at the fast process corner was -1.1 ns (see p3do.xdc).
 	ODDR #(
 		.DDR_CLK_EDGE("OPPOSITE_EDGE"),
 		.INIT(1'b0),
 		.SRTYPE("SYNC")
 	) sdram_clk_oddr (
 		.Q (SDRAM_CLK),
-		.C (clk),
+		.C (clk_sdram),
 		.CE(1'b1),
 		.D1(1'b0),
 		.D2(1'b1),

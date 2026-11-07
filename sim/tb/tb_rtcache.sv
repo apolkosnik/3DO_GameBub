@@ -29,6 +29,9 @@
 module tb_rtcache;
 	reg clk_mem = 0, clk_sys = 0;
 	always #5  clk_mem = ~clk_mem;
+	// the MMCM's SDRAM clock: clk_mem delayed by 67.5 degrees (gb_clocks.sv)
+	reg clk_sdram = 0;
+	always @(clk_mem) clk_sdram <= #1.875 clk_mem;
 	always #10 clk_sys = ~clk_sys;
 	reg rst = 1;
 
@@ -138,6 +141,7 @@ module tb_rtcache;
 	wire [15:0] s_dq_out, s_dq_in;
 
 	sdram_3do #(.POWERUP_US(2)) sdram (
+		.clk_sdram(clk_sdram),
 		.clk(clk_mem), .rst(rst),
 		.SDRAM_CLK(s_clk), .SDRAM_CKE(s_cke), .SDRAM_nCS(s_cs), .SDRAM_nRAS(s_ras), .SDRAM_nCAS(s_cas),
 		.SDRAM_nWE(s_we), .SDRAM_DQM(s_dqm), .SDRAM_BA(s_ba), .SDRAM_A(s_a),

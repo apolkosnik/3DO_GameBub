@@ -10,6 +10,7 @@ module gb_clocks #(
 	input  wire clk_in_50mhz,
 	output wire clk_sys,
 	output wire clk_mem,
+	output wire clk_sdram,
 	output wire clk_spi,
 	output wire clk_disp,
 	output wire clk_vid,
@@ -18,6 +19,10 @@ module gb_clocks #(
 	assign clk_sys  = $root.`TB_TOP.clk_sys;
 	assign clk_mem  = $root.`TB_TOP.clk_mem;
 	assign clk_vid  = $root.`TB_TOP.clk_vid;
+	// clk_mem delayed by the MMCM's 67.5 degree phase shift (1.875 ns)
+	reg clk_sdram_r = 0;
+	always @(clk_mem) clk_sdram_r <= #1.875 clk_mem;
+	assign clk_sdram = clk_sdram_r;
 	assign clk_spi  = 1'b0;
 	assign clk_disp = 1'b0;
 	assign locked   = 1'b1;

@@ -2,18 +2,30 @@
 // banks, e.g. W9825G6KH / IS42S16160) for the Game Bub 3DO core tests.
 //
 // * Commands are sampled on the rising edge of the SDRAM clock.
-// * Board / I/O delays are modelled: the clock and command lines arrive
-//   T_OUT ns after they leave the FPGA, read data reaches the FPGA pins
-//   T_AC + T_BACK ns after the SDRAM clock edge and stays until T_OH + T_BACK
-//   after the following edge. With the defaults this reproduces the capture
-//   window of a real board (data valid about 37-44 ns after a READ leaves
-//   the FPGA when clk_mem = 100 MHz and the SDRAM runs on the inverted clock).
+// * Read data follows the CAS latency as a real part does: a word read at
+//   edge n is valid at edge n+CL. The SDRAM turns its outputs on T_LZ after
+//   edge n+CL-1, the data is valid from T_AC after that edge until T_OH
+//   after edge n+CL, and the outputs turn off T_HZ after edge n+CL.
+// * Board and FPGA I/O delays are modelled. The forwarded clock (ODDR) and
+//   the command, address and write-data registers (packed into the IOBs)
+//   reach the SDRAM T_OUT after their clk_mem edge; the DQ output enable
+//   (one fabric register for all 16 pins, as the framework has a single
+//   direction bit) arrives T_OE after it; read data reaches the FPGA's
+//   input registers T_BACK after it leaves the SDRAM. The defaults are the
+//   routed design's slow-corner delays (Vivado 2018.3) and the slowest
+//   common 100 MHz CL2 parts. At clk_mem = 100 MHz with the SDRAM on the
+//   inverted clock, read data is then valid at the FPGA's input registers
+//   26.7-33.2 ns after the READ's clk_mem edge. Every delay can be changed
+//   with a plusarg (+sdram_t_out=, +sdram_t_oe=, +sdram_t_back=,
+//   +sdram_t_ac=, +sdram_t_oh=, +sdram_t_lz=, +sdram_t_hz=, in ns) to run
+//   a test at other timing corners.
 // * Protocol and timing are checked (errors are counted in `errors` and
 //   printed): command before mode register set, ACTIVE on an open bank,
 //   READ/WRITE on a closed bank, PRECHARGE too early (tRAS), ACTIVE too early
 //   after PRECHARGE (tRP) or ACTIVE (tRC), READ/WRITE too early (tRCD),
 //   AUTO REFRESH with a bank open, refresh interval, row open too long (tRAS max),
-//   DQ bus contention (FPGA drives while the SDRAM drives read data).
+//   WRITE with the FPGA's DQ outputs not on at the clock edge, and DQ bus
+//   contention at any time (the FPGA's outputs on while the SDRAM's are).
 //
 // Copyright (c) 2026 Adam Polkosnik
 // SPDX-License-Identifier: GPL-3.0-or-later
@@ -22,10 +34,13 @@
 
 module sdram_model #(
 	parameter real T_CK   = 10.0,   // clock period
-	parameter real T_OUT  = 4.0,    // FPGA output delay (clock and commands)
-	parameter real T_BACK = 2.5,    // data return delay (board + FPGA input)
-	parameter real T_AC   = 5.4,    // access time from clock (CL2)
-	parameter real T_OH   = 2.7,    // data hold after the next clock
+	parameter real T_OUT  = 4.0,    // FPGA output delay: clock, commands, address, write data
+	parameter real T_OE   = 4.0,    // FPGA output delay: DQ output enable
+	parameter real T_BACK = 1.7,    // read data: board + FPGA input buffer
+	parameter real T_AC   = 6.0,    // access time from clock (CL2)
+	parameter real T_OH   = 2.5,    // data hold after the clock
+	parameter real T_LZ   = 1.0,    // outputs on after the clock
+	parameter real T_HZ   = 6.0,    // outputs off after the clock
 	parameter real T_RCD  = 18.0,
 	parameter real T_RP   = 18.0,
 	parameter real T_RAS  = 42.0,
@@ -48,6 +63,21 @@ module sdram_model #(
 	input              dq_oe_fpga,
 	output      [15:0] dq_to_fpga
 );
+	real t_out, t_oe, t_back, t_ac, t_oh, t_lz, t_hz;
+	initial begin
+		t_out = T_OUT; t_oe = T_OE; t_back = T_BACK;
+		t_ac = T_AC; t_oh = T_OH; t_lz = T_LZ; t_hz = T_HZ;
+		void'($value$plusargs("sdram_t_out=%f", t_out));
+		void'($value$plusargs("sdram_t_oe=%f", t_oe));
+		void'($value$plusargs("sdram_t_back=%f", t_back));
+		void'($value$plusargs("sdram_t_ac=%f", t_ac));
+		void'($value$plusargs("sdram_t_oh=%f", t_oh));
+		void'($value$plusargs("sdram_t_lz=%f", t_lz));
+		void'($value$plusargs("sdram_t_hz=%f", t_hz));
+		$display("SDRAM model timing (ns): out %0.2f, oe %0.2f, back %0.2f, ac %0.2f, oh %0.2f, lz %0.2f, hz %0.2f",
+		         t_out, t_oe, t_back, t_ac, t_oh, t_lz, t_hz);
+	end
+
 	// ------------------------------------------------------------------
 	// Delayed view of the FPGA outputs (board)
 	// ------------------------------------------------------------------
@@ -57,16 +87,16 @@ module sdram_model #(
 	reg [12:0] a_d;
 	reg [15:0] dqi_d;
 	reg        dqoe_d;
-	always @(clk)          clk_d   <= #(T_OUT) clk;
-	always @(cs_n)         cs_n_d  <= #(T_OUT) cs_n;
-	always @(ras_n)        ras_n_d <= #(T_OUT) ras_n;
-	always @(cas_n)        cas_n_d <= #(T_OUT) cas_n;
-	always @(we_n)         we_n_d  <= #(T_OUT) we_n;
-	always @(dqm)          dqm_d   <= #(T_OUT) dqm;
-	always @(ba)           ba_d    <= #(T_OUT) ba;
-	always @(a)            a_d     <= #(T_OUT) a;
-	always @(dq_from_fpga) dqi_d   <= #(T_OUT) dq_from_fpga;
-	always @(dq_oe_fpga)   dqoe_d  <= #(T_OUT) dq_oe_fpga;
+	always @(clk)          clk_d   <= #(t_out) clk;
+	always @(cs_n)         cs_n_d  <= #(t_out) cs_n;
+	always @(ras_n)        ras_n_d <= #(t_out) ras_n;
+	always @(cas_n)        cas_n_d <= #(t_out) cas_n;
+	always @(we_n)         we_n_d  <= #(t_out) we_n;
+	always @(dqm)          dqm_d   <= #(t_out) dqm;
+	always @(ba)           ba_d    <= #(t_out) ba;
+	always @(a)            a_d     <= #(t_out) a;
+	always @(dq_from_fpga) dqi_d   <= #(t_out) dq_from_fpga;
+	always @(dq_oe_fpga)   dqoe_d  <= #(t_oe) dq_oe_fpga;
 
 	// ------------------------------------------------------------------
 	// Storage
@@ -108,14 +138,19 @@ module sdram_model #(
 		if (errors <= 50) $display("[%0t] SDRAM ERROR: %s", $realtime, msg);
 	endtask
 
-	// read pipeline: data scheduled CL clocks after the READ
+	// read pipeline: a word read at edge n comes out after edge n+CL-1
 	typedef struct { bit valid; bit [15:0] data; bit masked; } rd_t;
 	rd_t rdq [4];
-	reg [15:0] dq_out;
-	reg        dq_drv = 0;
+	reg [15:0] dq_out;          // value at the FPGA's input registers while driven
+	int        sd_on = 0;       // SDRAM outputs on, at the SDRAM (reads in flight)
+	int        fpga_on = 0;     // the same, as seen at the FPGA's inputs (T_BACK later)
 	int        dq_tag = 0;
 	int        rd_id = 0;
-	assign dq_to_fpga = dq_drv ? dq_out : (dqoe_d ? dqi_d : 16'hxxxx);
+	assign dq_to_fpga = fpga_on != 0 ? dq_out : (dqoe_d ? dqi_d : 16'hxxxx);
+
+	// contention: both sides' outputs on at the same time
+	always @(dqoe_d, sd_on)
+		if (dqoe_d && sd_on != 0) err("DQ contention: FPGA drives while SDRAM outputs read data");
 
 	always @(posedge clk_d) begin
 		bit [2:0] cmd;
@@ -123,8 +158,8 @@ module sdram_model #(
 		realtime now;
 		now = $realtime;
 
-		// shift the read pipeline; the word for this edge becomes valid at the
-		// FPGA T_AC + T_BACK later and is held until the next edge + T_OH.
+		// shift the read pipeline; the word that comes out after this edge
+		// is valid at the next one
 		begin
 			rd_t cur;
 			cur = rdq[0];
@@ -133,20 +168,30 @@ module sdram_model #(
 				int id;
 				rd_id++;
 				id = rd_id;
-				fork
+				fork   // at the SDRAM
 					begin
-						#(T_AC + T_BACK);
+						#(t_lz);
+						sd_on++;
+						#(T_CK + t_hz - t_lz);
+						sd_on--;
+					end
+				join_none
+				fork   // at the FPGA's input registers
+					begin
+						#(t_lz + t_back);
+						if (fpga_on == 0) dq_out = 16'hxxxx;   // turning on: undefined until T_AC
+						fpga_on++;
+						#(t_ac - t_lz);
 						dq_out = cur.masked ? 16'hxxxx : cur.data;
-						dq_drv = 1;
 						dq_tag = id;
-						#(T_CK + T_OH - T_AC);
-						if (dq_tag == id) dq_drv = 0;
+						#(T_CK + t_oh - t_ac);
+						if (dq_tag == id) dq_out = 16'hxxxx;   // after T_OH: undefined
+						#(t_hz - t_oh);
+						fpga_on--;
 					end
 				join_none
 			end
 		end
-
-		if (dqoe_d && dq_drv) err("DQ contention: FPGA drives while SDRAM outputs read data");
 
 		if (cke && !cs_n_d) begin
 			cmd = {ras_n_d, cas_n_d, we_n_d};
@@ -169,7 +214,7 @@ module sdram_model #(
 					addr = {ba_d, row_[ba_d][12:0], a_d[8:0]};
 					if (cmd[0]) begin
 						n_rd++;
-						rdq[cas_latency-1] = '{1, peek(addr), &dqm_d};
+						rdq[cas_latency-2] = '{1, peek(addr), &dqm_d};
 						if (VERBOSE) $display("[%0t] SDRAM RD   b%0d r%0d c%0d -> %h", now, ba_d, row_[ba_d], a_d[8:0], peek(addr));
 					end else begin
 						bit [15:0] d;

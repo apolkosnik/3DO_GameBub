@@ -78,12 +78,13 @@ module p3do_gamebub #(
 	output logic        sdram_dataDir
 );
 	/////////////////////////  CLOCKS / RESET  ///////////////////////////////
-	wire clk_mem, clk_vid, clk_sys_gen;
+	wire clk_mem, clk_sdram, clk_vid, clk_sys_gen;
 
 	gb_clocks #(.DISPLAY_DIVIDER(DISPLAY_DIVIDER)) clocks (
 		.clk_in_50mhz(clocks_clockIn50M),
 		.clk_sys     (clk_sys_gen),
 		.clk_mem     (clk_mem),
+		.clk_sdram   (clk_sdram),
 		.clk_spi     (clocks_clockOutSpi),
 		.clk_disp    (clocks_clockOutDisplay),
 		.clk_vid     (clk_vid),
@@ -464,6 +465,7 @@ module p3do_gamebub #(
 
 	sdram_3do sdram (
 		.clk         (clk_mem),
+		.clk_sdram   (clk_sdram),
 		.rst         (reset),
 		.SDRAM_CLK   (sdram_clock),
 		.SDRAM_CKE   (sdram_cke),

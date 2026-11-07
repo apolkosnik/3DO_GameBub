@@ -3,6 +3,9 @@
 // MMCM 0 (VCO 800 MHz from the 50 MHz reference):
 //   clk_sys     50 MHz   3DO system clock (MiSTer clk_sys), framework system clock
 //   clk_mem    100 MHz   SDRAM / VRAM serial clock (MiSTer clk_mem), phase aligned
+//   clk_sdram  100 MHz   clk_mem delayed by 1.875 ns (67.5 deg): drives only the
+//                        ODDR that forwards the (inverted) SDRAM clock, to centre
+//                        the read data on its capture edge (see p3do.xdc)
 //   clk_spi    200 MHz   MCU SPI sampling clock (framework requirement > 160 MHz)
 //   clk_disp   800/DISPLAY_DIVIDER MHz  LCD clock
 // MMCM 1 (VCO 981.25 MHz):
@@ -17,13 +20,14 @@ module gb_clocks #(
 	input  wire clk_in_50mhz,
 	output wire clk_sys,
 	output wire clk_mem,
+	output wire clk_sdram,
 	output wire clk_spi,
 	output wire clk_disp,
 	output wire clk_vid,
 	output wire locked
 );
 	wire fb0, fb1;
-	wire sys_u, mem_u, spi_u, disp_u, vid_u;
+	wire sys_u, mem_u, spi_u, disp_u, vid_u, sdram_u;
 	wire locked0, locked1;
 
 	MMCME2_BASE #(
@@ -35,10 +39,12 @@ module gb_clocks #(
 		.CLKOUT1_DIVIDE     (8),        // 100 MHz
 		.CLKOUT2_DIVIDE     (4),        // 200 MHz
 		.CLKOUT3_DIVIDE     (DISPLAY_DIVIDER),
+		.CLKOUT4_DIVIDE     (8),        // 100 MHz, SDRAM clock
 		.CLKOUT0_PHASE      (0.0),
 		.CLKOUT1_PHASE      (0.0),
 		.CLKOUT2_PHASE      (0.0),
 		.CLKOUT3_PHASE      (0.0),
+		.CLKOUT4_PHASE      (67.5),     // 1.875 ns (12 steps of 1/8 VCO period)
 		.CLKFBOUT_PHASE     (0.0),
 		.STARTUP_WAIT       ("FALSE")
 	) mmcm0 (
@@ -54,7 +60,7 @@ module gb_clocks #(
 		.CLKOUT2B (),
 		.CLKOUT3  (disp_u),
 		.CLKOUT3B (),
-		.CLKOUT4  (),
+		.CLKOUT4  (sdram_u),
 		.CLKOUT5  (),
 		.CLKOUT6  (),
 		.LOCKED   (locked0),
@@ -95,12 +101,13 @@ module gb_clocks #(
 	// The system, SPI and display clocks are handed to the framework straight
 	// from the MMCM, like the Game Bub example core: the framework's XDC refers
 	// to them by its own net names (e.g. clk_dpi), and Vivado inserts the
-	// global buffers. The two clocks used only inside the core get explicit
+	// global buffers. The clocks used only inside the core get explicit
 	// BUFGs.
 	assign clk_sys  = sys_u;
 	assign clk_spi  = spi_u;
 	assign clk_disp = disp_u;
 	BUFG bufg_mem (.I(mem_u), .O(clk_mem));
+	BUFG bufg_sdram (.I(sdram_u), .O(clk_sdram));
 	BUFG bufg_vid (.I(vid_u), .O(clk_vid));
 
 	assign locked = locked0 & locked1;

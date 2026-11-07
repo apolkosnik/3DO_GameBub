@@ -5,9 +5,11 @@ A port of the [MiSTer 3DO core](https://github.com/MiSTer-devel/3DO_MiSTer) (by 
 [Game Bub core framework](https://docs.gamebub.net/developing-cores/overview/)
 (XC7A100T FPGA, one 32 MiB SDRAM chip).
 
-**Status: experimental.** It has not yet been run on Game Bub hardware. In simulation,
-the core passes its test suite (see below), and the real Panasonic FZ-10 BIOS boots a
-commercial disc (Wolfenstein 3D, streamed the way the disc-streaming firmware serves it):
+**Status: experimental.** The first test on Game Bub hardware gave a black screen: the
+SDRAM interface timing was wrong for the board (see *SDRAM interface timing* below). That
+is fixed, but not yet tested on hardware. In simulation, the core passes its test suite
+(see below), and the real Panasonic FZ-10 BIOS boots a commercial disc (Wolfenstein 3D,
+streamed the way the disc-streaming firmware serves it):
 
 * The BIOS decompresses its kernel, displays the 3DO logo and brings up the CD drive
   (Read ID, Spin Up, Set Speed, Disc Info, Read TOC), answered by the core's drive
@@ -23,8 +25,9 @@ power-on, and the program its controller screen 8.5 s after. Its framebuffers ma
 image on the disc, and every VRAM transfer of both boots (and of the Wolfenstein 3D
 boot) is checked against a shadow of VRAM (see *Simulation*).
 
-The SDRAM read-capture timing (`READ_STAGE` in `rtl/gamebub/sdram_3do.sv`) follows the
-MiSTer design and may need tuning on real hardware.
+The SDRAM interface is now timed by Vivado against the SDRAM's data sheet values (see
+*SDRAM interface timing*); the part on the board is not documented, so the slowest common
+100 MHz parts are assumed.
 
 ## Installing
 
@@ -133,6 +136,36 @@ MiSTer's controller, because these pauses can now happen at any time:
   simulation that rewrote VRAM pixels the CEL engine had just drawn, a few times per
   second of Wolfenstein 3D's logo. The same could have hit the NVRAM (the save) right
   after the 3DO wrote it.
+
+**SDRAM interface timing.** On the first hardware test the screen stayed black, and the
+NVRAM the core saved showed why: in every 32-bit word the upper 16-bit half was a copy of
+the lower one. Each SDRAM read returned the word of the read after it, and the last read
+of a pair the bus as that read left it. Three things were wrong:
+
+* **The read was taken a cycle late.** The SDRAM runs on the inverted `clk_mem`, at CAS
+  latency 2, and its data reaches the FPGA's input registers about 27-33 ns after the
+  `clk_mem` edge that issues the READ. `READ_STAGE` = 5 (MiSTer's value, which suits the
+  longer delays of its add-on SDRAM board) sampled at 40 ns. It is 4 now (30 ns). The
+  simulation model had hidden this: it put read data out a clock later than a real part
+  does (as for CAS latency 3), which is exactly what `READ_STAGE` = 5 needs.
+* **The command, address and write-data registers were not in the I/O blocks.** About
+  6 ns of routing put them at the pins 7-10 ns after their clock edge, right where the
+  SDRAM takes them (9 ns), so a command, an address bit or write data could be taken a
+  cycle early or late. They are in the IOBs now. The DQ output enable is one register for
+  all 16 pins (the framework has one direction bit), so it stays in the fabric and is
+  timed like the data.
+* **Nothing timed the interface,** and the constraints left every path between
+  `clk_sys` and `clk_mem` untimed too (each clock was declared asynchronous to the other,
+  although they are phase aligned and the MiSTer core uses them together).
+
+`p3do.xdc` now describes the interface: the forwarded clock, the SDRAM's setup, hold,
+access and output-hold times, and the capture edge `READ_STAGE` = 4 implies; the build
+fails if it is not met. At 30 ns the hold margin at the fast process corner was -1.1 ns,
+so the forwarded clock comes from its own MMCM output, 1.875 ns (67.5 degrees) after
+`clk_mem`, which moves the read data later and leaves margin on both sides. The
+simulation model now follows the CAS latency like a real part and uses the routed
+design's delays; with `READ_STAGE` = 5 the tests fail as the hardware did (`tb_sdram`
+reads the next word; `tb_top`: unformatted NVRAM, the test ROM never runs).
 
 **VRAM read-transfer cache.** MADAM's video DMA loads a VRAM row into the serial
 register and starts shifting it out about 160 ns later, and the video beam cannot be
@@ -281,6 +314,16 @@ power-on, and every change of that 64-bit word in the SDRAM model (with its flas
 flag and the row's clear colour), together with what the SDRAM's second port was doing.
 At the end it prints how many split read transfers were skipped because the video serial
 register already held their half-row, and the late lines per second.
+
+The SDRAM model (`sim/models/sdram_model.sv`, used by all of these) puts read data out as
+a real part does at the programmed CAS latency, with the board and I/O delays of the routed
+design and the slowest common parts' access and hold times (data valid 26.7-33.2 ns after
+the READ's `clk_mem` edge). It checks every timing parameter, refresh, that the FPGA drives
+DQ when a WRITE is taken, and DQ contention at any time. `+sdram_t_out=`, `+sdram_t_oe=`,
+`+sdram_t_back=`, `+sdram_t_ac=`, `+sdram_t_oh=`, `+sdram_t_lz=`, `+sdram_t_hz=` (ns)
+run a test at other timing corners; `tb_sdram` and `tb_top` pass at a slow corner
+(+4.4/1.9 ns out/back), a fast one (2.0/0.4 ns, tAC 3.5 ns) and with the output enable
+8.5 ns late.
 
 `tb_top` runs the complete core against an SDRAM model that checks every SDRAM timing
 parameter and refresh. A host model follows the framework's MCU protocol: it loads the

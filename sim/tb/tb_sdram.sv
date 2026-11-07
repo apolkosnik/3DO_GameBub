@@ -7,6 +7,8 @@
 // PHASE1 like the core's PAUSE does. The secondary port is exercised with
 // reads/writes of random length into every bank, including bank 0/1 rows
 // above the 3DO DRAM while a 3DO page is open in that bank (close/re-open).
+// The 3DO refreshing just as the controller's own refresh comes due, with
+// the port's inputs still presenting the last write (phase 2c).
 // All data is checked against a reference model.
 //
 // Copyright (c) 2026 Adam Polkosnik
@@ -189,6 +191,23 @@ module tb_sdram;
 	// Pause (as the core does): hold PHASE1, assert SEC_PAUSED while SEC_HOLD
 	always @(posedge clk_mem) sec_paused <= sec_hold && frozen;
 
+	// The secondary port must transfer only what is requested. In the core
+	// the arbiter keeps presenting the last client's address, direction and
+	// length after the request has gone, and the bridge its next write data.
+	always @(posedge clk_mem) begin
+		if (sec_wnext && !sec_req) fail($sformatf("secondary port write to %06h without a request", dut.cur_row));
+		if (sec_rvalid && !sec_req) fail("secondary port read data without a request");
+	end
+	// Race of phase 2c: the controller has left S_IDLE because its own refresh
+	// is due (sst S_WAIT_QUIET = 1, enum values count from 0), and the 3DO's
+	// refresh clears ref_due before the pause takes effect, no request waiting.
+	int  races = 0;
+	bit  ref_due_d = 0;
+	always @(posedge clk_mem) begin
+		ref_due_d <= dut.ref_due;
+		if (ref_due_d && !dut.ref_due && dut.sst == 4'd1 && !sec_req) races++;
+	end
+
 	// ------------------------------------------------------------------
 	initial begin
 		int pass_lines;
@@ -253,6 +272,37 @@ module tb_sdram;
 			dram_close();
 		end
 		$display("[%0t] phase 2b (no 3DO refresh) done, errors=%0d, pauses=%0d", $realtime, errors, bfm_pauses);
+
+		// 2c) The 3DO refreshes just as the controller's own refresh comes due
+		//     (15 us without one): the controller has asked for a pause, and
+		//     the 3DO's refresh, issued before the pause, clears ref_due. It
+		//     must then release the bus, not start a transfer from the port's
+		//     stale inputs (the last write, 4 words, with new write data):
+		//     that rewrote the last VRAM beat in the core. The delay and its
+		//     phase within the MCLK are swept to hit the window.
+		for (int d = 0; d < 8; d++) begin
+			for (int k = 0; k < 6; k++) begin
+				bit [23:0] aa;
+				bit [20:2] base;
+				aa   = {2'd2, 13'(3000 + d * 8 + k), 9'(k * 40)};
+				base = {10'd310, 9'd0};
+				frozen = 1;
+				sec_write_check(aa, 4);
+				frozen = 0;
+				for (int i = 0; i < 512; i++) wbuf[i] = 16'hDEAD ^ 16'(i);
+				// (no page open: a refresh right after a page close is skipped)
+				dram_refresh();
+				repeat (d) @(posedge clk_mem);
+				for (int m = 0; m < 183 + k; m++) mclk_cycle(4'h0, 4'h0, base, 32'h0, 2'b00, 0, 0);
+				dram_refresh();
+				for (int m = 0; m < 8; m++) mclk_cycle(4'h0, 4'h0, base, 32'h0, 2'b00, 0, 0);
+				frozen = 1;
+				sec_read_check(aa, 4);
+				frozen = 0;
+			end
+		end
+		$display("[%0t] phase 2c (3DO refresh as the controller's comes due) done, errors=%0d, races=%0d", $realtime, errors, races);
+		if (races == 0) fail("phase 2c did not hit the refresh race");
 
 		// 3) Pause with a 3DO page open in banks 0/1, SEC accesses to banks
 		//    0..3 (forcing TDM page close/re-open), resume and keep using the

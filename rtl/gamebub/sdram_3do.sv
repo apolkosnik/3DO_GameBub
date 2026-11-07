@@ -416,6 +416,15 @@ module sdram_3do #(
 						end else begin
 							sst <= S_REFRESH;
 						end
+					end else if (!sec_req) begin
+						// We left S_IDLE for a refresh, and the 3DO did its own
+						// meanwhile (before the pause took effect), which cleared
+						// ref_due. No transfer is waiting: release the bus. Going
+						// on would have started a transfer from the inputs the
+						// arbiter still presents (the last client's address,
+						// direction and length, and stale write data), i.e. a
+						// phantom write over the last address written.
+						sst <= S_IDLE;
 					end else begin
 						op_refresh <= 0;
 						cur_bank <= sec_addr[23:22];

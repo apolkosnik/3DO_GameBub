@@ -68,6 +68,18 @@ module tb_boot;
 	wire [12:0] s_a;
 	wire [15:0] s_dq_out, s_dq_in;
 
+	// Buttons: a, b, x, y, up, down, left, right, l, r, start, select. With
+	// +pad_walk one button is held at a time, the next every 50 ms of 3DO
+	// time (from 1 s), so that the player bus carries changing pad words.
+	reg [11:0] pad_btn = '0;
+	initial if ($test$plusargs("pad_walk")) begin
+		#1s;
+		forever begin
+			@(posedge clk_sys) pad_btn <= (pad_btn == 12'd0 || pad_btn == 12'h800) ? 12'h001 : {pad_btn[10:0], 1'b0};
+			#50ms;
+		end
+	end
+
 	p3do_gamebub #(.DISPLAY_DIVIDER(31)) dut (
 		.clock(clk_sys), .reset(reset),
 		.clocks_clockIn50M(1'b0),
@@ -81,10 +93,10 @@ module tb_boot;
 		.host_commandHost_done(h_cdone), .host_commandHost_error(h_err),
 		.host_commandCore_request(c_req), .host_commandCore_busy(1'b0),
 		.host_commandCore_done(c_done), .host_commandCore_error(c_err),
-		.input_buttons_a(1'b0), .input_buttons_b(1'b0), .input_buttons_x(1'b0),
-		.input_buttons_y(1'b0), .input_buttons_up(1'b0), .input_buttons_down(1'b0),
-		.input_buttons_left(1'b0), .input_buttons_right(1'b0), .input_buttons_l(1'b0),
-		.input_buttons_r(1'b0), .input_buttons_start(1'b0), .input_buttons_select(1'b0),
+		.input_buttons_a(pad_btn[0]), .input_buttons_b(pad_btn[1]), .input_buttons_x(pad_btn[2]),
+		.input_buttons_y(pad_btn[3]), .input_buttons_up(pad_btn[4]), .input_buttons_down(pad_btn[5]),
+		.input_buttons_left(pad_btn[6]), .input_buttons_right(pad_btn[7]), .input_buttons_l(pad_btn[8]),
+		.input_buttons_r(pad_btn[9]), .input_buttons_start(pad_btn[10]), .input_buttons_select(pad_btn[11]),
 		.sdram_clock(s_clk), .sdram_cke(s_cke), .sdram_cs(s_cs), .sdram_ras(s_ras), .sdram_cas(s_cas),
 		.sdram_we(s_we), .sdram_dqm(s_dqm), .sdram_bank(s_ba), .sdram_address(s_a),
 		.sdram_dataIn(s_dq_in), .sdram_dataOut(s_dq_out), .sdram_dataDir(s_oe)
@@ -972,6 +984,232 @@ module tb_boot;
 		         video_lines, late_lines, late_arb);
 		foreach (late_per_s[i]) if (late_per_s[i] != 0) t = {t, $sformatf(" %0d:%0d", i, late_per_s[i])};
 		if (late_lines != 0) $display("tb_boot:   late lines with the 3DO paused, per second of 3DO time (s:lines, s = s to s+1 s):%s", t);
+	end
+
+	// Player bus. MADAM_PLAYER drives PBCLK from the video clock and takes a
+	// bit per falling edge (SHIFT_PEND), but shifts it in on its bus clock,
+	// which a pause stops; a second falling edge before it has done so loses
+	// a bit, and the pad words after it arrive misaligned. Per frame (from
+	// the pad's latch): the falling edges in the shifting window against the
+	// shifts done, and the first 32-bit word received against the one the
+	// pad latched (an error).
+	int pb_frames = 0, pb_lost_frames = 0, pb_lost_bits = 0, pb_words = 0, pb_bad_words = 0, pb_falls = 0, pb_strobes = 0;
+	bit pb_clk_d = 0, pb_latch_d = 0, pb_active = 0, pb_checked = 0, pb_check_next = 0;
+	bit [31:0] pb_expect;
+	always @(posedge clk_sys) begin
+		if (dut.reset_3do) pb_active = 0;
+		else begin
+			if (dut.pad.LATCH && !pb_latch_d) begin
+				if (pb_active) begin
+					pb_frames++;
+					if (pb_falls != pb_strobes) begin
+						pb_lost_frames++;
+						pb_lost_bits += pb_falls - pb_strobes;
+						if (pb_lost_frames <= 10)
+							$display("[%0t] player bus: %0d falling PBCLK edges, %0d bits shifted in during the last frame", $realtime, pb_falls, pb_strobes);
+					end
+				end
+				pb_active = 1; pb_falls = 0; pb_strobes = 0; pb_checked = 0; pb_check_next = 0;
+				pb_expect = dut.pad.IN_DATA[255:224];
+			end
+			if (pb_active) begin
+				if (!dut.p3do.madam.PLAYER.PBCLK && pb_clk_d && dut.p3do.madam.V_CNT >= 10'd16 && dut.p3do.madam.V_CNT <= 10'd239) pb_falls++;
+				// the first word is in SHF_REG one cycle after its 32nd shift
+				if (pb_check_next) begin
+					pb_check_next = 0;
+					pb_words++;
+					if (dut.p3do.madam.PLAYER.SHF_REG != pb_expect) begin
+						pb_bad_words++;
+						errors++;
+						if (pb_bad_words <= 10)
+							$display("[%0t] TB ERROR: player bus word %08h, the pad latched %08h", $realtime, dut.p3do.madam.PLAYER.SHF_REG, pb_expect);
+					end
+				end
+				// a shift: a MADAM bus clock (stopped by PAUSE) with the strobe set
+				if (dut.p3do.madam.CE_R && dut.p3do.madam.PLAYER.SHIFT_STROBE) begin
+					pb_strobes++;
+					if (dut.p3do.madam.PLAYER.SHIFT_LAST && !pb_checked) begin
+						pb_checked = 1;
+						pb_check_next = 1;
+					end
+				end
+			end
+		end
+		pb_clk_d    = dut.p3do.madam.PLAYER.PBCLK;
+		pb_latch_d  = dut.pad.LATCH;
+	end
+	final $display("tb_boot: player bus: %0d frames, %0d with bits lost (%0d bits); first words checked %0d, wrong %0d",
+	               pb_frames, pb_lost_frames, pb_lost_bits, pb_words, pb_bad_words);
+
+	// Cycle trace of MADAM's arbitration (+clio_trace=<start us>, for
+	// +clio_trace_us=<us>, default 6): per MADAM bus clock (CE_F), the bus
+	// state, the CPU's grant and its CPU interface wait/stretch, the CPU's
+	// CLIO access handshake (EXTPIF CPU_REQ, CLIO's ready and I/O state), the
+	// video request and grant, and the CPU address.
+	longint ct_start = -1;
+	int ct_us = 6;
+	initial begin
+		void'($value$plusargs("clio_trace=%d", ct_start));
+		void'($value$plusargs("clio_trace_us=%d", ct_us));
+	end
+	always @(posedge clk_sys)
+		if (ct_start >= 0 && $realtime >= ct_start * 1us && $realtime < ct_start * 1us + ct_us * 1us && dut.p3do.madam.CE_F)
+			$display("[%0t] ct: %-14s ph%0d%0d grant %b req %b ccode %0d cready_n %b io_st %0d cpuif pause %b stretch %b | vid req %b ack %b | hi %b | A %08h nMREQ %b",
+			         $realtime, dut.p3do.madam.ARB.BUS_ST.name(), dut.p3do.madam.ARB.PHASE1, dut.p3do.madam.ARB.PHASE2,
+			         dut.p3do.madam.CPU_GRANT, dut.p3do.madam.EXTPIF.CPU_REQ, dut.p3do.madam.EXTPIF.CPU_CCODE,
+			         dut.p3do.madam.CREADY_N, dut.p3do.clio.IO_ST, dut.p3do.madam.CPUIF.PAUSE, dut.p3do.madam.CPUIF.STRETCH,
+			         dut.p3do.madam.SPORT.VIDOUT_REQ, dut.p3do.madam.ARB.VIDOUT_ACK, dut.p3do.madam.ARB.HI_PRIO_REQ,
+			         dut.p3do.madam.A, dut.p3do.madam.CPUIF.nMREQ);
+
+	// Late-line diagnosis (+late_diag[=<n>], details of the first n late or
+	// nearly late lines, default 40). For every video line: the time from
+	// MADAM's video DMA request to its bus grant (VIDOUT_ACK), to each VRAM
+	// half's read transfer request and to the line start, and how long the
+	// 3DO was paused in between, by cause (ddram.sv I/O or burst busy, a
+	// VRAM half not ready, the SDRAM's second port holding the 3DO, by
+	// client). The slack of every line (line start minus the later of the
+	// two transfer requests) goes into a histogram.
+	bit ld_on = 0;
+	int ld_max = 40, ld_shown = 0;
+	initial if ($value$plusargs("late_diag=%d", ld_max) || $test$plusargs("late_diag")) ld_on = 1;
+	realtime ld_t_req, ld_t_ack, ld_t_rl, ld_t_rr;
+	int ld_hc_req, ld_n_pause, ld_n_ddrio, ld_n_ddr, ld_n_lrdy, ld_n_rrdy, ld_n_sec, ld_max_len;
+	// MADAM's bus while the request waits for its grant: external port
+	// (DSP/audio and XBUS DMA), CEL engine, CLUT/VDL, player, refresh, idle;
+	// and the external port's grants
+	int ld_b_extp, ld_b_se, ld_b_clut, ld_b_play, ld_b_ref, ld_b_idle, ld_extp_acks;
+	bit ld_extp_ack_d = 0;
+	int ld_late_extp = 0;   // late lines with an external-port grant in their window
+	// SDRAM work started in the window (clk_mem): RT cache fills by source
+	// (demand miss, prefetch, VDL hint or frame start), the CPU's SPORT read
+	// transfers (page copy sources) and write transfers (page copy stores)
+	int ld_f_dem, ld_f_pf, ld_f_hint, ld_cpu_rt, ld_mwt;
+	bit ld_fi_d = 0, ld_m_req_d = 0, ld_cpurt_d = 0, ld_mwt_d = 0, ld_m_armed = 0;
+	int ld_pf_prev = 0;
+	int ld_late_src [5];   // late lines whose window had: demand fill, prefetch, hint fill, CPU RT, MWT
+	always @(posedge clk_mem) if (ld_on) begin
+		if (dut.p3do.madam.SPORT.VIDOUT_REQ && !ld_m_req_d) begin
+			ld_m_armed = 1; ld_f_dem = 0; ld_f_pf = 0; ld_f_hint = 0; ld_cpu_rt = 0; ld_mwt = 0;
+		end
+		if (dut.p3do.madam.SPORT.VIDEO_TRANS_EXEC) ld_m_armed = 0;
+		if (ld_m_armed) begin
+			if (dut.rtcache.fill_issue && !ld_fi_d) begin
+				if (dut.rtcache.stat_prefetches != ld_pf_prev) begin
+					if (dut.rtcache.used[dut.rtcache.fill_e]) ld_f_hint++; else ld_f_pf++;
+				end else ld_f_dem++;
+			end
+			if (dut.vram_l.RT_REQ && dut.vram_l.XFER_CPU && !ld_cpurt_d) ld_cpu_rt++;
+			if (dut.vram_l.MWT_EXEC && !ld_mwt_d) ld_mwt++;
+		end
+		ld_m_req_d = dut.p3do.madam.SPORT.VIDOUT_REQ;
+		ld_fi_d    = dut.rtcache.fill_issue;
+		ld_pf_prev = dut.rtcache.stat_prefetches;
+		ld_cpurt_d = dut.vram_l.RT_REQ && dut.vram_l.XFER_CPU;
+		ld_mwt_d   = dut.vram_l.MWT_EXEC;
+	end
+	int ld_n_cl [3];
+	bit ld_armed = 0, ld_req_d = 0, ld_ack_d = 0, ld_rl_d = 0, ld_rr_d = 0, ld_exec_d = 0, ld_we;
+	int ld_slack_hist [9];   // <0 (late), <0.25, <0.5, <1, <1.5, <2, <3, <4, >=4 us
+	int ld_lines = 0;
+	real ld_pause_late = 0, ld_pause_all = 0;
+	int ld_cause_late [6];   // late lines in which each cause paused: ddr io, ddr burst, lrdy, rrdy, sec, none
+	always @(posedge clk_sys) if (ld_on) begin
+		if (dut.reset_3do) ld_armed = 0;
+		else begin
+			if (dut.p3do.madam.SPORT.VIDOUT_REQ && !ld_req_d) begin
+				ld_armed = 1; ld_t_req = $realtime; ld_hc_req = dut.p3do.madam.SPORT.HCOUNT;
+				ld_t_ack = -1; ld_t_rl = -1; ld_t_rr = -1;
+				ld_n_pause = 0; ld_n_ddrio = 0; ld_n_ddr = 0; ld_n_lrdy = 0; ld_n_rrdy = 0; ld_n_sec = 0; ld_max_len = 0;
+				ld_n_cl = '{0, 0, 0}; ld_we = 0;
+				ld_b_extp = 0; ld_b_se = 0; ld_b_clut = 0; ld_b_play = 0; ld_b_ref = 0; ld_b_idle = 0; ld_extp_acks = 0;
+			end
+			if (ld_armed) begin
+				if (dut.pause)          ld_n_pause++;
+				if (dut.ddr_io_busy)    ld_n_ddrio++;
+				if (dut.ddr_busy)       ld_n_ddr++;
+				if (!dut.VRAM_LRDY)     ld_n_lrdy++;
+				if (!dut.VRAM_RRDY)     ld_n_rrdy++;
+				if (dut.sec_hold_s) begin
+					ld_n_sec++;
+					if (dut.arb.busy) ld_n_cl[dut.arb.sel]++;
+				end
+				if (dut.sdram.sec_req && dut.sdram.sec_len > ld_max_len) ld_max_len = dut.sdram.sec_len;
+				if (dut.sdram.sec_req && dut.sdram.sec_we) ld_we = 1;
+				if (dut.p3do.madam.ARB.VIDOUT_ACK && !ld_ack_d && ld_t_ack < 0) ld_t_ack = $realtime;
+				if (ld_t_ack < 0) begin
+					P3DO_PKG::BusState_t st;
+					st = dut.p3do.madam.ARB.BUS_ST;
+					if      (st == P3DO_PKG::BUS_IDLE) ld_b_idle++;
+					else if (st >= P3DO_PKG::EXTP_PREINIT1 && st <= P3DO_PKG::EXTP_REINIT1) ld_b_extp++;
+					else if (st >= P3DO_PKG::PLAY_PREINIT1 && st <= P3DO_PKG::PLAY_WRITE1) ld_b_play++;
+					else if (st >= P3DO_PKG::REF_PREINIT1  && st <= P3DO_PKG::REF_WRITE3)  ld_b_ref++;
+					else if (st >= P3DO_PKG::SCOB_PREINIT1 && st <= P3DO_PKG::CFB_WRITE1)  ld_b_se++;
+					else if (st >= P3DO_PKG::CLUT_PREINIT1 && st <= P3DO_PKG::CLUT_MIDTRANS1) ld_b_clut++;
+				end
+				if (dut.p3do.madam.ARB.EXTP_ACK && !ld_extp_ack_d) ld_extp_acks++;
+				if (dut.vram_l.RT_REQ && !ld_rl_d && !dut.vram_l.XFER_CPU && ld_t_rl < 0) ld_t_rl = $realtime;
+				if (dut.vram_r.RT_REQ && !ld_rr_d && !dut.vram_r.XFER_CPU && ld_t_rr < 0) ld_t_rr = $realtime;
+				if (dut.p3do.madam.SPORT.VIDEO_TRANS_EXEC && !ld_exec_d) begin
+					real slack, rel;
+					int b;
+					bit late;
+					late = ld_t_rl < 0 || ld_t_rr < 0;
+					slack = late ? -1.0 : ($realtime - (ld_t_rl > ld_t_rr ? ld_t_rl : ld_t_rr)) / 1000.0;
+					b = late ? 0 : slack < 0.25 ? 1 : slack < 0.5 ? 2 : slack < 1.0 ? 3 : slack < 1.5 ? 4 :
+					    slack < 2.0 ? 5 : slack < 3.0 ? 6 : slack < 4.0 ? 7 : 8;
+					ld_slack_hist[b]++;
+					ld_lines++;
+					ld_pause_all += ld_n_pause * 20.0;
+					if (late) begin
+						ld_pause_late += ld_n_pause * 20.0;
+						if (ld_n_ddrio) ld_cause_late[0]++;
+						if (ld_n_ddr)   ld_cause_late[1]++;
+						if (ld_n_lrdy)  ld_cause_late[2]++;
+						if (ld_n_rrdy)  ld_cause_late[3]++;
+						if (ld_n_sec)   ld_cause_late[4]++;
+						if (!ld_n_pause) ld_cause_late[5]++;
+						if (ld_extp_acks) ld_late_extp++;
+						if (ld_f_dem)  ld_late_src[0]++;
+						if (ld_f_pf)   ld_late_src[1]++;
+						if (ld_f_hint) ld_late_src[2]++;
+						if (ld_cpu_rt) ld_late_src[3]++;
+						if (ld_mwt)    ld_late_src[4]++;
+					end
+					if ((late || slack < 0.25) && ld_shown < ld_max) begin
+						ld_shown++;
+						rel = $realtime - ld_t_req;
+						$display("[%0t] late_diag: line %0d %s: req at HCOUNT %0d; ack +%0.2f, RT L +%0.2f R +%0.2f, start +%0.2f us; paused %0.2f us (ddr io %0.2f, ddr burst %0.2f, L not rdy %0.2f, R not rdy %0.2f, SDRAM port %0.2f: bridge %0.2f cdd %0.2f host %0.2f; longest port transfer %0d words%s)",
+						         $realtime, dut.p3do.madam.SPORT.VCOUNT, late ? "LATE" : $sformatf("slack %0.2f us", slack), ld_hc_req,
+						         ld_t_ack < 0 ? -1.0 : (ld_t_ack - ld_t_req) / 1000.0, ld_t_rl < 0 ? -1.0 : (ld_t_rl - ld_t_req) / 1000.0,
+						         ld_t_rr < 0 ? -1.0 : (ld_t_rr - ld_t_req) / 1000.0, rel / 1000.0,
+						         ld_n_pause * 0.02, ld_n_ddrio * 0.02, ld_n_ddr * 0.02, ld_n_lrdy * 0.02, ld_n_rrdy * 0.02,
+						         ld_n_sec * 0.02, ld_n_cl[0] * 0.02, ld_n_cl[1] * 0.02, ld_n_cl[2] * 0.02, ld_max_len, ld_we ? ", writes" : "");
+						$display("            bus until the grant: ext port (DSP/audio, XBUS) %0.2f us in %0d grants, CEL engine %0.2f, CLUT/VDL %0.2f, player %0.2f, refresh %0.2f, idle %0.2f us",
+						         ld_b_extp * 0.02, ld_extp_acks, ld_b_se * 0.02, ld_b_clut * 0.02, ld_b_play * 0.02, ld_b_ref * 0.02, ld_b_idle * 0.02);
+						$display("            SDRAM work started in the window: RT cache fills demand %0d, prefetch %0d, VDL hint/frame start %0d; CPU read transfers %0d, write transfers %0d",
+						         ld_f_dem, ld_f_pf, ld_f_hint, ld_cpu_rt, ld_mwt);
+					end
+					ld_armed = 0;
+				end
+			end
+		end
+		ld_req_d  = dut.p3do.madam.SPORT.VIDOUT_REQ;
+		ld_ack_d  = dut.p3do.madam.ARB.VIDOUT_ACK;
+		ld_extp_ack_d = dut.p3do.madam.ARB.EXTP_ACK;
+		ld_rl_d   = dut.vram_l.RT_REQ;
+		ld_rr_d   = dut.vram_r.RT_REQ;
+		ld_exec_d = dut.p3do.madam.SPORT.VIDEO_TRANS_EXEC;
+	end
+	final if (ld_on) begin
+		$display("tb_boot: late_diag: %0d lines; slack (line start - later RT request) <0(late)/<0.25/<0.5/<1/<1.5/<2/<3/<4/more us: %0d %0d %0d %0d %0d %0d %0d %0d %0d",
+		         ld_lines, ld_slack_hist[0], ld_slack_hist[1], ld_slack_hist[2], ld_slack_hist[3], ld_slack_hist[4],
+		         ld_slack_hist[5], ld_slack_hist[6], ld_slack_hist[7], ld_slack_hist[8]);
+		$display("tb_boot: late_diag: late lines paused by: ddr io %0d, ddr burst %0d, L not ready %0d, R not ready %0d, SDRAM port %0d, no pause %0d; mean pause in the window %0.2f us (late lines), %0.3f us (all)",
+		         ld_cause_late[0], ld_cause_late[1], ld_cause_late[2], ld_cause_late[3], ld_cause_late[4], ld_cause_late[5],
+		         ld_slack_hist[0] ? ld_pause_late / 1000.0 / ld_slack_hist[0] : 0.0, ld_lines ? ld_pause_all / 1000.0 / ld_lines : 0.0);
+		$display("tb_boot: late_diag: late lines with an external-port (DSP/audio, XBUS) DMA grant before their video grant: %0d", ld_late_extp);
+		$display("tb_boot: late_diag: late lines whose window had an RT cache demand fill %0d, prefetch %0d, VDL hint/frame-start fill %0d, CPU read transfer %0d, write transfer %0d",
+		         ld_late_src[0], ld_late_src[1], ld_late_src[2], ld_late_src[3], ld_late_src[4]);
 	end
 
 	// Video DMA sequence (+sport_ms=<start>, one frame): MADAM_SPORT's VDL

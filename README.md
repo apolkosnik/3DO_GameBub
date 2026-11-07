@@ -5,11 +5,15 @@ A port of the [MiSTer 3DO core](https://github.com/MiSTer-devel/3DO_MiSTer) (by 
 [Game Bub core framework](https://docs.gamebub.net/developing-cores/overview/)
 (XC7A100T FPGA, one 32 MiB SDRAM chip).
 
-**Status: experimental.** The first test on Game Bub hardware gave a black screen: the
-SDRAM interface timing was wrong for the board (see *SDRAM interface timing* below). That
-is fixed, but not yet tested on hardware. In simulation, the core passes its test suite
-(see below), and the real Panasonic FZ-10 BIOS boots a commercial disc (Wolfenstein 3D,
-streamed the way the disc-streaming firmware serves it):
+**Status: experimental.** On Game Bub hardware the first build gave a black screen: the
+SDRAM interface timing was wrong for the board (see *SDRAM interface timing* below). With
+that fixed, games run on the handheld (Cannon Fodder, from a 2048-byte-sector ISO through
+the patched streaming firmware). Testing there then showed phantom button presses in NTSC
+mode and video lines shifted to the right; both are fixed in the current build (see
+*Controller input* and *Video lines that started late*), which has not been tested on
+hardware yet. In simulation, the core passes its test suite (see below), and the real
+Panasonic FZ-10 BIOS boots a commercial disc (Wolfenstein 3D, streamed the way the
+disc-streaming firmware serves it):
 
 * The BIOS decompresses its kernel, displays the 3DO logo and brings up the CD drive
   (Read ID, Spin Up, Set Speed, Disc Info, Read TOC), answered by the core's drive
@@ -73,25 +77,19 @@ firmware also when you pause.
   MiSTer core).
 * PAL games run at 50 Hz, but the handheld's LCD refreshes at 60 Hz, so every fifth frame
   is shown twice.
+* In PAL mode the 3DO puts out about 288 picture lines, and only 240 of them are captured,
+  so part of the picture is cut off (seen on hardware: the top of Cannon Fodder's title).
+  With an NTSC BIOS, keep the Region setting on NTSC (or By BIOS); PAL discs then run in
+  NTSC mode.
 * Only the 64 KiB "BRAM1" VRAM block is on chip, because the framework's double
   framebuffer uses most of the block RAM. The rest of VRAM is in SDRAM, behind the
   original MiSTer DDR3 logic (`ddram.sv`). Video reads from it go through a prefetching
   cache (below), but CPU and CEL-engine accesses outside the block are slower than on
   MiSTer.
-* While the BIOS reads the disc, a few video lines per second start before their VRAM
-  transfer, and show the previous serial-register contents (17 in the first 2.3 s of the
-  Wolfenstein 3D boot, out of 12,295): MADAM serves the CPU's accesses to CLIO, here
-  load-multiples from the XBUS data port, before the video DMA (MiSTer's arbitration,
-  unchanged). The same delay sometimes pushes the processing of the BIOS's VDL, which is
-  in SDRAM-backed VRAM, past the first picture line, which then starts late too (7 or 8
-  frames between 2.2 and 4.3 s, depending on timing).
-* During the game's 3D intro (11–16 s of the Wolfenstein 3D boot, heavy CEL-engine
-  drawing) 115 video lines (about 25 per second) started before their VRAM transfer
-  while the 3DO was paused for the SDRAM, and one during its animated logo (7.7–11 s).
-  In the 3DO Controller Test, 84 did between 2.5 and 4.5 s, while the BIOS loads the
-  disc (78 when streamed). Those logged come in pairs (one VRAM half late on one line,
-  the other half on the next), one pair every 18.2 ms (a frame and 24 lines). Not
-  investigated yet.
+* Video lines that start before their VRAM transfer (see *Video lines that started late*)
+  are not all gone: before the two fixes there, the Wolfenstein 3D boot had 247 in its
+  first 12.5 s, 216 of them from the CPU's CLIO accesses; the remaining ones in its 3D
+  intro, where the 3DO is paused for the SDRAM a lot, are being measured.
 * One controller. Buttons: Y/B/A = 3DO A/B/C, Start = P (play), Select/X = X (stop),
   L/R = L/R. They can be remapped in the Game Bub menu.
 
@@ -198,6 +196,45 @@ strip at the top of the picture in Wolfenstein 3D):
 while the 3DO was paused (the port's memory system) is an error; one delayed by MADAM's
 own bus arbitration is counted separately (see *Limitations*).
 
+**Controller input (fix to `MADAM_PLAYER.sv`).** MADAM drives the player bus clock from
+the video timing (8 bits per line, from line 16) but took each bit in on its bus clock,
+which the core's PAUSE stops. A pause longer than one bit (8 µs) lost a bit, and the
+pad words after it arrived shifted: phantom presses (on hardware: L, R and X lit in the
+controller tester, the "no more devices" 1s that follow the pad word slid into it), and
+later a crash. Such pauses are common here (a VRAM page copy through the SDRAM takes
+about 30 µs), and only in NTSC did they reach the player bus: games do their per-frame
+work from vertical blanking, which leaves 2.5 ms before line 16 in NTSC and 5.7 ms in PAL.
+Each bit is now taken on the video clock, 2 µs after its clock edge, into a queue that
+the bus-clock side shifts in when it runs. `tb_boot +pad_walk` holds the buttons one
+after the other and checks every frame's pad word: the controller test in NTSC lost
+1031 bits in 298 of 716 frames before (148 of 405 pad words wrong).
+
+**Video lines that started late (fixes to `MADAM_EXTPIF.sv` and `vram_rtcache.sv`).**
+MADAM requests a line's VRAM transfers about 4 µs before the line starts; if they come
+after, the line shows the serial register's old contents and is shifted to the right.
+Two causes:
+
+* **The CPU's accesses to CLIO.** A load/store multiple to CLIO (the BIOS reads the CD
+  data port with 8-word LDMs; audio and CD streaming do the same) kept the bus: the
+  next word's access started right after the previous one, while the CPU still had the
+  bus, so MADAM's arbiter never saw the request low, and the video DMA waited up to
+  3.7 µs. A CPU access to CLIO is now not started while a video, mid-line or VDL
+  request waits; the CPU is stopped meanwhile (its grant), and since CLIO is
+  idle-ready, its ready is held off from the CPU interface until the access has
+  started. In the controller test's first 3.4 s this removed all 38 such late lines, and
+  the lines with less than 2 µs to spare went from 650 to 12; every CD sector still
+  checks out.
+* **A cache miss on a line's first transfer.** The video DMA issues the transfers to the
+  two VRAM halves one after the other, ~0.15 µs apart. When the first missed the RT
+  cache, its fill (~3.8 µs) paused the 3DO before the second was issued. A one-sided
+  demand fill now waits while MADAM is in its video DMA sequence, until the other side
+  has asked too, at most 2 µs (`tb_rtcache` phase 11). These were the remaining 32 late
+  lines of the controller test's first 3.4 s.
+
+`tb_boot +late_diag` reports for every late or nearly late line where the time went
+(grant, transfers, pauses by cause, MADAM's bus, the SDRAM work started), and
+`+clio_trace=<µs>` traces MADAM's arbitration cycle by cycle.
+
 **Random VRAM writes (fixes to `ddram.sv`).** On MiSTer, framebuffers are normally in
 block RAM (a per-game table moves the on-chip blocks to where a game puts them). On Game
 Bub only one 64 KiB block is on chip, so every pixel the CEL engine draws goes through
@@ -280,7 +317,8 @@ sim/run_tb.sh tb_sdram         # SDRAM controller vs. timing-checking SDRAM mode
                                # refreshing just as the controller's own refresh comes due
 sim/run_tb.sh tb_rtcache       # VRAM read-transfer cache and ddram.sv: coherence vs. reference VRAM model,
                                # CEL-engine framebuffer writes during cache fills, VDL frame buffer hints,
-                               # page copies with video transfers between their read and write transfers
+                               # page copies with video transfers between their read and write transfers,
+                               # a line's two transfers apart with the first missing
 sim/build_testrom.sh           # assemble the test BIOS (sim/tb/testrom.S)
 sim/run_tb.sh tb_top           # whole core: boots the test BIOS
 sim/run_tb.sh tb_top +be       # same with a big-endian host

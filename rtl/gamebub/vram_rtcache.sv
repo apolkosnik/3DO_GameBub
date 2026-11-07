@@ -35,6 +35,15 @@
 // and a fill pauses the 3DO for ~6 us, which held the second of them back
 // past the start of the line when a prefetch started after the first.
 //
+// For the same reason a demand fill for one side waits while MADAM is still
+// in its video DMA sequence (vid_dma), until the other side has requested
+// too, or 2 us have passed. When a line's first transfer missed, the fill
+// (~3.8 us) used to start at once and pause the 3DO before MADAM had issued
+// the line's second transfer, ~0.15 us later, which then came after the
+// start of the line. The first side is not delayed in effect: its beats
+// arrive long before the beam needs them. The second side hits the entry
+// being filled (same half-row), or misses and is served by the same fill.
+//
 // Coherence: writes are snooped where they become visible to later reads,
 // i.e. at ddram.sv's DDRAM write commands for the VRAM area (random writes,
 // MWT write bursts) and at flash-writes (bfw, which ddram.sv applies through
@@ -92,6 +101,7 @@ module vram_rtcache #(
 	// start of a frame (MADAM SPORT LINE0, in vertical blanking; clk_sys
 	// pulse, taken on its rising edge)
 	input              frame,
+	input              vid_dma,            // MADAM's bus is in a video DMA sequence (clk_sys, phase aligned)
 	// framebuffer addresses a VDL entry has just loaded (MADAM_AG.sv; level
 	// from the clk_sys domain, new on its rising edge): prefetched first
 	input              hint,
@@ -184,6 +194,11 @@ module vram_rtcache #(
 	// a full-row transfer, requested as the first half's fill ends, then
 	// missed instead of hitting its prefetch.)
 	localparam int PF_HOLDOFF = 128;   // clk_mem cycles, 1.28 us
+	// Demand fills for one side wait for the other side's request while the
+	// video DMA sequence runs (see the header), at most DEM_HOLD_MAX.
+	localparam int DEM_HOLD_MAX = 200; // clk_mem cycles, 2 us
+	reg  [ 7:0] dem_age;               // cycles a demand miss has waited
+	wire        dem_hold = vid_dma && (dem_pend[0] != dem_pend[1]) && dem_age < 8'(DEM_HOLD_MAX);
 	reg  [ 7:0] req_age;
 	wire        pf_quiet = req_age >= 8'(PF_HOLDOFF);
 
@@ -320,9 +335,14 @@ module vram_rtcache #(
 			stat_hints <= '0;
 			hint_pend <= 0;
 			req_age   <= '0;
+			dem_age   <= '0;
 			last_v[0] <= 0; last_v[1] <= 0;
 			frame_pend <= 0;
 		end else begin
+			// ---------------- demand wait ----------------
+			if (!dem_pend[0] && !dem_pend[1]) dem_age <= '0;
+			else if (dem_age != 8'hFF)         dem_age <= dem_age + 1'd1;
+
 			// ---------------- victim pointer ----------------
 			if (!v_ok) begin
 				if (valid[vptr] && used[vptr] && !entry_busy(vptr)) used[vptr] <= 0;
@@ -378,8 +398,8 @@ module vram_rtcache #(
 				bit [9:0]  nh;
 				bit        from_pf, from_hint;
 				go = 0; from_pf = 0; from_hint = 0; nh = '0;
-				if (dem_pend[0] && !hit_d[0]) begin go = 1; nh = dem_h[0]; end
-				else if (dem_pend[1] && !hit_d[1]) begin go = 1; nh = dem_h[1]; end
+				if (dem_pend[0] && !hit_d[0]) begin if (!dem_hold) begin go = 1; nh = dem_h[0]; end end
+				else if (dem_pend[1] && !hit_d[1]) begin if (!dem_hold) begin go = 1; nh = dem_h[1]; end end
 				else if (pf_v[0] && (pf_quiet || pf_hint[0])) begin
 					from_pf = 1;
 					from_hint = pf_hint[0];

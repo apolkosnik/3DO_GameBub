@@ -18,6 +18,9 @@
 //     and plain rows while read-transfer fills keep ddram.sv bursting
 //   * VDL frame buffer hints (phase 10), and no prefetch fill right after a
 //     transfer request (invariant)
+//   * a line's two transfers ~0.15 us apart, as MADAM's video DMA issues
+//     them, with the first missing: its fill waits for the second while
+//     MADAM is in its video DMA sequence, at most 2 us (phase 11)
 // and checks every word shifted out against a reference model of VRAM. The
 // important cases write to rows that are already in the cache.
 //
@@ -51,6 +54,22 @@ module tb_rtcache;
 	wire        v_lte, v_rte;
 	wire [31:0] v_lq, v_rq, bldata, brdata;
 
+	// The right VRAM half sees the control signals r_delay clk_mem cycles
+	// later (0: in the same cycle, as for CPU transfers). MADAM's video DMA
+	// issues a line's two transfers ~0.15 us apart (phase 11).
+	int r_delay = 0;
+	typedef struct packed { logic [17:0] a; logic ras_n, cas_n, oe_n, dsf1; logic [1:0] we_n; } vctl_t;
+	vctl_t vctl_hist [256];
+	wire vctl_t vctl_now = '{a: A, ras_n: RAS_N, cas_n: CAS_N, oe_n: OE_N, dsf1: DSF1, we_n: WE_N};
+	initial foreach (vctl_hist[i]) vctl_hist[i] = '{a: '0, ras_n: 1, cas_n: 1, oe_n: 1, dsf1: 0, we_n: 2'b11};
+	always @(posedge clk_mem) begin
+		for (int i = 255; i > 0; i--) vctl_hist[i] <= vctl_hist[i - 1];
+		vctl_hist[0] <= vctl_now;
+	end
+	wire vctl_t vctl_r = (r_delay == 0) ? vctl_now : vctl_hist[r_delay - 1];
+	// MADAM's bus is in a video DMA sequence (vram_rtcache.sv)
+	reg vid_dma = 0;
+
 	P3DO_VRAM #(0) vram_l (
 		.CLK(clk_sys), .CLK_MEM(clk_mem), .RST_N(~rst),
 		.A(A), .D(DL), .Q(), .RAS_N(RAS_N), .CAS_N(CAS_N), .WE_N(WE_N), .OE_N(OE_N), .DSF1(DSF1),
@@ -61,7 +80,7 @@ module tb_rtcache;
 	);
 	P3DO_VRAM #(0) vram_r (
 		.CLK(clk_sys), .CLK_MEM(clk_mem), .RST_N(~rst),
-		.A(A), .D(DR), .Q(), .RAS_N(RAS_N), .CAS_N(CAS_N), .WE_N(WE_N), .OE_N(OE_N), .DSF1(DSF1),
+		.A(vctl_r.a), .D(DR), .Q(), .RAS_N(vctl_r.ras_n), .CAS_N(vctl_r.cas_n), .WE_N(vctl_r.we_n), .OE_N(vctl_r.oe_n), .DSF1(vctl_r.dsf1),
 		.SC(SC), .SE_N(1'b0), .SQ(SQR), .QSF(), .RDY(RDYR),
 		.EQ(16'h0), .ESADDR(v_raddr), .ESDATA(brdata), .ESWR(v_rwr), .ESRD(v_rrd), .ESFW(),
 		.ESQ(v_rq), .ESTE(v_rte),
@@ -92,7 +111,7 @@ module tb_rtcache;
 		.d_braddr(ddr_braddr), .d_brrd(ddr_brrd), .d_brwr(ddr_brwr),
 		.d_blte(ddr_blte), .d_brte(ddr_brte), .d_bout(ddr_bout), .d_ba(ddr_ba), .d_bbusy(ddr_bbusy),
 		.ddr_we(DDRAM_WE && !DDRAM_BUSY), .ddr_addr(DDRAM_ADDR),
-		.frame(frame), .hint(hint), .hint_curr(hint_curr), .hint_curr_v(hint_curr_v), .hint_prev(hint_prev), .hint_prev_v(hint_prev_v),
+		.frame(frame), .vid_dma(vid_dma), .hint(hint), .hint_curr(hint_curr), .hint_curr_v(hint_curr_v), .hint_prev(hint_prev), .hint_prev_v(hint_prev_v),
 		.stat_hits(st_hits), .stat_misses(st_misses), .stat_prefetches(st_pf), .stat_invalidations(st_inv),
 		.stat_hints(st_hints)
 	);
@@ -744,6 +763,65 @@ module tb_rtcache;
 				if (st_misses != m0) fail("phase 10: first line after the frame start missed");
 			end
 			$display("[%0t] phase 10: VDL frame buffer hints (%0d), errors=%0d", $realtime, st_hints, errors - errors0);
+		end
+
+		// ---------------- phase 11: a line's two transfers apart ----------------
+		// MADAM's video DMA issues a line's transfers to the two VRAM halves
+		// one after the other (VID_PREV, VID_CURR, ~0.15 us apart). When the
+		// first missed, its fill started at once and (in the core) paused the
+		// 3DO before the second was issued, which then came after the start of
+		// the line. While MADAM is in its video DMA sequence (vid_dma) the fill
+		// now waits for the second request, at most 2 us. (a) Control, without
+		// vid_dma: the fill starts before the second request, so the case is
+		// exercised. (b) With vid_dma: it waits. (c) vid_dma stuck, second
+		// request 2.5 us late: the fill starts 2 us after the miss. The data of
+		// both halves is checked each time.
+		begin
+			bit [8:0] rx [3];
+			int errors0;
+			realtime t_l, t_r, t_fill;
+			errors0 = errors;
+			rx = '{9'h0D0, 9'h0D2, 9'h0D4};
+			foreach (rx[i]) begin
+				for (int w = 0; w < 512; w += 7) cpu_write({rx[i], 9'(w)}, $urandom(), $urandom());
+				wait_idle();
+				if (cache.find({rx[i], 1'b0})[4]) fail($sformatf("phase 11: row %03h cached before the test", rx[i]));
+			end
+			for (int c = 0; c < 3; c++) begin
+				r_delay = (c == 2) ? 250 : 15;
+				t_l = 0; t_r = 0; t_fill = 0;
+				fork
+					begin
+						vid_dma = (c != 0);
+						rt_read({rx[c], 9'h0}, 0, 64);
+					end
+					begin
+						@(posedge clk_mem iff v_lrd);  t_l = $realtime;
+					end
+					begin
+						@(posedge clk_mem iff v_rrd);  t_r = $realtime;
+						mem_cycles(5);
+						vid_dma = 0;              // MADAM leaves its video DMA sequence
+					end
+					begin
+						@(posedge clk_mem iff (cache.fill_issue && cache.fill_h == {rx[c], 1'b0}));  t_fill = $realtime;
+					end
+				join
+				if (c == 0 && !(t_fill < t_r))
+					fail($sformatf("phase 11: control: the fill did not start before the second transfer (%0.2f / %0.2f us after the first)",
+					               (t_fill - t_l) / 1000.0, (t_r - t_l) / 1000.0));
+				if (c == 1 && t_fill < t_r)
+					fail($sformatf("phase 11: the fill started %0.2f us after the line's first transfer, before its second (%0.2f us)",
+					               (t_fill - t_l) / 1000.0, (t_r - t_l) / 1000.0));
+				if (c == 2 && (t_fill >= t_r || t_fill - t_l < 1.9us || t_fill - t_l > 2.3us))
+					fail($sformatf("phase 11: with the second transfer %0.2f us late the fill started after %0.2f us (expected ~2 us)",
+					               (t_r - t_l) / 1000.0, (t_fill - t_l) / 1000.0));
+				$display("[%0t] phase 11 (%s): second transfer +%0.2f us, fill +%0.2f us", $realtime,
+				         c == 0 ? "control, no vid_dma" : c == 1 ? "vid_dma" : "vid_dma, second transfer late",
+				         (t_r - t_l) / 1000.0, (t_fill - t_l) / 1000.0);
+			end
+			r_delay = 0;
+			$display("[%0t] phase 11: a line's two transfers apart, errors=%0d", $realtime, errors - errors0);
 		end
 
 		$display("tb_rtcache: %0d words checked, hits %0d misses %0d prefetches %0d invalidations %0d",

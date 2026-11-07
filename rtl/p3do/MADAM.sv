@@ -90,6 +90,7 @@ module MADAM
 	output             VID_FB_PREV_V,
 	// Game Bub port: the VRAM access in progress is the CPU's SPORT access
 	output             VRAM_SP_CPU,
+	output             VID_DMA,      // Game Bub port: the bus is in a video DMA sequence (line or mid-line transfers)
 	
 	input              DBG_SPR_EN,
 	input      [ 7: 0] DBG_EXT
@@ -141,6 +142,7 @@ module MADAM
 	
 	//EXTP
 	bit          CLIO_REQ;
+	wire         CLIO_HOLD;   // GameBub: see MADAM_EXTPIF
 	bit          EXTP_REQ;
 	bit          EXTP_ACK;
 	bit          EXTP_GRANT;
@@ -440,6 +442,7 @@ module MADAM
 	wire CPU_SLOW_SEL = (A[31:20] == 12'h030 || A[31:20] == 12'h031 || (A[31:20] == 12'h000 && BOOT_ROM));
 	wire CPU_SPORT_SEL = (A[31:20] == 12'h032 && CPU_GRANT);
 	assign VRAM_SP_CPU = CPU_SPORT_SEL;//Game Bub port
+	assign VID_DMA = (BUS_STATE >= VID_PREINIT1);//Game Bub port: VID_* are the last states of BusState_t
 	
 	MADAM_ARB ARB
 	(
@@ -536,7 +539,7 @@ module MADAM
 		
 		.SLOW_SEL(0/*CPU_SLOW_SEL*/),
 		.CLIO_SEL(CPU_CLIO_SEL),
-		.CLIO_RDY(~CREADY_N),
+		.CLIO_RDY(~CREADY_N & ~CLIO_HOLD),   // GameBub: CLIO_HOLD, see MADAM_EXTPIF
 		.WAIT(0)
 	);
 	
@@ -554,6 +557,8 @@ module MADAM
 		.CPU_GRANT(CPU_GRANT),
 		.CPU_RW(nRW),
 		.CPU_SEL(CPU_CLIO_SEL),
+		.VID_PEND(VIDOUT_REQ | VIDMID_REQ | CLUTWR_REQ),   // GameBub
+		.CLIO_HOLD(CLIO_HOLD),                             // GameBub
 		
 		.MDTI(AG_MDTO),
 		.BUS_STATE(BUS_STATE),

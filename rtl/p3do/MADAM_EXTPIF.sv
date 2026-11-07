@@ -26,6 +26,8 @@ module MADAM_EXTPIF
 	output AddrGenCtl_t AG_CTL,
 	
 	output reg         CPU_REQ,
+	input              VID_PEND,     // GameBub: a video, mid-line or CLUT (VDL) DMA request waits
+	output             CLIO_HOLD,    // GameBub: a CPU access to CLIO is held: its CLIO ready is not valid
 	output reg         DMA_REQ,
 	input              DMA_ACK,
 	output reg [ 2: 0] NEXT,
@@ -64,18 +66,40 @@ module MADAM_EXTPIF
 	wire BUS_READ = (BUS_STATE_FF == EXTP_READ1);
 	wire BUS_WRITE = (BUS_STATE_FF == EXTP_WRITE1);
 	
+	// GameBub: a CPU access to CLIO is not started while a video, mid-line or
+	// CLUT (VDL) DMA request waits. With MiSTer's logic the next word of a
+	// load/store multiple to CLIO started right after the previous one, while
+	// the CPU still had the bus, so MADAM's arbiter (which looks at PHASE2)
+	// never saw CLIO_REQ low: an 8-word LDM from the XBUS (CD data) port held
+	// the video DMA back for 3.7 us of the 4 us before its line starts, and
+	// lines started before their VRAM transfer (shifted right). Now the access
+	// waits, the arbiter grants the DMA, and the CPU (stopped meanwhile by its
+	// grant, BREAK) starts it afterwards. CLIO is idle-ready during the wait,
+	// so its ready is held off from the CPU interface (CLIO_HOLD) until one
+	// MCLK after the access started, when CLIO has gone busy.
+	bit          CPU_HELD, CPU_HELD_D1, CPU_HELD_D2;
+	assign CLIO_HOLD = CPU_HELD | CPU_HELD_D1 | CPU_HELD_D2;
 	bit  [ 2: 0] CPU_CCODE;
 	always @(posedge CLK or negedge RST_N) begin		
 		if (!RST_N) begin
 			CPU_REQ <= 0;
 			CPU_CCODE <= '0;
+			CPU_HELD <= 0;
+			CPU_HELD_D1 <= 0;
+			CPU_HELD_D2 <= 0;
 		end
 		else if (EN && CE_R) begin
 			CPU_CCODE <= '0;
+			CPU_HELD_D1 <= CPU_HELD;
+			CPU_HELD_D2 <= CPU_HELD_D1;
 			if (CPU_GRANT) begin
-				if (CPU_SEL && !CPU_REQ) begin
+				if (CPU_SEL && !CPU_REQ && VID_PEND) begin
+					CPU_HELD <= 1;
+				end
+				else if (CPU_SEL && !CPU_REQ) begin
 					CPU_CCODE <= CPU_RW ? 3'h1 : 3'h3;
 					CPU_REQ <= 1;
+					CPU_HELD <= 0;
 				end
 				else if (CPU_SEL && CPU_REQ && !CREADY_N && MCLK_PH2) begin
 					CPU_REQ <= 0;

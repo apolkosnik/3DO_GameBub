@@ -55,10 +55,11 @@ fork (the one its PlayStation core needs; release 0.1.3, whose firmware file is
 any size are read from the microSD card as the game needs them, and the disc can be
 changed from the pause menu; see [docs/disc_streaming.md](docs/disc_streaming.md).
 
-That firmware reads raw 2352-byte CD sectors only. Homebrew usually comes as an `.iso`,
-which it refuses ("not a raw image"). Convert it first: `tools/iso2bin.py image.iso` writes
-`image.bin` and `image.cue` (with the sector headers, EDC and ECC of a pressed disc);
-select the `.cue`.
+That firmware reads raw 2352-byte CD sectors only. Most 3DO images come as an `.iso`,
+which it refuses ("not a raw image"). The release zip therefore includes that firmware with
+a patch that reads 2048-byte-sector ISOs as well (see [firmware/](firmware/README.md)). With
+the unpatched firmware, convert first: `tools/iso2bin.py image.iso` writes `image.bin` and
+`image.cue` (with the sector headers, EDC and ECC of a pressed disc); select the `.cue`.
 
 Stock firmware cannot stream: it loads the selected file into SDRAM at startup, so only
 `.iso` images (2048-byte sectors) of up to 22 MiB work there. `tools/cue2iso.py

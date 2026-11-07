@@ -30,7 +30,9 @@ module P3DO_VRAM #(parameter USE_BRAM = 0) (
 	input  [ 3: 0] BRAM4_OFFS,
 	input  [ 3: 0] BRAM2_OFFS,
 	input  [ 3: 0] BRAM1_OFFS,
-	
+
+	input          SP_CPU,      // Game Bub port: the access is the CPU's (MADAM SPORT space)
+
 	output bit [ 7: 0] DBG_WAIT_CNT
 );
 
@@ -49,6 +51,7 @@ module P3DO_VRAM #(parameter USE_BRAM = 0) (
 	bit          SR_WE;
 	bit  [ 8: 0] SR_RA;
 	bit [255: 0] SR_Q;
+	bit [255: 0] SC_Q;      //CPU shift register output (Game Bub port)
 
 	bit  [ 8: 0] MEM_ROW;
 	bit  [ 8: 0] MEM_COL;
@@ -61,6 +64,26 @@ module P3DO_VRAM #(parameter USE_BRAM = 0) (
 	bit          SOM;			//serial output mode
 	bit          SPLIT;		//serial split transfer mode
 	bit          ISTE;
+	// Game Bub port: the CPU's SPORT transfers (a page copy is a read
+	// transfer, then a write transfer, as two CPU accesses) use a shift
+	// register of their own. On real hardware the OS copies pages during
+	// vertical blanking, when no video or CLUT/VDL transfer uses the shift
+	// register. Here VRAM is mostly in SDRAM, a page copy takes ~30 us and
+	// a frame's copies run on into the picture: a video or VDL transfer
+	// between a copy's read and write transfer reloaded the shared shift
+	// register and the write transfer stored that data (OS VDL words in a
+	// game's background). With two registers the copy keeps the source row
+	// however long it takes, and the CPU's transfers leave the video shift
+	// register, its tap and serial mode alone.
+	// A split read transfer of the half-row the video shift register already
+	// holds is skipped (as in the MiSTer core). A copy into that row
+	// invalidates the tag, so the next one reloads the copied data (with one
+	// shared register, the copy had left it there).
+	bit          PEND_CPU;   //the pending transfer is the CPU's
+	bit          XFER_CPU;   //the transfer in progress is the CPU's
+	bit  [ 9: 0] VSR_TAG;    //row and half the video shift register holds
+	bit          VSR_V;      //VSR_TAG is valid: a split transfer to it is skipped
+	bit          SR_WCPU;    //SR_WE writes the CPU shift register
 	always @(posedge CLK_MEM or negedge RST_N) begin
 		bit        RAS_N_OLD,CAS_N_OLD,SC_OLD;
 		bit        RDY_OLD;
@@ -83,6 +106,9 @@ module P3DO_VRAM #(parameter USE_BRAM = 0) (
 			SR_WE <= 0;
 			SR_RA <= '0;
 			ISTE <= 0;
+			{PEND_CPU,XFER_CPU,SR_WCPU} <= '0;
+			VSR_TAG <= '0;
+			VSR_V <= 0;
 		end else begin
 			RT_REQ <= 0;
 			
@@ -96,8 +122,10 @@ module P3DO_VRAM #(parameter USE_BRAM = 0) (
 					if (!OE_N || !WE_N || DSF1 || !(USE_INT_RAM4 || USE_INT_RAM2 || USE_INT_RAM1)) RDY <= 0;
 				end else if (!OE_N && WE_N) begin
 					RT_PEND <= 1;
+					PEND_CPU <= SP_CPU;
 				end else if (!OE_N && !WE_N /*&& !DSF1*/) begin
 					MWT_PEND <= 1;
+					PEND_CPU <= SP_CPU;
 				end else if (OE_N && !WE_N /*&& DSF1*/) begin
 					FW_PEND <= 1;
 				end else if (OE_N && WE_N) begin
@@ -114,25 +142,36 @@ module P3DO_VRAM #(parameter USE_BRAM = 0) (
 			
 			if (RT_PEND) begin
 				RT_PEND <= 0;
-				if ({MEM_ROW,MEM_COL[8]} != A_FF[17:8] || !DSF1) begin
+				if (PEND_CPU || !VSR_V || VSR_TAG != A_FF[17:8] || !DSF1) begin
 					{MEM_ROW,MEM_COL} <= A_FF[17:0];
 					RT_EXEC <= 1;
 					RT_REQ <= 1;
+					XFER_CPU <= PEND_CPU;
 //					SIM <= 0;
-					SOM <= 1;
+					if (!PEND_CPU) begin
+						VSR_TAG <= A_FF[17:8];
+						VSR_V <= 1;
+						SOM <= 1;
+					end
 					SPLIT <= DSF1;
 					SREG_POS <= {A_FF[8:1],1'b0};
 					ISTE <= USE_INT_RAM4 | USE_INT_RAM2 | USE_INT_RAM1;
 				end
-				if (!DSF1) SR_RA <= A_FF[8:0];
+				if (!DSF1 && !PEND_CPU) SR_RA <= A_FF[8:0];
 			end else if (MWT_PEND) begin
 				MWT_PEND <= 0;
 				MEM_ROW <= A_FF[17:9];
 //				MEM_COL <= A_FF[8:0];
 //				MASK <= D_FF;
 				MWT_EXEC <= !SE_N;
+				XFER_CPU <= PEND_CPU;
 //				SIM <= 1;
-				SOM <= 0;
+				if (!PEND_CPU) begin
+					VSR_TAG <= {A_FF[17:9],VSR_TAG[0]};
+					SOM <= 0;
+				end else if (A_FF[17:9] == VSR_TAG[9:1]) begin
+					VSR_V <= 0;   //a copy into the row the video shift register holds: reload it
+				end
 				SPLIT <= DSF1;
 				SREG_POS <= '0;
 				ISTE <= USE_INT_RAM4 | USE_INT_RAM2 | USE_INT_RAM1;
@@ -181,6 +220,7 @@ module P3DO_VRAM #(parameter USE_BRAM = 0) (
 				SR_WA <= SREG_POS;
 				SR_WD <= ESQ;
 				SR_WE <= RT_EXEC;
+				SR_WCPU <= XFER_CPU;
 				
 				SREG_POS <= SREG_POS + (ISTE ? 9'h10 : 9'h2);
 				if (((SREG_POS[7:0] == 8'hFE && ESTE) || (SREG_POS[7:4] == 4'hF && ISTE)) && SPLIT) begin
@@ -212,7 +252,8 @@ module P3DO_VRAM #(parameter USE_BRAM = 0) (
 	wire         MEM1_SSEL = (ESADDR >= ({BRAM1_OFFS+0,16'h0000}>>2) && ESADDR <= ({BRAM1_OFFS+0,16'hBFFF}>>2)) || (ESADDR >= (20'hFC000>>2));
 	
 	wire [15: 4] MEM_SWADDR = ESADDR[15:4];
-	wire[255: 0] MEM_SDATA = FW_EXEC ? {16{COLOR}} : {SR_Q[239:224],SR_Q[255:240],SR_Q[207:192],SR_Q[223:208],SR_Q[175:160],SR_Q[191:176],SR_Q[143:128],SR_Q[159:144],SR_Q[111:96],SR_Q[127:112],SR_Q[79:64],SR_Q[95:80],SR_Q[47:32],SR_Q[63:48],SR_Q[15:0],SR_Q[31:16]};//SR_Q;
+	wire[255: 0] MWT_Q = XFER_CPU ? SC_Q : SR_Q;   // write transfer source (Game Bub port)
+	wire[255: 0] MEM_SDATA = FW_EXEC ? {16{COLOR}} : {MWT_Q[239:224],MWT_Q[255:240],MWT_Q[207:192],MWT_Q[223:208],MWT_Q[175:160],MWT_Q[191:176],MWT_Q[143:128],MWT_Q[159:144],MWT_Q[111:96],MWT_Q[127:112],MWT_Q[79:64],MWT_Q[95:80],MWT_Q[47:32],MWT_Q[63:48],MWT_Q[15:0],MWT_Q[31:16]};//SR_Q;
 	wire         MEM4_SWREN = (MWT_EXEC | FW_EXEC) & MEM4_SSEL & ISTE;
 	wire         MEM2_SWREN = (MWT_EXEC | FW_EXEC) & MEM2_SSEL & ISTE;
 	wire         MEM1_SWREN = (MWT_EXEC | FW_EXEC) & MEM1_SSEL & ISTE;
@@ -277,21 +318,37 @@ module P3DO_VRAM #(parameter USE_BRAM = 0) (
 		MEM2_SQ_SEL <= MEM2_SSEL;
 	end
 	
-	wire [ 8: 1] SR_RADDR = MWT_EXEC ? SREG_POS[8:1] : SR_RA[8:1];
+	// video shift register: serial output at the tap; a write transfer that
+	// is not the CPU's (none in MADAM) reads it as before
+	wire [ 8: 1] SR_RADDR = MWT_EXEC && !XFER_CPU ? SREG_POS[8:1] : SR_RA[8:1];
 	wire[255: 0] MEM_SQ = MEM4_SQ_SEL ? {MEM4_SQ[239:224],MEM4_SQ[255:240],MEM4_SQ[207:192],MEM4_SQ[223:208],MEM4_SQ[175:160],MEM4_SQ[191:176],MEM4_SQ[143:128],MEM4_SQ[159:144],MEM4_SQ[111:96],MEM4_SQ[127:112],MEM4_SQ[79:64],MEM4_SQ[95:80],MEM4_SQ[47:32],MEM4_SQ[63:48],MEM4_SQ[15:0],MEM4_SQ[31:16]} :
 	                      MEM2_SQ_SEL ? {MEM2_SQ[239:224],MEM2_SQ[255:240],MEM2_SQ[207:192],MEM2_SQ[223:208],MEM2_SQ[175:160],MEM2_SQ[191:176],MEM2_SQ[143:128],MEM2_SQ[159:144],MEM2_SQ[111:96],MEM2_SQ[127:112],MEM2_SQ[79:64],MEM2_SQ[95:80],MEM2_SQ[47:32],MEM2_SQ[63:48],MEM2_SQ[15:0],MEM2_SQ[31:16]} :
 	                                    {MEM1_SQ[239:224],MEM1_SQ[255:240],MEM1_SQ[207:192],MEM1_SQ[223:208],MEM1_SQ[175:160],MEM1_SQ[191:176],MEM1_SQ[143:128],MEM1_SQ[159:144],MEM1_SQ[111:96],MEM1_SQ[127:112],MEM1_SQ[79:64],MEM1_SQ[95:80],MEM1_SQ[47:32],MEM1_SQ[63:48],MEM1_SQ[15:0],MEM1_SQ[31:16]};
+	wire [ 7: 0] SR_WREN = ISTE_DELAYED ? {8{SR_WE}} : {7'b0000000,SR_WE}<<SR_WA[3:1];
 	VRAM_SHIFTREG #(9) shiftreg
 	(
 		.CLK(CLK_MEM),
 		.WADDR(SR_WA[8:4]),
 		.DATA(ISTE_DELAYED ? MEM_SQ : {8{SR_WD}}),
-		.WREN(ISTE_DELAYED ? {8{SR_WE}} : {7'b0000000,SR_WE}<<SR_WA[3:1]),
+		.WREN(SR_WREN & {8{~SR_WCPU}}),
 		.RADDR(SR_RADDR[8:4]),
 		.Q(SR_Q)
 	);
-	
-	bit  [31: 0] SR_DATA;
+
+	// Game Bub port: the CPU's shift register (SPORT read transfers fill it,
+	// write transfers store it)
+	wire [ 8: 1] SC_RADDR = SREG_POS[8:1];
+	VRAM_SHIFTREG #(9) shiftreg_cpu
+	(
+		.CLK(CLK_MEM),
+		.WADDR(SR_WA[8:4]),
+		.DATA(ISTE_DELAYED ? MEM_SQ : {8{SR_WD}}),
+		.WREN(SR_WREN & {8{SR_WCPU}}),
+		.RADDR(SC_RADDR[8:4]),
+		.Q(SC_Q)
+	);
+
+	bit  [31: 0] SR_DATA, SC_DATA;
 	always_comb begin
 		case (SR_RADDR[3:1])
 			3'h0: SR_DATA = SR_Q[031:000];
@@ -303,10 +360,20 @@ module P3DO_VRAM #(parameter USE_BRAM = 0) (
 			3'h6: SR_DATA = SR_Q[223:192];
 			3'h7: SR_DATA = SR_Q[255:224];
 		endcase
+		case (SC_RADDR[3:1])
+			3'h0: SC_DATA = SC_Q[031:000];
+			3'h1: SC_DATA = SC_Q[063:032];
+			3'h2: SC_DATA = SC_Q[095:064];
+			3'h3: SC_DATA = SC_Q[127:096];
+			3'h4: SC_DATA = SC_Q[159:128];
+			3'h5: SC_DATA = SC_Q[191:160];
+			3'h6: SC_DATA = SC_Q[223:192];
+			3'h7: SC_DATA = SC_Q[255:224];
+		endcase
 	end
-	
+
 	assign ESADDR = {MEM_ROW,SREG_POS};
-	assign ESDATA = FW_EXEC ? {2{COLOR}} : SR_DATA;
+	assign ESDATA = FW_EXEC ? {2{COLOR}} : XFER_CPU ? SC_DATA : SR_DATA;
 	assign ESWR = MWT_EXEC & ~ISTE;
 	assign ESRD = RT_REQ & ~ISTE;
 	assign ESFW = FW_EXEC & ~ISTE;

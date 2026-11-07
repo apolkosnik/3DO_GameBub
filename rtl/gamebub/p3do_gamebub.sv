@@ -280,6 +280,7 @@ module p3do_gamebub #(
 	wire        VID_FRAME;                                   // start of a frame (vertical blanking)
 	wire        VID_FB_HINT, VID_FB_CURR_V, VID_FB_PREV_V;   // frame buffer addresses from the VDL
 	wire [19:2] VID_FB_CURR, VID_FB_PREV;                   // (VRAM word addresses), for vram_rtcache
+	wire        VRAM_SP_CPU;                                 // VRAM access is the CPU's SPORT access (vram.sv)
 
 	P3DO p3do (
 		.RST_N(~reset_3do),
@@ -310,6 +311,7 @@ module p3do_gamebub #(
 		.VID_FRAME(VID_FRAME),
 		.VID_FB_HINT(VID_FB_HINT), .VID_FB_CURR(VID_FB_CURR), .VID_FB_CURR_V(VID_FB_CURR_V),
 		.VID_FB_PREV(VID_FB_PREV), .VID_FB_PREV_V(VID_FB_PREV_V),
+		.VRAM_SP_CPU(VRAM_SP_CPU),
 		.RGB({R,G,B}),
 		.HS_N(HS_N), .VS_N(VS_N), .HBLK_N(HBL_N), .VBLK_N(VBL_N), .DCLK(DCLK),
 		.ACLK_CE(ACLK_CE),
@@ -573,6 +575,7 @@ module p3do_gamebub #(
 		.ESWR(v_lwr), .ESRD(v_lrd), .ESFW(v_lfw),
 		.ESQ(v_lq), .ESTE(v_lte),
 		.BRAM4_OFFS(BRAM4_OFFS), .BRAM2_OFFS(BRAM2_OFFS), .BRAM1_OFFS(BRAM1_OFFS),
+		.SP_CPU(VRAM_SP_CPU),
 		.DBG_WAIT_CNT()
 	);
 
@@ -585,6 +588,7 @@ module p3do_gamebub #(
 		.ESWR(v_rwr), .ESRD(v_rrd), .ESFW(),
 		.ESQ(v_rq), .ESTE(v_rte),
 		.BRAM4_OFFS(BRAM4_OFFS), .BRAM2_OFFS(BRAM2_OFFS), .BRAM1_OFFS(BRAM1_OFFS),
+		.SP_CPU(VRAM_SP_CPU),
 		.DBG_WAIT_CNT()
 	);
 

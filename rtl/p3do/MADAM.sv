@@ -88,6 +88,8 @@ module MADAM
 	output             VID_FB_CURR_V,
 	output     [19: 2] VID_FB_PREV,
 	output             VID_FB_PREV_V,
+	// Game Bub port: the VRAM access in progress is the CPU's SPORT access
+	output             VRAM_SP_CPU,
 	
 	input              DBG_SPR_EN,
 	input      [ 7: 0] DBG_EXT
@@ -437,6 +439,7 @@ module MADAM
 	wire CPU_CLIO_SEL = (A[31:20] == 12'h034);
 	wire CPU_SLOW_SEL = (A[31:20] == 12'h030 || A[31:20] == 12'h031 || (A[31:20] == 12'h000 && BOOT_ROM));
 	wire CPU_SPORT_SEL = (A[31:20] == 12'h032 && CPU_GRANT);
+	assign VRAM_SP_CPU = CPU_SPORT_SEL;//Game Bub port
 	
 	MADAM_ARB ARB
 	(

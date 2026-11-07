@@ -17,6 +17,12 @@ commercial disc (Wolfenstein 3D, streamed the way the disc-streaming firmware se
 * The game then runs: it shows its animated 3DO logo, fades it out and starts its
   intro (CEL-engine 3D graphics over a starfield), 16 s after power-on.
 
+The homebrew 3DO Controller Test (an `.iso`) boots both ways, preloaded as stock firmware
+does it and streamed as a raw `.bin`: the BIOS shows the disc's banner 4 s after
+power-on, and the program its controller screen 8.5 s after. Its framebuffers match the
+image on the disc, and every VRAM transfer of both boots (and of the Wolfenstein 3D
+boot) is checked against a shadow of VRAM (see *Simulation*).
+
 The SDRAM read-capture timing (`READ_STAGE` in `rtl/gamebub/sdram_3do.sv`) follows the
 MiSTer design and may need tuning on real hardware.
 
@@ -68,12 +74,15 @@ firmware also when you pause.
   Wolfenstein 3D boot, out of 12,295): MADAM serves the CPU's accesses to CLIO, here
   load-multiples from the XBUS data port, before the video DMA (MiSTer's arbitration,
   unchanged). The same delay sometimes pushes the processing of the BIOS's VDL, which is
-  in SDRAM-backed VRAM, past the first picture line, which then starts late too (8
-  frames between 2.9 and 4.2 s).
+  in SDRAM-backed VRAM, past the first picture line, which then starts late too (7 or 8
+  frames between 2.2 and 4.3 s, depending on timing).
 * During the game's 3D intro (11–16 s of the Wolfenstein 3D boot, heavy CEL-engine
-  drawing) 119 of about 77,000 video lines started before their VRAM transfer while the
-  3DO was paused for the SDRAM. Not investigated yet. None during the game's animated
-  logo (7.7–11 s).
+  drawing) 115 video lines (about 25 per second) started before their VRAM transfer
+  while the 3DO was paused for the SDRAM, and one during its animated logo (7.7–11 s).
+  In the 3DO Controller Test, 84 did between 2.5 and 4.5 s, while the BIOS loads the
+  disc (78 when streamed). Those logged come in pairs (one VRAM half late on one line,
+  the other half on the next), one pair every 18.2 ms (a frame and 24 lines). Not
+  investigated yet.
 * One controller. Buttons: Y/B/A = 3DO A/B/C, Start = P (play), Select/X = X (stop),
   L/R = L/R. They can be remapped in the Game Bub menu.
 
@@ -111,6 +120,13 @@ MiSTer's controller, because these pauses can now happen at any time:
   reset, or before the BIOS enables refresh). It closes and re-opens open 3DO pages
   around the refresh.
 * tRAS is respected when the 3DO closes a page in the MCLK right after opening it.
+* When the controller's own refresh comes due, it asks for a pause. If the 3DO does a
+  refresh itself before the pause takes effect, nothing is left to do, and the
+  controller now releases the bus. It used to start a transfer anyway, from the
+  secondary port's idle inputs: the last address written, with stale write data. In
+  simulation that rewrote VRAM pixels the CEL engine had just drawn, a few times per
+  second of Wolfenstein 3D's logo. The same could have hit the NVRAM (the save) right
+  after the 3DO wrote it.
 
 **VRAM read-transfer cache.** MADAM's video DMA loads a VRAM row into the serial
 register and starts shifting it out about 160 ns later, and the video beam cannot be
@@ -161,6 +177,24 @@ The lookup now uses the waiting write's own address, and a write that has not be
 keeps MADAM paused. `tb_rtcache` reproduces both with MADAM's write timing, and `tb_boot`
 checks every VRAM write during a boot.
 
+**VRAM page copies (fix to `vram.sv`).** Software copies VRAM a row at a time (2 KiB per
+VRAM half) through MADAM's SPORT address space: the CPU reads an address there (a read
+transfer, the source row into the VRAM's serial register), then writes one (a write
+transfer, the serial register into the destination row). Programs use this to restore a
+background every frame. On the console the OS does it during vertical blanking, when no
+video or VDL transfer needs the serial register. Here each transfer goes to the SDRAM, so
+a copy takes about 30 µs and a frame's copies run on into the picture. MADAM can then
+grant a video or VDL transfer between a copy's read and its write transfer. That
+transfer replaced the serial register's contents, and the write transfer stored them in
+the destination row: in the 3DO Controller Test, VDL words in the background, a streak
+across picture lines 210–215. The VRAM modules now give the CPU's SPORT transfers
+(MADAM's `CPU_SPORT_SEL`) a serial register of their own, so a copy stores the row it read
+however long it takes, and copies leave the video serial register alone. MiSTer's VRAM
+skips a split read transfer of the half-row the serial register already holds; a copy
+into that row now makes the next one reload it.
+`tb_rtcache` makes video transfers inside copies, and `tb_boot` checks every copy of a
+boot (see *Simulation*).
+
 Host file data is stored exactly as received. The byte order of the MCU's words is
 detected from the Opera volume header of a preloaded ISO; otherwise little-endian is
 assumed. Streamed sectors always arrive as little-endian words (the fork's protocol).
@@ -203,9 +237,11 @@ are needed.
 ```
 sim/lint.sh                    # Verilator lint of the whole core
 sim/run_tb.sh tb_div           # MADAM divider vs. LPM_DIVIDE semantics (20k cases)
-sim/run_tb.sh tb_sdram         # SDRAM controller vs. timing-checking SDRAM model
+sim/run_tb.sh tb_sdram         # SDRAM controller vs. timing-checking SDRAM model, including the 3DO
+                               # refreshing just as the controller's own refresh comes due
 sim/run_tb.sh tb_rtcache       # VRAM read-transfer cache and ddram.sv: coherence vs. reference VRAM model,
-                               # CEL-engine framebuffer writes during cache fills, VDL frame buffer hints
+                               # CEL-engine framebuffer writes during cache fills, VDL frame buffer hints,
+                               # page copies with video transfers between their read and write transfers
 sim/build_testrom.sh           # assemble the test BIOS (sim/tb/testrom.S)
 sim/run_tb.sh tb_top           # whole core: boots the test BIOS
 sim/run_tb.sh tb_top +be       # same with a big-endian host
@@ -226,6 +262,19 @@ line has had its VRAM transfers before it starts, dumps VRAM as an image
 at the end and measures stale serial reads during VRAM read transfers. If the CPU runs
 outside the memory map, the last CPU bus cycles are written to `cpu_trace.txt`. About
 2.5 ms of 3DO time per second of wall time.
+
+It also keeps a shadow of VRAM, updated from the VRAM bus by its semantics (random
+writes, flash writes, read and write transfers, with the CPU's SPORT transfers on their own
+serial register). Every beat a read transfer gets from the SDRAM path (cache or
+`ddram.sv`) must match the shadow row as it was when the transfer started, and at the end
+all of SDRAM-backed VRAM must match the shadow. It counts the page copies that had a
+video or VDL transfer between their two halves. `+vram_watch=<row>` (hex) logs one VRAM
+row's events, from `+vram_watch_from=<ms>` on: the shadow's, and those of `ddram.sv` and
+the cache. `+vram_watch_col=<col>` also logs the writes to one column pair of the row from
+power-on, and every change of that 64-bit word in the SDRAM model (with its flash-cleared
+flag and the row's clear colour), together with what the SDRAM's second port was doing.
+At the end it prints how many split read transfers were skipped because the video serial
+register already held their half-row, and the late lines per second.
 
 `tb_top` runs the complete core against an SDRAM model that checks every SDRAM timing
 parameter and refresh. A host model follows the framework's MCU protocol: it loads the

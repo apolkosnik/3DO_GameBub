@@ -11,21 +11,27 @@
 //   * framework video frames as PPM files (<out>/frames/frame_NNNN.ppm)
 //   * every CD controller command the BIOS sends and every sector delivered
 //   * CPU address samples, pause statistics, SDRAM model errors
-//   * streamed discs: every sector sent to the CD controller is checked
-//     against the image at the LBA the BIOS asked for
+//   * every sector sent to the CD controller is checked against the image
+//     (streamed .bin or preloaded ISO) at the LBA the BIOS asked for
 //   * every video line must have had its VRAM read transfers (both halves)
 //     before it starts shifting out (TB errors if the 3DO was paused in
 //     between; MADAM's own arbitration delays are reported separately)
 //   * random VRAM writes to the SDRAM tier (CPU, CEL engine): none may be
 //     lost in ddram.sv's posted write port or completed with another
 //     address's flash-write state (counted as TB errors)
+//   * a shadow of VRAM kept by the VRAM bus semantics (random writes, flash
+//     writes, read and write transfers): every read transfer served by the
+//     external path must deliver what VRAM held when it started, and at the
+//     end the SDRAM tier must hold what the 3DO wrote (TB errors);
+//     +vram_watch=<row> logs every event on one 512-word VRAM row
 //   * <out>/cpu_trace.txt: the last 32768 CPU bus cycles (or, with
 //     +trace_from_ms=<n>, all from n ms on) before the CPU first runs outside
 //     the 3DO memory map (a crash), with CLIO's interrupt state at each FIQ
 //
 // Plusargs: +bios=<file> (required), +iso=<file> or +disc_bin=<file>,
 //           +disc_latency_us=<n> (default 800), +trace_from_ms=<n>, +run_ms=<n> (default 1000),
-//           +frame_every=<n> (default 10), +out=<dir> (default build/sim)
+//           +frame_every=<n> (default 10), +out=<dir> (default build/sim),
+//           +vram_watch=<row>, +sport_ms=<n>, +rt_log_ms=<n>
 //
 // Copyright (c) 2026 Adam Polkosnik
 // SPDX-License-Identifier: GPL-3.0-or-later
@@ -91,6 +97,7 @@ module tb_boot;
 	);
 
 	int errors = 0;
+	bit sh_cpu [2];   // VRAM side 0/1: the access whose RAS fell last is the CPU's SPORT access (VRAM shadow)
 	task automatic fail(input string m);
 		errors++;
 		$display("[%0t] TB ERROR: %s", $realtime, m);
@@ -230,12 +237,16 @@ module tb_boot;
 		if (!dut.cdd_dien && cdd_dien_d)
 			$display("[%0t] CD disc-info block sent (id %08h, lead-out MSF %06h)", $realtime, dut.cdd.disc_id, dut.cdd.disc_msf[31:8]);
 	end
-	// ---------------- CD data check (streaming) ----------------
+	// ---------------- CD data check (streamed and preloaded discs) ----------
 	// Every sector the drive back end sends to the CD controller is compared
-	// with the image's user data (raw bytes 16..2063) at the LBA the BIOS
-	// asked for. The expected LBA is computed here from the READ commands
-	// (one sector per READ or NEXT), not taken from the core.
+	// with the image's user data (raw .bin: bytes 16..2063 of each 2352-byte
+	// sector; ISO: the 2048-byte sector) at the LBA the BIOS asked for. The
+	// expected LBA is computed here from the READ commands (one sector per
+	// READ or NEXT), not taken from the core.
 	int       chk_fd = 0;
+	int       chk_sec_bytes = 2352; // sector size in the image file
+	int       chk_off = 16;         // offset of the user data in a sector
+	int       chk_sectors = 0;      // sectors in the image
 	int       cd_exp_lba = 150;     // absolute LBA of the next sector to arrive
 	int       cd_ref_lba = 0;       // LBA of the sector being received
 	int       cd_widx = 0;
@@ -255,9 +266,9 @@ module tb_boot;
 				cd_ref_lba = cd_exp_lba;
 				cd_exp_lba++;
 				foreach (cd_ref[i]) cd_ref[i] = 8'h00;
-				if (cd_ref_lba < 150 + bin_sectors) begin
+				if (cd_ref_lba < 150 + chk_sectors) begin
 					int n;
-					void'($fseek(chk_fd, longint'(cd_ref_lba - 150) * 2352, 0));
+					void'($fseek(chk_fd, longint'(cd_ref_lba - 150) * chk_sec_bytes, 0));
 					n = $fread(cd_ref, chk_fd);
 				end
 				cd_widx = 0;
@@ -267,7 +278,7 @@ module tb_boot;
 			if (dut.cdd_dten && dut.cdd.CDD_WR) begin
 				if (cd_widx < 1024) begin
 					bit [15:0] e;
-					e = {cd_ref[16 + 2 * cd_widx + 1], cd_ref[16 + 2 * cd_widx]};
+					e = {cd_ref[chk_off + 2 * cd_widx + 1], cd_ref[chk_off + 2 * cd_widx]};
 					cd_ref_sum = cd_ref_sum + e[15:8] + e[7:0];
 					if (dut.cdd.CDD_DATA !== e) begin
 						if (cd_sec_errs < 4)
@@ -417,23 +428,27 @@ module tb_boot;
 	end
 
 	// Stale serial reads: a shift during a read transfer that reads a shift
-	// register word the transfer has not written yet.
+	// register word the transfer has not written yet. The CPU's SPORT
+	// transfers fill a shift register of their own (vram.sv) and are skipped.
 	bit sr_filled [512];
 	int stale_reads = 0, stale_rts = 0, good_reads = 0, stale_kind_clut = 0, stale_kind_vid = 0;
-	bit stale_this_rt, fill_half;
+	bit stale_this_rt, fill_half, stale_cpu_rt = 0;
 	reg sc_old2 = 0;
 	always @(posedge clk_mem) begin
 		sc_old2 <= dut.vram_l.SC;
 		if (dut.vram_l.RT_EXEC && !rt_exec_d) begin
-			foreach (sr_filled[i]) sr_filled[i] = 0;
-			stale_this_rt = 0;
-			fill_half = dut.vram_l.SREG_POS[8];
+			stale_cpu_rt = sh_cpu[0];
+			if (!stale_cpu_rt) begin
+				foreach (sr_filled[i]) sr_filled[i] = 0;
+				stale_this_rt = 0;
+				fill_half = dut.vram_l.SREG_POS[8];
+			end
 		end
-		if (dut.vram_l.SR_WE) begin
+		if (dut.vram_l.SR_WE && !stale_cpu_rt) begin
 			sr_filled[dut.vram_l.SR_WA] = 1;
 			sr_filled[9'(dut.vram_l.SR_WA + 1)] = 1;
 		end
-		if (!dut.vram_l.SC && sc_old2 && dut.vram_l.SOM && dut.vram_l.RT_EXEC && !dut.vram_l.ISTE &&
+		if (!dut.vram_l.SC && sc_old2 && dut.vram_l.SOM && dut.vram_l.RT_EXEC && !dut.vram_l.ISTE && !stale_cpu_rt &&
 		    (!dut.vram_l.SPLIT || dut.vram_l.SR_RA[8] == fill_half)) begin
 			if (dut.p3do.madam.SPORT.CLUT_TRANS_EXEC) stale_kind_clut += !sr_filled[dut.vram_l.SR_RA];
 			else if (dut.p3do.madam.SPORT.VIDEO_TRANS_EXEC) stale_kind_vid += !sr_filled[dut.vram_l.SR_RA];
@@ -526,12 +541,337 @@ module tb_boot;
 	end
 	final $display("tb_boot: SDRAM-tier VRAM writes %0d (%0d latched while ddram.sv was busy), %0d lost, %0d issued with another address's flash-write lookup (%0d with a different flag)",
 	               vw_writes, vw_deferred, vw_lost, vw_fw_wrong, vw_fw_wrong_effect);
+
+	// ---------------- VRAM shadow model ----------------
+	// What the 3DO's VRAM holds by the VRAM bus semantics, per side (0 = L,
+	// bits 31..16; 1 = R, bits 15..0; 16-bit entries at word address
+	// A[17:0], rows of 512), updated from the VRAM modules' own command
+	// decode (vram.sv):
+	//  * random writes: RAS low, WE newly low, byte lanes ~WE_N;
+	//  * flash writes: the whole row <- the side's COLOR register;
+	//  * read transfers: shift register <- row, from the start column to
+	//    the end of the half (split) or of the row;
+	//  * write transfers: row <- shift register (vram.sv ignores the mask).
+	// The CPU's SPORT transfers (MADAM CPU_SPORT_SEL when RAS falls) have a
+	// shift register of their own, the others (video, CLUT/VDL) share one:
+	// a page copy stores the row its read transfer loaded, as on hardware,
+	// where the OS copies during vertical blanking.
+	// BRAM and the SDRAM model both start at zero, and so does the shadow.
+	// Checks (TB errors):
+	//  * every shift-register beat a read transfer gets from the external
+	//    path (vram_rtcache.sv / ddram.sv) equals the shadow row as it was
+	//    when the transfer started;
+	//  * at the end, every SDRAM-tier word as ddram.sv returns it (lazy
+	//    flash fill applied) equals the shadow.
+	// +vram_watch=<row> (hex) logs every event on one VRAM row.
+	bit [15:0] shv [2][1<<18];
+	bit [15:0] shs [2][512];               // video/CLUT shift register
+	bit [15:0] shc [2][512];               // CPU (SPORT) shift register
+	bit        sh_ras_m [2] = '{1, 1};     // RAS_N at the previous clk_mem edge
+	bit        sh_xfer_cpu [2];            // the transfer in progress is the CPU's
+	bit        sh_copy_open [2], sh_copy_hit [2];
+	int        sh_copies = 0, sh_copies_crossed = 0, sh_legacy_mwts = 0;
+	int        sh_rts = 0, sh_mwts = 0, sh_fws = 0, sh_split_mwts = 0;
+	int        sh_rt_bad = 0, sh_beats = 0, sh_beats_bad = 0, sh_mem_bad = 0, sh_mem_checked = 0;
+	int        sh_watch = -1, sh_watch_n = 0;
+	bit [ 8:0] sh_rt_row [2];
+	bit        sh_rt_bad_this [2];
+	realtime   sh_rt_t [2];
+	bit        sh_ras_old [2] = '{1, 1}, sh_we_old [2] = '{1, 1};
+	bit        sh_rt_d [2], sh_mwt_d [2], sh_fw_d [2];
+	// +vram_watch_from=<ms>: log the row's events from then on (the log
+	// stops after 100000 lines); +vram_watch_col=<col> (hex): also log every
+	// write to that column pair (one 64-bit SDRAM beat) of the row from the
+	// start, with the hardware side (ddram.sv, vram_rtcache.sv) of each.
+	realtime   sh_watch_from = 0;
+	int        sh_watch_col = -1, sh_watch_wn = 0;
+	initial begin
+		int ms;
+		if ($value$plusargs("vram_watch=%h", sh_watch))
+			$display("tb_boot: logging VRAM row %03h (VRAM +%05h)", sh_watch, sh_watch * 2048);
+		if ($value$plusargs("vram_watch_from=%d", ms)) begin
+			sh_watch_from = ms * 1ms;
+			$display("tb_boot: logging the row from %0d ms", ms);
+		end
+		if ($value$plusargs("vram_watch_col=%h", sh_watch_col))
+			$display("tb_boot: logging writes to columns %03h-%03h of the row from the start",
+			         sh_watch_col & 'h1fe, sh_watch_col | 1);
+	end
+
+	function automatic bit sh_watched(input [8:0] row);
+		if (sh_watch < 0 || row != 9'(sh_watch) || $realtime < sh_watch_from || sh_watch_n >= 100000) return 0;
+		sh_watch_n++;
+		return 1;
+	endfunction
+
+	// a write to the watched column pair (logged whatever the time)
+	function automatic bit sh_watched_word(input [8:0] row, input [8:0] col);
+		if (sh_watch < 0 || sh_watch_col < 0 || row != 9'(sh_watch) || col[8:1] != 8'(sh_watch_col >> 1)) return 0;
+		if ($realtime >= sh_watch_from) return sh_watched(row);
+		if (sh_watch_wn >= 100000) return 0;
+		sh_watch_wn++;
+		return 1;
+	endfunction
+
+	task automatic sh_write(input int s, input [17:0] a, input [15:0] d, input [1:0] we_n);
+		if (!we_n[1]) shv[s][a][15:8] = d[15:8];
+		if (!we_n[0]) shv[s][a][ 7:0] = d[ 7:0];
+		if (sh_watched_word(a[17:9], a[8:0]) || sh_watched(a[17:9]))
+			$display("[%0t] VRAM row %03h: %s write %05h <= %04h (lanes %b)", $realtime, a[17:9], s ? "R" : "L", a, d, ~we_n);
+	endtask
+
+	task automatic sh_rt_start(input int s, input [8:0] row, input [8:0] pos, input bit split);
+		bit [8:0] last;
+		last = split ? {pos[8], 8'hFF} : 9'h1FF;
+		sh_xfer_cpu[s] = sh_cpu[s];
+		if (sh_cpu[s]) begin
+			for (int i = pos; i <= last; i++) shc[s][i] = shv[s][{row, 9'(i)}];
+			sh_copy_open[s] = 1;
+			sh_copy_hit[s] = 0;
+		end else begin
+			for (int i = pos; i <= last; i++) shs[s][i] = shv[s][{row, 9'(i)}];
+			if (sh_copy_open[s]) sh_copy_hit[s] = 1;   // inside a copy
+		end
+		sh_rts++;
+		sh_rt_row[s] = row;
+		sh_rt_bad_this[s] = 0;
+		sh_rt_t[s] = $realtime;
+		if (sh_watched(row))
+			$display("[%0t] VRAM row %03h: %s %s read transfer from column %03h, split %b (first words %04h %04h)",
+			         $realtime, row, s ? "R" : "L", sh_cpu[s] ? "CPU" : "video", pos, split,
+			         shv[s][{row, pos}], shv[s][{row, 9'(pos + 1)}]);
+	endtask
+
+	task automatic sh_rt_beat(input int s, input [8:0] wa, input [31:0] wd);
+		bit [31:0] e;
+		e = sh_xfer_cpu[s] ? {shc[s][wa], shc[s][9'(wa + 1)]} : {shs[s][wa], shs[s][9'(wa + 1)]};
+		sh_beats++;
+		if (sh_watch_col >= 0 && wa[8:1] == 8'(sh_watch_col >> 1) && sh_watched(sh_rt_row[s]))
+			$display("[%0t] VRAM row %03h: %s beat at column %03h: %08h (shadow %08h)", $realtime, sh_rt_row[s], s ? "R" : "L", wa, wd, e);
+		if (wd == e) return;
+		sh_beats_bad++;
+		if (sh_rt_bad_this[s]) return;
+		sh_rt_bad_this[s] = 1;
+		sh_rt_bad++;
+		errors++;
+		if (sh_rt_bad <= 20 || sh_watched(sh_rt_row[s]))
+			$display("[%0t] TB ERROR: %s read transfer of VRAM row %03h delivered %08h at column %03h, VRAM holds %08h (%0.2f us after the transfer started)",
+			         $realtime, s ? "R" : "L", sh_rt_row[s], wd, wa, e, ($realtime - sh_rt_t[s]) / 1000.0);
+	endtask
+
+	task automatic sh_mwt_start(input int s, input [8:0] row, input bit split);
+		if (sh_cpu[s]) begin
+			for (int i = 0; i < 512; i++) shv[s][{row, 9'(i)}] = shc[s][i];
+			if (s == 0) begin
+				sh_copies++;
+				if (sh_copy_hit[0]) sh_copies_crossed++;
+			end
+			sh_copy_hit[s] = 0;
+		end else begin
+			for (int i = 0; i < 512; i++) shv[s][{row, 9'(i)}] = shs[s][i];
+			sh_legacy_mwts++;
+		end
+		sh_mwts++;
+		if (split) sh_split_mwts++;
+		if (sh_watched_word(row, 9'(sh_watch_col)) || sh_watched(row))
+			$display("[%0t] VRAM row %03h: %s %s write transfer (last read transfer: row %03h), split %b (first words %04h %04h)",
+			         $realtime, row, s ? "R" : "L", sh_cpu[s] ? "CPU" : "video", sh_rt_row[s], split,
+			         shv[s][{row, 9'h000}], shv[s][{row, 9'h001}]);
+	endtask
+
+	task automatic sh_fw_start(input int s, input [8:0] row, input [15:0] color);
+		for (int i = 0; i < 512; i++) shv[s][{row, 9'(i)}] = color;
+		sh_fws++;
+		if (sh_watched_word(row, 9'(sh_watch_col)) || sh_watched(row))
+			$display("[%0t] VRAM row %03h: %s flash write %04h", $realtime, row, s ? "R" : "L", color);
+	endtask
+
+	`define SH_SIDE(S, M) \
+	always @(posedge clk_sys) begin \
+		if (!dut.M.RAS_N && !sh_ras_old[S] && sh_we_old[S] && dut.M.WE_N != 2'b11) \
+			sh_write(S, dut.M.A, dut.M.D, dut.M.WE_N); \
+		sh_ras_old[S] <= dut.M.RAS_N; \
+		sh_we_old[S]  <= &dut.M.WE_N; \
+	end \
+	always @(posedge clk_mem) begin \
+		if (!dut.M.RAS_N && sh_ras_m[S]) sh_cpu[S] = dut.p3do.madam.CPU_SPORT_SEL; \
+		sh_ras_m[S] <= dut.M.RAS_N; \
+		if (dut.M.RT_EXEC && !sh_rt_d[S]) sh_rt_start(S, dut.M.MEM_ROW, dut.M.SREG_POS, dut.M.SPLIT); \
+		if (dut.M.MWT_EXEC && !sh_mwt_d[S]) sh_mwt_start(S, dut.M.MEM_ROW, dut.M.SPLIT); \
+		if (dut.M.FW_EXEC && !sh_fw_d[S]) sh_fw_start(S, dut.M.MEM_ROW, dut.M.COLOR); \
+		if (dut.M.SR_WE && !dut.M.ISTE_DELAYED) sh_rt_beat(S, dut.M.SR_WA, dut.M.SR_WD); \
+		sh_rt_d[S]  <= dut.M.RT_EXEC; \
+		sh_mwt_d[S] <= dut.M.MWT_EXEC; \
+		sh_fw_d[S]  <= dut.M.FW_EXEC; \
+	end
+	`SH_SIDE(0, vram_l)
+	`SH_SIDE(1, vram_r)
+	`undef SH_SIDE
+
+	// vram.sv skips a split read transfer of the half-row the video shift
+	// register holds (MiSTer core; real VRAM always reloads). Counted, with
+	// those where the half-row has changed since it was loaded, so the
+	// serial output differs from real VRAM's, and the reloads forced by a
+	// CPU copy into the held row (Game Bub port).
+	int        sk_skips = 0, sk_stale = 0, sk_copy_inv = 0;
+	bit        sk_ras_m = 1, sk_rdy_m = 1, sk_vsrv_d = 0;
+	always @(posedge clk_mem) begin
+		// vram.sv decodes a command when RAS falls, or when RDY rises for one
+		// that came during a transfer
+		if (((!dut.vram_l.RAS_N && sk_ras_m) || (dut.vram_l.RDY && !sk_rdy_m)) &&
+		    !(dut.vram_l.RT_EXEC || dut.vram_l.MWT_EXEC || dut.vram_l.FW_EXEC) &&
+		    !dut.vram_l.OE_N && dut.vram_l.WE_N != 2'b00 && dut.vram_l.DSF1 && !dut.p3do.madam.CPU_SPORT_SEL &&
+		    dut.vram_l.VSR_V && dut.vram_l.VSR_TAG == dut.vram_l.A[17:8]) begin
+			bit d;
+			d = 0;
+			for (int i = 0; i < 256; i++)
+				if (shs[0][{dut.vram_l.A[8], 8'(i)}] != shv[0][{dut.vram_l.A[17:8], 8'(i)}] ||
+				    shs[1][{dut.vram_r.A[8], 8'(i)}] != shv[1][{dut.vram_r.A[17:8], 8'(i)}]) d = 1;
+			sk_skips++;
+			if (d) sk_stale++;
+		end
+		if (sk_vsrv_d && !dut.vram_l.VSR_V) sk_copy_inv++;
+		sk_ras_m  <= dut.vram_l.RAS_N;
+		sk_rdy_m  <= dut.vram_l.RDY;
+		sk_vsrv_d <= dut.vram_l.VSR_V;
+	end
+	final $display("tb_boot: split read transfers skipped (half-row already in the video shift register): %0d, %0d of them after it changed in VRAM; reloads forced by a CPU copy into that row: %0d",
+	               sk_skips, sk_stale, sk_copy_inv);
+
+	// +vram_watch with +vram_watch_col: the watched column pair as stored,
+	// i.e. its 64-bit beat in SDRAM bank 2 (L(w) at halfword 2w, R(w) at
+	// 2w+1), its lazy flash-fill flag and its row's colour. Every change is
+	// logged with what the SDRAM's secondary port and ddram.sv are doing, so
+	// a write from any path shows up, whatever address it was meant for.
+	bit [15:0] st_hw [4];
+	bit        st_flag;
+	bit [31:0] st_color;
+	bit        st_init = 0;
+	always @(posedge clk_mem) if (sh_watch >= 0 && sh_watch_col >= 0) begin
+		bit [17:0] w;
+		bit [15:0] v;
+		w = {9'(sh_watch), 9'(sh_watch_col & 'h1fe)};
+		for (int i = 0; i < 4; i++) begin
+			v = sdram.peek({2'd2, 22'(w * 2 + i)});
+			if (st_init && v != st_hw[i])
+				$display("[%0t]   SDRAM: %s(%05h) %04h -> %04h; port: req %b we %b client %0d addr %06h; bridge state %0d; ddram.sv state %0d ram_address %06h write %b burst %0d",
+				         $realtime, i[0] ? "R" : "L", w + (i >> 1), st_hw[i], v, dut.m_req, dut.m_we, dut.arb.sel, dut.m_addr,
+				         dut.ddr_bridge.st, dut.ddram.state, {dut.ddram.ram_address[27:1], 1'b0}, dut.ddram.ram_write, dut.ddram.ram_burst);
+			st_hw[i] = v;
+		end
+		if (st_init && fw_flag(w[17:1]) != st_flag)
+			$display("[%0t]   flash-fill flag of %05h %b -> %b; bfw %b bladdr %05h, fill issue %b, vram_fw ADDR1 %05h WREN1 %b",
+			         $realtime, w, st_flag, fw_flag(w[17:1]), dut.ddram.bfw, dut.ddram.bladdr, dut.rtcache.fill_issue,
+			         {dut.ddram.vram_fw.ADDR1, 1'b0}, dut.ddram.vram_fw.WREN1);
+		st_flag = fw_flag(w[17:1]);
+		if (st_init && dut.ddram.vram_color.mem[w[17:9]] != st_color)
+			$display("[%0t]   colour of row %03h %08h -> %08h; bfw %b bladdr %05h, fill issue %b",
+			         $realtime, w[17:9], st_color, dut.ddram.vram_color.mem[w[17:9]], dut.ddram.bfw, dut.ddram.bladdr, dut.rtcache.fill_issue);
+		st_color = dut.ddram.vram_color.mem[w[17:9]];
+		st_init = 1;
+	end
+
+	// +vram_watch, hardware side: what ddram.sv and vram_rtcache.sv do with
+	// the watched row (random writes taken and issued, flash writes, cache
+	// requests, fills and invalidations)
+	bit        hw_old_lwe, hw_old_rwe, hw_old_lras, hw_old_rras, hw_issued_d, hw_fill_busy_d;
+	bit        hw_req_d [2];
+	bit [ 9:0] hw_req_h [2];
+	always @(posedge clk_mem) if (sh_watch >= 0) begin
+		bit lw, rw, issued;
+		bit [8:0] row;
+		row = 9'(sh_watch);
+		lw = |dut.ddram.lwe && !hw_old_lwe && dut.ddram.lras && hw_old_lras;
+		rw = |dut.ddram.rwe && !hw_old_rwe && dut.ddram.rras && hw_old_rras;
+		if (lw && (sh_watched_word(dut.ddram.laddr[19:11], dut.ddram.laddr[10:2]) || sh_watched(dut.ddram.laddr[19:11])))
+			$display("[%0t]   ddram.sv takes L write %05h <= %04h (lanes %b), state %0d, DDRAM busy %b, writes pending %b%b",
+			         $realtime, dut.ddram.laddr, dut.ddram.ldin, dut.ddram.lwe, dut.ddram.state, dut.ddram.DDRAM_BUSY,
+			         dut.ddram.write_lpend, dut.ddram.write_rpend);
+		if (rw && (sh_watched_word(dut.ddram.raddr[19:11], dut.ddram.raddr[10:2]) || sh_watched(dut.ddram.raddr[19:11])))
+			$display("[%0t]   ddram.sv takes R write %05h <= %04h (lanes %b), state %0d, DDRAM busy %b, writes pending %b%b",
+			         $realtime, dut.ddram.raddr, dut.ddram.rdin, dut.ddram.rwe, dut.ddram.state, dut.ddram.DDRAM_BUSY,
+			         dut.ddram.write_lpend, dut.ddram.write_rpend);
+		issued = dut.ddram.state == 6 && dut.ddram.ram_write;
+		if (issued && !hw_issued_d && dut.ddram.ram_address[27:20] == '0 &&
+		    (sh_watched_word(dut.ddram.ram_address[19:11], {dut.ddram.ram_address[10:3], 1'b0}) || sh_watched(dut.ddram.ram_address[19:11])))
+			$display("[%0t]   ddram.sv issues the write of %05h: data %016h, byte enables %08b, flash flag was %b",
+			         $realtime, {dut.ddram.ram_address[19:3], 1'b0}, dut.ddram.ram_din, dut.ddram.ram_ba, dut.ddram.vram_fw_bwr);
+		if (dut.ddram.bfw && dut.ddram.bladdr[19:11] == row && sh_watched(row))
+			$display("[%0t]   ddram.sv flash write %05h, colour %08h", $realtime, dut.ddram.bladdr, dut.ddram.bin[31:0]);
+		// cache requests (registered), and whether they hit (next cycle)
+		for (int s = 0; s < 2; s++) begin
+			if (hw_req_d[s] && sh_watched(row))
+				$display("[%0t]   RT cache: %s request for half-row %03h %s", $realtime, s ? "R" : "L", hw_req_h[s],
+				         dut.rtcache.dem_pend[s] ? "missed" : $sformatf("hit entry %0d (dirty %b)", dut.rtcache.dl_e[s], dut.rtcache.dirty[dut.rtcache.dl_e[s]]));
+			hw_req_d[s] = dut.rtcache.req_v[s] && dut.rtcache.req_a[s][17:9] == row;
+			hw_req_h[s] = dut.rtcache.req_a[s][17:8];
+		end
+		if (dut.rtcache.fill_issue && dut.rtcache.fill_h[9:1] == row && sh_watched(row))
+			$display("[%0t]   RT cache: fill of half-row %03h into entry %0d", $realtime, dut.rtcache.fill_h, dut.rtcache.fill_e);
+		if (hw_fill_busy_d && !dut.rtcache.fill_busy && dut.rtcache.fill_h[9:1] == row && sh_watched(row))
+			$display("[%0t]   RT cache: fill of half-row %03h done, dirty %b", $realtime, dut.rtcache.fill_h, dut.rtcache.dirty[dut.rtcache.fill_e]);
+		for (int i = 0; i < 16; i++)
+			if (dut.rtcache.snoop_hit[i] && dut.rtcache.tag[i][9:1] == row && sh_watched(row))
+				$display("[%0t]   RT cache: entry %0d (half-row %03h) %s by a %s, %s", $realtime, i, dut.rtcache.tag[i],
+				         dut.rtcache.fill_busy && dut.rtcache.fill_e == 4'(i) ? "marked dirty" : "invalidated",
+				         dut.rtcache.sn_fw ? "flash write" : $sformatf("DDRAM write to half-row %03h", dut.rtcache.sn_h),
+				         dut.rtcache.fill_busy && dut.rtcache.fill_e == 4'(i) ? "while filling" : "idle");
+		hw_issued_d    <= issued;
+		hw_fill_busy_d <= dut.rtcache.fill_busy;
+		hw_old_lwe <= |dut.ddram.lwe;  hw_old_lras <= dut.ddram.lras;
+		hw_old_rwe <= |dut.ddram.rwe;  hw_old_rras <= dut.ddram.rras;
+	end
+
+	// on-chip VRAM (vram.sv USE_INT_RAM1; this port has no BRAM4/BRAM2)
+	function automatic bit vram_internal(input [17:0] w);
+		bit [3:0] b1;
+		b1 = dut.BRAM1_OFFS;
+		return (w >= ({b1, 16'h0000} >> 2) && w <= ({b1, 16'hBFFF} >> 2)) || w >= (20'hFC000 >> 2);
+	endfunction
+
+	// SDRAM-tier VRAM word w as ddram.sv returns it: a beat whose lazy
+	// flash-fill flag is set reads as its row's colour {L, R}.
+	function automatic [31:0] vram_visible(input [17:0] w);
+		if (fw_flag(w[17:1])) return dut.ddram.vram_color.mem[w[17:9]];
+		return {sdram.peek({2'd2, 22'(w * 2)}), sdram.peek({2'd2, 22'(w * 2 + 1)})};
+	endfunction
+
+	task automatic sh_check_memory();
+		int rows_bad [512];
+		string r = "";
+		int nrows = 0;
+		for (int w = 0; w < (1 << 18); w++) begin
+			bit [31:0] v, e;
+			if (vram_internal(18'(w))) continue;
+			v = vram_visible(18'(w));
+			e = {shv[0][w], shv[1][w]};
+			sh_mem_checked++;
+			if (v == e) continue;
+			if (sh_mem_bad < 10)
+				$display("tb_boot: VRAM +%05h (row %03h) holds %08h, the 3DO wrote %08h", w * 4, w >> 9, v, e);
+			sh_mem_bad++;
+			rows_bad[w >> 9]++;
+		end
+		foreach (rows_bad[i]) if (rows_bad[i] != 0) begin
+			nrows++;
+			if (nrows <= 16) r = {r, $sformatf(" %03h:%0d", i, rows_bad[i])};
+		end
+		if (sh_mem_bad != 0) begin
+			errors++;
+			$display("tb_boot: TB ERROR: %0d SDRAM-tier VRAM words differ from what the 3DO wrote, in %0d rows (row:words)%s",
+			         sh_mem_bad, nrows, r);
+		end
+		$display("tb_boot: VRAM shadow: %0d read transfers, %0d external beats checked (%0d transfers delivered wrong data, %0d beats), %0d write transfers (%0d split, %0d not the CPU's), %0d flash writes; SDRAM-tier VRAM words differing at the end: %0d of %0d",
+		         sh_rts, sh_beats, sh_rt_bad, sh_beats_bad, sh_mwts, sh_split_mwts, sh_legacy_mwts, sh_fws, sh_mem_bad, sh_mem_checked);
+		$display("tb_boot: SPORT page copies (CPU write transfers) %0d, %0d of them with a video/CLUT transfer between their read and write transfer",
+		         sh_copies, sh_copies_crossed);
+	endtask
 	// where CLUT/VDL and video transfers point (64 KiB VRAM blocks)
 	int blk_clut [16], blk_vid [16];
 	reg clut_d = 0, vid_d = 0;
 	bit [3:0] last_rt_blk;
 	always @(posedge clk_mem) begin
-		if (dut.vram_l.RT_EXEC && !rt_exec_d) last_rt_blk = dut.vram_l.MEM_ROW[8:5];
+		if (dut.vram_l.RT_EXEC && !rt_exec_d && !sh_cpu[0]) last_rt_blk = dut.vram_l.MEM_ROW[8:5];
 		clut_d <= dut.p3do.madam.SPORT.CLUT_TRANS_EXEC;
 		vid_d  <= dut.p3do.madam.SPORT.VIDEO_TRANS_EXEC;
 		if (dut.p3do.madam.SPORT.CLUT_TRANS_EXEC && !clut_d) blk_clut[last_rt_blk]++;
@@ -593,18 +933,23 @@ module tb_boot;
 	// and reported separately.
 	bit lt_req_d = 0, lt_exec_d = 0, lt_rtl_d = 0, lt_rtr_d = 0, lt_l = 0, lt_r = 0, lt_armed = 0, lt_paused = 0;
 	int late_lines = 0, late_arb = 0, video_lines = 0;
+	int late_per_s [64];   // late lines with the 3DO paused, per second of 3DO time
 	always @(posedge clk_mem) begin
 		if (dut.reset_3do) lt_armed = 0;
 		else begin
 			if (dut.p3do.madam.SPORT.VIDOUT_REQ && !lt_req_d) begin lt_l = 0; lt_r = 0; lt_armed = 1; lt_paused = 0; end
 			if (dut.pause) lt_paused = 1;
-			if (dut.vram_l.RT_REQ && !lt_rtl_d) lt_l = 1;
-			if (dut.vram_r.RT_REQ && !lt_rtr_d) lt_r = 1;
+			// the CPU's SPORT transfers (page copies) have their own shift
+			// register and do not load the line
+			if (dut.vram_l.RT_REQ && !lt_rtl_d && !dut.vram_l.XFER_CPU) lt_l = 1;
+			if (dut.vram_r.RT_REQ && !lt_rtr_d && !dut.vram_r.XFER_CPU) lt_r = 1;
 			if (dut.p3do.madam.SPORT.VIDEO_TRANS_EXEC && !lt_exec_d && lt_armed) begin
 				video_lines++;
 				if ((!lt_l || !lt_r) && lt_paused) begin
 					late_lines++;
 					errors++;
+					// int'() of a real rounds: truncate to the second the line is in
+					late_per_s[$realtime < 63s ? int'($floor($realtime / 1s)) : 63]++;
 					if (late_lines <= 10)
 						$display("[%0t] TB ERROR: video line %0d started before its read transfer (left %b right %b), 3DO paused",
 						         $realtime, dut.p3do.madam.SPORT.VCOUNT, lt_l, lt_r);
@@ -621,8 +966,13 @@ module tb_boot;
 		lt_rtl_d <= dut.vram_l.RT_REQ;
 		lt_rtr_d <= dut.vram_r.RT_REQ;
 	end
-	final $display("tb_boot: video lines %0d, started before their read transfer: %0d with the 3DO paused (errors), %0d by MADAM's bus arbitration",
-	               video_lines, late_lines, late_arb);
+	final begin
+		string t = "";
+		$display("tb_boot: video lines %0d, started before their read transfer: %0d with the 3DO paused (errors), %0d by MADAM's bus arbitration",
+		         video_lines, late_lines, late_arb);
+		foreach (late_per_s[i]) if (late_per_s[i] != 0) t = {t, $sformatf(" %0d:%0d", i, late_per_s[i])};
+		if (late_lines != 0) $display("tb_boot:   late lines with the 3DO paused, per second of 3DO time (s:lines, s = s to s+1 s):%s", t);
+	end
 
 	// Video DMA sequence (+sport_ms=<start>, one frame): MADAM_SPORT's VDL
 	// (CLUT) and video transfer requests, their bus grants, the VRAM read
@@ -783,11 +1133,8 @@ module tb_boot;
 	// the on-chip BRAM1 block are read from the VRAM_MEM lanes, the rest from
 	// the SDRAM bank-2 overflow area (ddram.sv layout: natural word order).
 	function automatic [31:0] vram_word(input [17:0] w);
-		bit [3:0] b1;
-		b1 = dut.BRAM1_OFFS;
-		if ((w >= {b1, 14'h0} >> 2 << 2 && w < (({b1, 16'h0} + 32'hC000) >> 2)) || w >= (20'hFC000 >> 2))
-			return 32'hDEADBEEF;   // on-chip block: not dumped
-		return {sdram.peek({2'd2, 22'(w * 2)}), sdram.peek({2'd2, 22'(w * 2 + 1)})};
+		if (vram_internal(w)) return 32'hDEADBEEF;   // on-chip block: not dumped
+		return vram_visible(w);
 	endfunction
 
 	// 320x240 16-bit 3DO framebuffer in "LR form": word (x, line pair k) holds
@@ -829,10 +1176,15 @@ module tb_boot;
 			void'($fseek(bin_fd, 0, 2));
 			bin_sectors = $ftell(bin_fd) / 2352;
 			chk_fd = $fopen(iso, "rb");
+			chk_sectors = bin_sectors;
 			$display("tb_boot: streaming %s (%0d raw sectors), firmware latency %0d us", iso, bin_sectors, disc_latency_us);
 		end else if ($value$plusargs("iso=%s", iso)) begin
 			place_file(iso, 1, 23'h0, iso_len);
 			$display("tb_boot: ISO %s (%0d bytes, %0d sectors) placed", iso, iso_len, iso_len / 2048);
+			chk_fd = $fopen(iso, "rb");
+			chk_sec_bytes = 2048;
+			chk_off = 0;
+			chk_sectors = iso_len / 2048;
 		end
 
 		repeat (20) @(posedge clk_sys);
@@ -861,6 +1213,7 @@ module tb_boot;
 
 		#(run_ms * 1ms);
 		dump_vram_fb(32'h000000, 1638, {outdir, "/frames/vram_all.ppm"});
+		sh_check_memory();
 		$display("tb_boot: %0d frames, %0d CD sectors (%0d served by the firmware model), SDRAM model errors %0d, TB errors %0d",
 		         frames, sectors_sent, served, sdram.errors, errors);
 		if (chk_fd != 0)

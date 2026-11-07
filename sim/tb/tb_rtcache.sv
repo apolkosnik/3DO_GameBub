@@ -5,7 +5,13 @@
 // bus-functional model drives the VRAM pins the way MADAM does for:
 //   * read transfers (RT, full and split) followed by serial read-out (SC/SQ)
 //   * random CPU writes (ddram.sv's posted write port)
-//   * write transfers (MWT, shift register -> row: SPORT row copy)
+//   * write transfers (MWT, shift register -> row: SPORT row copy); the
+//     CPU's copies (SP_CPU, MADAM's SPORT space) use their own shift
+//     register, so video transfers and serial read-out between a copy's
+//     read and write transfer must not change what the copy stores, and the
+//     copy must not change what the video read-out shows, and a copy into the
+//     row the video shift register holds must reach its next split transfer
+//     (phase 5)
 //   * flash writes (FW, colour register -> whole row)
 //   * CEL-engine framebuffer writes (phase 9): one per MCLK, stopped only by
 //     the core's PAUSE (ddram.sv busy, registered at CE_F), into flash-filled
@@ -32,6 +38,7 @@ module tb_rtcache;
 	reg  [17:0] A = 0;
 	reg  [15:0] DL = 0, DR = 0;
 	reg         RAS_N = 1, CAS_N = 1, OE_N = 1, DSF1 = 0, SC = 0;
+	reg         SP_CPU = 0;    // the access is the CPU's SPORT access (MADAM CPU_SPORT_SEL)
 	reg  [ 1:0] WE_N = 2'b11;
 	wire [15:0] SQL, SQR;
 	wire        RDYL, RDYR;
@@ -47,7 +54,7 @@ module tb_rtcache;
 		.SC(SC), .SE_N(1'b0), .SQ(SQL), .QSF(), .RDY(RDYL),
 		.EQ(16'h0), .ESADDR(v_laddr), .ESDATA(bldata), .ESWR(v_lwr), .ESRD(v_lrd), .ESFW(v_lfw),
 		.ESQ(v_lq), .ESTE(v_lte),
-		.BRAM4_OFFS(4'h0), .BRAM2_OFFS(4'h4), .BRAM1_OFFS(BRAM1_OFFS), .DBG_WAIT_CNT()
+		.BRAM4_OFFS(4'h0), .BRAM2_OFFS(4'h4), .BRAM1_OFFS(BRAM1_OFFS), .SP_CPU(SP_CPU), .DBG_WAIT_CNT()
 	);
 	P3DO_VRAM #(0) vram_r (
 		.CLK(clk_sys), .CLK_MEM(clk_mem), .RST_N(~rst),
@@ -55,7 +62,7 @@ module tb_rtcache;
 		.SC(SC), .SE_N(1'b0), .SQ(SQR), .QSF(), .RDY(RDYR),
 		.EQ(16'h0), .ESADDR(v_raddr), .ESDATA(brdata), .ESWR(v_rwr), .ESRD(v_rrd), .ESFW(),
 		.ESQ(v_rq), .ESTE(v_rte),
-		.BRAM4_OFFS(4'h0), .BRAM2_OFFS(4'h4), .BRAM1_OFFS(BRAM1_OFFS), .DBG_WAIT_CNT()
+		.BRAM4_OFFS(4'h0), .BRAM2_OFFS(4'h4), .BRAM1_OFFS(BRAM1_OFFS), .SP_CPU(SP_CPU), .DBG_WAIT_CNT()
 	);
 
 	// ---------------- cache + ddram.sv ----------------
@@ -151,7 +158,9 @@ module tb_rtcache;
 	// ---------------- reference model ----------------
 	bit [15:0] ref_l [bit [17:0]];
 	bit [15:0] ref_r [bit [17:0]];
-	bit [15:0] sr_l [512], sr_r [512];     // expected shift register contents
+	bit [15:0] sr_l [512], sr_r [512];     // expected shift register contents (video)
+	bit [15:0] sc_l [512], sc_r [512];     // expected CPU (SPORT copy) shift register contents
+	int        sq_pos;                     // serial read-out position after rt_read/sq_read
 	function automatic [15:0] rl(input [17:0] a); return ref_l.exists(a) ? ref_l[a] : 16'h0; endfunction
 	function automatic [15:0] rr(input [17:0] a); return ref_r.exists(a) ? ref_r[a] : 16'h0; endfunction
 
@@ -194,31 +203,35 @@ module tb_rtcache;
 	// Read transfer of row/column a (full or split) and serial read-out of
 	// 'n' words starting at the shift register position the transfer sets.
 	task automatic rt_read(input [17:0] a, input bit split, input int n);
-		int pos;
 		ras_cycle(a, 0, 2'b11, split);
 		ras_end();
 		wait_idle();
 		// expected shift register contents after the transfer
 		if (!split) begin
 			for (int i = a[8:1] * 2; i < 512; i++) begin sr_l[i] = rl({a[17:9], 9'(i)}); sr_r[i] = rr({a[17:9], 9'(i)}); end
-			pos = a[8:0];
+			sq_pos = a[8:0];
 		end else begin
 			for (int i = 0; i < 256; i++) begin
 				sr_l[{a[8], 8'(i)}] = rl({a[17:8], 8'(i)});
 				sr_r[{a[8], 8'(i)}] = rr({a[17:8], 8'(i)});
 			end
-			pos = vram_l.SR_RA;
+			sq_pos = vram_l.SR_RA;
 		end
+		sq_read(n, $sformatf("RT %05h%s", a, split ? " split" : ""));
+	endtask
+
+	// serial read-out of 'n' more words of the video shift register
+	task automatic sq_read(input int n, input string what = "read-out");
 		for (int k = 0; k < n; k++) begin
 			@(posedge clk_mem); SC <= 1;
 			mem_cycles(3);
 			@(posedge clk_mem); SC <= 0;
 			mem_cycles(3);
 			checks++;
-			if (SQL !== sr_l[pos] || SQR !== sr_r[pos])
-				fail($sformatf("RT %05h%s word %03h: got %04h/%04h expected %04h/%04h", a, split ? " split" : "", pos,
-				               SQL, SQR, sr_l[pos], sr_r[pos]));
-			pos = (pos + 1) % 512;
+			if (SQL !== sr_l[sq_pos] || SQR !== sr_r[sq_pos])
+				fail($sformatf("%s word %03h: got %04h/%04h expected %04h/%04h", what, sq_pos,
+				               SQL, SQR, sr_l[sq_pos], sr_r[sq_pos]));
+			sq_pos = (sq_pos + 1) % 512;
 		end
 	endtask
 
@@ -242,6 +255,25 @@ module tb_rtcache;
 		ras_end();
 		wait_idle();
 		for (int i = 0; i < 512; i++) begin ref_l[{row, 9'(i)}] = sr_l[i]; ref_r[{row, 9'(i)}] = sr_r[i]; end
+	endtask
+
+	// The CPU's SPORT read transfer (MADAM: SPORT space read, column 0, full
+	// row) into the CPU shift register, and its write transfer from it
+	task automatic cpu_rt(input [8:0] row);
+		@(posedge clk_mem); SP_CPU <= 1;
+		ras_cycle({row, 9'h0}, 0, 2'b11, 0);
+		ras_end();
+		SP_CPU <= 0;
+		wait_idle();
+		for (int i = 0; i < 512; i++) begin sc_l[i] = rl({row, 9'(i)}); sc_r[i] = rr({row, 9'(i)}); end
+	endtask
+	task automatic cpu_mwt(input [8:0] row);
+		@(posedge clk_mem); SP_CPU <= 1;
+		ras_cycle({row, 9'h0}, 0, 2'b00, 0);
+		ras_end();
+		SP_CPU <= 0;
+		wait_idle();
+		for (int i = 0; i < 512; i++) begin ref_l[{row, 9'(i)}] = sc_l[i]; ref_r[{row, 9'(i)}] = sc_r[i]; end
 	endtask
 
 	// FW: load the colour registers, flash-write row 'row'
@@ -375,6 +407,12 @@ module tb_rtcache;
 	longint trace_from = -1;
 	bit dl_act_d [2];
 	always @(posedge clk_mem) begin dl_act_d[0] <= cache.dl_act[0]; dl_act_d[1] <= cache.dl_act[1]; end
+
+	// read transfers the left VRAM module executes (a skipped split transfer
+	// does not start one)
+	int  n_rt_l = 0;
+	bit  rt_l_d = 0;
+	always @(posedge clk_mem) begin rt_l_d <= vram_l.RT_EXEC; if (vram_l.RT_EXEC && !rt_l_d) n_rt_l++; end
 	initial void'($value$plusargs("rtc_trace=%d", trace_from));
 	always @(posedge clk_mem) if (trace_from >= 0 && $realtime >= trace_from) begin
 		for (int s = 0; s < 2; s++) if (cache.req_v[s])
@@ -424,16 +462,44 @@ module tb_rtcache;
 		end
 		$display("[%0t] phase 4: after CPU writes, errors=%0d (invalidations %0d)", $realtime, errors, st_inv);
 
-		// 5) SPORT copy (RT row a, MWT into cached row b), read b
+		// 5) SPORT copy: the CPU's read transfer of row a, then its write
+		//    transfer into cached row b. Between them, as when a copy runs
+		//    into the picture, video transfers of other rows with serial
+		//    read-out: b must get row a, and the video read-out must go on
+		//    with its own row across both of the copy's transfers. Then b
+		//    is read back. Also the legacy path (a write transfer that is not
+		//    the CPU's stores the video shift register).
 		for (int k = 0; k < 4; k++) begin
 			int inv0;
 			rt_read({rows[k + 4], 9'h0}, 0, 512);       // destination row now cached
-			rt_read({rows[k], 9'h0}, 0, 0);             // load the source into the shift register
+			rt_read({rows[(k + 1) % 4], 9'h0}, 0, 16);  // video: row c, 16 words out
+			cpu_rt(rows[k]);                            // copy source -> CPU shift register
+			sq_read(16, "video read-out after the CPU's read transfer");
+			rt_read({rows[(k + 2) % 4], 9'h0}, 0, 16);  // another video transfer inside the copy
 			if (!cache.find({rows[k + 4], 1'b0})[4]) fail("MWT destination not cached before the copy");
 			inv0 = st_inv;
-			mwt(rows[k + 4]);
+			cpu_mwt(rows[k + 4]);
 			if (st_inv == inv0) fail("MWT into a cached row did not invalidate it");
+			sq_read(16, "video read-out after the CPU's write transfer");
 			rt_read({rows[k + 4], 9'h0}, 0, 512);
+		end
+		for (int k = 0; k < 2; k++) begin
+			rt_read({rows[k + 2], 9'h0}, 0, 0);         // legacy: video shift register
+			mwt(rows[k + 6]);
+			rt_read({rows[k + 6], 9'h0}, 0, 512);
+		end
+		// A split transfer of the half-row the video shift register holds is
+		// skipped (MiSTer core). A copy into that row must not leave the old
+		// data there: the next split transfer of the half shows the copy.
+		for (int k = 0; k < 2; k++) begin
+			int n0;
+			rt_read({rows[k + 4], 9'h000}, 0, 16);      // video register <- row d
+			n0 = n_rt_l;
+			rt_read({rows[k + 4], 9'h000}, 1, 16);      // split, same half
+			if (n_rt_l != n0) fail("split transfer of the half the video shift register holds was not skipped");
+			cpu_rt(rows[k + 2]);                        // copy another row into d
+			cpu_mwt(rows[k + 4]);
+			rt_read({rows[k + 4], 9'h000}, 1, 64);      // split, same half: the copied data
 		end
 		$display("[%0t] phase 5: MWT copies, errors=%0d (invalidations %0d)", $realtime, errors, st_inv);
 
@@ -465,11 +531,16 @@ module tb_rtcache;
 		for (int k = 0; k < 120; k++) begin
 			bit [8:0] r;
 			r = rows[$urandom() % 8];
-			case ($urandom() % 5)
+			case ($urandom() % 6)
 				0, 1: rt_read({r, 9'($urandom() % 2 ? 0 : 9'(($urandom() % 256) * 2))}, 0, 40);
 				2:    begin cpu_write({r, 9'($urandom())}, $urandom(), $urandom()); wait_idle(); end
-				3:    begin rt_read({rows[$urandom() % 8], 9'h0}, 0, 0); mwt(r); end
+				3:    begin
+				          cpu_rt(rows[$urandom() % 8]);
+				          if ($urandom() % 2) rt_read({rows[$urandom() % 8], 9'h0}, 0, 8);
+				          cpu_mwt(r);
+				      end
 				4:    flash_write(r, $urandom(), $urandom());
+				5:    begin rt_read({rows[$urandom() % 8], 9'h0}, 0, 0); mwt(r); end
 			endcase
 		end
 		$display("[%0t] phase 8: random mix, errors=%0d", $realtime, errors);

@@ -86,6 +86,8 @@ module P3DO
 	output             VID_FB_CURR_V,
 	output     [19: 2] VID_FB_PREV,
 	output             VID_FB_PREV_V,
+	// Game Bub port: the VRAM access in progress is the CPU's SPORT access
+	output             VRAM_SP_CPU,
 
 	input              VCLK,
 	output     [23: 0] RGB,
@@ -326,6 +328,7 @@ module P3DO
 		.VID_FB_CURR_V(VID_FB_CURR_V),
 		.VID_FB_PREV(VID_FB_PREV),
 		.VID_FB_PREV_V(VID_FB_PREV_V),
+		.VRAM_SP_CPU(VRAM_SP_CPU),
 		
 		.DBG_SPR_EN(SCRN_EN[1]),
 		.DBG_EXT(DBG_EXT)

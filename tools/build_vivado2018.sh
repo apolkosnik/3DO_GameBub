@@ -29,11 +29,26 @@ rm -rf "$B"/P3DOCore-gamebub_rev4.runs "$B"/P3DOCore-gamebub_rev4.xpr "$B"/P3DOC
 make -C "$B"
 ls -la "$B"/P3DOCore-gamebub_rev4.bit
 # Fail the build if routed timing is not met (the bitstream is written anyway).
+# The verdict comes from the final routed checkpoint timed in a fresh Vivado
+# session. The run's own post-route summary once put an SDRAM read data input
+# (sdram_dq[4] -> dq_in_r, launched by sdram_clk_out) at -1.42 ns, the only
+# failing endpoint, while the same checkpoint timed afresh gives +0.46 ns: its
+# source clock delay of sdram_clk_out counted the 1.875 ns phase of clk_sdram a
+# second time (14.710 ns, against 12.835 ns, the sum of the delays it lists).
+# Another build's route_design summary had one endpoint at -1.42 ns too. The
+# run's own figures are printed as well.
 IMPL="$B"/P3DOCore-gamebub_rev4.runs/impl_1
 RPT="$IMPL"/top_handheld_timing_summary_postroute_physopted.rpt
-[ -f "$RPT" ] || RPT="$IMPL"/top_handheld_timing_summary_routed.rpt
-read -r WNS TNS _ _ WHS _ < <(grep -A2 -m1 "WNS(ns)" "$RPT" | tail -1)
-echo "Timing ($(basename "$RPT")): WNS $WNS ns, TNS $TNS ns, WHS $WHS ns"
+DCP="$IMPL"/top_handheld_postroute_physopt.dcp
+[ -f "$RPT" ] || { RPT="$IMPL"/top_handheld_timing_summary_routed.rpt; DCP="$IMPL"/top_handheld_routed.dcp; }
+read -r RWNS RTNS _ _ RWHS _ < <(grep -A2 -m1 "WNS(ns)" "$RPT" | tail -1)
+echo "Timing in the run ($(basename "$RPT")): WNS $RWNS ns, TNS $RTNS ns, WHS $RWHS ns"
+CHK="$IMPL"/timing_recheck.rpt
+rm -f "$CHK"
+vivado -mode batch -nojournal -nolog -source "$ROOT"/tools/recheck_timing.tcl -tclargs "$DCP" "$CHK" > "$IMPL"/timing_recheck.log 2>&1
+read -r WNS TNS _ _ WHS _ < <(grep -A2 -m1 "WNS(ns)" "$CHK" | tail -1)
+echo "Timing ($(basename "$DCP") timed afresh, $(basename "$CHK")): WNS $WNS ns, TNS $TNS ns, WHS $WHS ns"
+[ "$WNS $TNS $WHS" = "$RWNS $RTNS $RWHS" ] || echo "NOTE: the run's timing summary differs from the fresh one; see $CHK"
 if awk -v w="$WNS" -v h="$WHS" 'BEGIN { exit !(w < 0 || h < 0) }'; then
 	echo "ERROR: timing not met" >&2
 	exit 1

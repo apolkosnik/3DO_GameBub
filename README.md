@@ -43,7 +43,8 @@ The JSON files are in `metadata/`.
 
 **Discs.** Use the disc-streaming firmware from the
 [neutralinsomniac/gamebub](https://github.com/neutralinsomniac/gamebub/blob/psx/docs/psx.md)
-fork (the one its PlayStation core needs) and select a `.cue` (or a lone `.bin`). Discs of
+fork (the one its PlayStation core needs; release 0.1.3, whose firmware file is
+`gamebub-handheld-rev4-1.1.0-beta3.uf2`) and select a `.cue` (or a lone `.bin`). Discs of
 any size are read from the microSD card as the game needs them, and the disc can be
 changed from the pause menu; see [docs/disc_streaming.md](docs/disc_streaming.md).
 

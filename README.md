@@ -285,6 +285,42 @@ BIOS loaded the disc's operating system over that kernel, the handler jumped int
 code and the CPU crashed (Wolfenstein 3D with the FZ-10 BIOS, 4.8 s after power-on).
 `tb_top` checks the CPU state after a CLIO software reset (test 8 of the test BIOS).
 
+**ARM60 (fixes to `ARM6_CORE.sv`, `ARM6_pkg.svh` and `ARM6_RB.sv`).** Two audits of the
+CPU against the ARM60 datasheet found ten differences, all fixed:
+
+* `MSR PSR_flg,#imm` was not decoded (it ran as no operation).
+* MSR to the SPSR ignored the `_flg` form and replaced the whole SPSR, so the saved mode
+  and interrupt masks were lost. MSR now follows the ARM60: the `_flg` forms write the
+  condition flags only, the register form the whole PSR (the flags only in User mode).
+  This replaces the field masks of upstream's `4970e53` (ARMv4 semantics).
+* A word load (LDR, SWP) from an address that is not word aligned was not rotated. It is
+  now rotated right by 8 times A[1:0], as the ARM60 does in either endianness; LDM is not
+  rotated.
+* STM with the S bit stored the current bank, not the User bank, when R15 was in the
+  list.
+* LSR #32 (the LSR #0 encoding) did not shift.
+* LSL and LSR by a register amount of 64, 96 ... set the carry from the unshifted value
+  instead of clearing it.
+* Undefined instructions, and coprocessor instructions (there is no coprocessor), ran as
+  no operations. They now take the undefined instruction trap: Undefined mode, SPSR_und,
+  R14 = address + 4, vector 0x04. Other codes that are not defined do not trap, as on the
+  ARM60.
+* A write to R15 with bits [1:0] set (MOV PC, LDR PC, LDM {PC}) kept them, so every later
+  read of the PC and every PC-relative address was off by them. R15 now reads with bits
+  [1:0] zero; the fetch addresses still carry them on A[1:0].
+* LDRT, STRT, LDRBT and STRBT (post-indexed with the W bit) made a privileged transfer.
+  Their transfer cycle now has nTRANS LOW (a User mode access) in any mode. MADAM does
+  not use nTRANS.
+* The synthesised register bank wrote registers while the core was paused (EN low); the
+  write enables now include EN, as the simulation-only bank's did. EN is tied high in
+  this core.
+
+`tb_arm6` runs an instruction set test (`sim/tb/arm6_isa.S`, 105 checks against values
+from the datasheet) on the core, paused (EN low) at pseudo-random points. The core before
+the fixes fails 30 of the checks. With every fix except the last three it fails 26 (39
+when paused) and crashes after the R15 writes. With the R15 fix alone added, it fails 4
+(the nTRANS checks), and 7 when paused.
+
 Upstream files that were modified are marked with `GameBub` / `Game Bub port` comments.
 
 **Upstream version.** The core follows the MiSTer 3DO core up to commit `2cf0583`
@@ -294,7 +330,7 @@ since:
 * CLIO RandSeed (0x38) and RandSample (0x3C), which had read as 0: the BIOS's audio CD
   player hung drawing a random track order (`6fcc997`, `af289c3`).
 * ARM6: the MSR CPSR instruction, ASR #32, and the carry of zero-count shifts
-  (`4970e53`).
+  (`4970e53`; its MSR field masks are replaced by the ARM60's, see *ARM60*).
 
 Not merged: `3ec27de`, MADAM's address decoding for other DRAM sizes (4 or 8 MB, an
 experimental menu option). On Game Bub the extra DRAM would be in SDRAM banks 0/1 above
@@ -330,13 +366,16 @@ are needed.
 ```
 sim/lint.sh                    # Verilator lint of the whole core
 sim/run_tb.sh tb_div           # MADAM divider vs. LPM_DIVIDE semantics (20k cases)
+sim/run_tb.sh tb_arm6          # ARM60 core vs. datasheet: shifts, MSR, unaligned loads, STM/LDM ^,
+                               # undefined instruction trap, R15 writes, LDRT/STRT nTRANS, with the
+                               # core paused at random points (needs sim/build_testrom.sh first)
 sim/run_tb.sh tb_sdram         # SDRAM controller vs. timing-checking SDRAM model, including the 3DO
                                # refreshing just as the controller's own refresh comes due
 sim/run_tb.sh tb_rtcache       # VRAM read-transfer cache and ddram.sv: coherence vs. reference VRAM model,
                                # CEL-engine framebuffer writes during cache fills, VDL frame buffer hints,
                                # page copies with video transfers between their read and write transfers,
                                # a line's two transfers apart with the first missing
-sim/build_testrom.sh           # assemble the test BIOS (sim/tb/testrom.S)
+sim/build_testrom.sh           # assemble the test BIOS (sim/tb/testrom.S) and sim/tb/arm6_isa.S
 sim/run_tb.sh tb_top           # whole core: boots the test BIOS
 sim/run_tb.sh tb_top +be       # same with a big-endian host
 sim/run_tb.sh tb_top +stream   # same, with the disc read through a model of the streaming firmware

@@ -18,7 +18,7 @@ commercial disc (Wolfenstein 3D, streamed the way the disc-streaming firmware se
   intro (CEL-engine 3D graphics over a starfield), 16 s after power-on.
 
 The homebrew 3DO Controller Test (an `.iso`) boots both ways, preloaded as stock firmware
-does it and streamed as a raw `.bin`: the BIOS shows the disc's banner 4 s after
+does it and streamed (converted with `tools/iso2bin.py`): the BIOS shows the disc's banner 4 s after
 power-on, and the program its controller screen 8.5 s after. Its framebuffers match the
 image on the disc, and every VRAM transfer of both boots (and of the Wolfenstein 3D
 boot) is checked against a shadow of VRAM (see *Simulation*).
@@ -46,6 +46,11 @@ The JSON files are in `metadata/`.
 fork (the one its PlayStation core needs) and select a `.cue` (or a lone `.bin`). Discs of
 any size are read from the microSD card as the game needs them, and the disc can be
 changed from the pause menu; see [docs/disc_streaming.md](docs/disc_streaming.md).
+
+That firmware reads raw 2352-byte CD sectors only. Homebrew usually comes as an `.iso`,
+which it refuses ("not a raw image"). Convert it first: `tools/iso2bin.py image.iso` writes
+`image.bin` and `image.cue` (with the sector headers, EDC and ECC of a pressed disc);
+select the `.cue`.
 
 Stock firmware cannot stream: it loads the selected file into SDRAM at startup, so only
 `.iso` images (2048-byte sectors) of up to 22 MiB work there. `tools/cue2iso.py

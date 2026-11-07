@@ -67,8 +67,12 @@ core runs.
 - **Disc swap.** A TOC arriving while the core runs resends the disc-info block, which
   the controller reports as a media change.
 
-With the fork's firmware, use `.cue`/`.bin`. That firmware would read an `.iso` as raw
-sectors, so `.iso` images only work through the preload path, on stock firmware.
+With the fork's firmware, use `.cue`/`.bin`. That firmware opens any disc file that is
+not a `.cue` as raw 2352-byte sectors (`DiscImage::open` in `disc.rs`): an `.iso` whose
+size is not a multiple of 2352 is refused ("not a raw image"), and one whose size happens
+to be would be read as garbage. `files.json` still lists `iso` for stock firmware, which
+preloads it. `tools/iso2bin.py image.iso` converts an ISO into `image.bin` (MODE1/2352:
+sync, header, data, EDC, P/Q ECC) and `image.cue` for the fork's firmware.
 
 ## Verification
 

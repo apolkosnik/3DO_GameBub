@@ -5,8 +5,8 @@
 @   1. DRAM word write/read (SDRAM TDM part), several pages
 @   2. DRAM byte writes (lane enables) + word read
 @   3. VRAM in the on-chip BRAM1 window (0x260000) and the VDL area (0x2FC000)
-@   4. VRAM through ddram.sv: 0x200000 (block 0, in the SRAM by default,
-@      vram_sram.sv) and 0x2A0400 (block A, in the SDRAM overflow tier)
+@   4. VRAM through ddram.sv: 0x200000 (block 0, in the SDRAM overflow tier
+@      by default) and 0x2A0400 (block A, in the SRAM, vram_sram.sv)
 @   5. ROM data reads (literal table in ROM)
 @   6. NVRAM byte writes/reads (0x03140000, one byte per word, low byte)
 @   7. CD-ROM through CLIO XBUS -> OSA -> 3DO_CDROM -> cdd_emu -> SDRAM:
@@ -154,7 +154,7 @@ entry:
 	ldr	r0, =0x002FC000
 	bl	vram_test
 
-	@ ---- 4. VRAM through ddram.sv: SRAM (0x200000) and SDRAM (0x2A0400) ----
+	@ ---- 4. VRAM through ddram.sv: SDRAM (0x200000) and SRAM (0x2A0400) ----
 	mov	r12, #4
 	ldr	r0, =0x00200000
 	bl	vram_test

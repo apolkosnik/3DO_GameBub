@@ -11,10 +11,11 @@
 //
 // What: eight 64 KiB VRAM blocks are in the SRAM: the four blocks of
 // MiSTer's BRAM4 window, the two of BRAM2, the block of BRAM1 (its first
-// 48 KiB are on chip; the SRAM has the rest) and the lowest block not yet
-// mapped. With MiSTer's default placement that is VRAM 0x00000-0x7FFFF; the
-// per-game table (p3do_gamebub.sv) moves the windows to where a game keeps
-// its frame buffers. Each secondary-port request of ddr_bridge.sv goes to
+// 48 KiB are on chip; the SRAM has the rest) and the highest block not yet
+// mapped. With the default placement (p3do_gamebub.sv: BRAM4 at block C,
+// BRAM2 at A, BRAM1 at 9) that is VRAM 0x80000-0xFFFFF, where Portfolio puts
+// its screens (the BIOS's and Cannon Fodder's frame buffer at 0xC0000); the
+// per-game table moves the windows to where a game keeps them. Each secondary-port request of ddr_bridge.sv goes to
 // the SRAM (sram_sec.sv) or to the SDRAM arbiter by its address, decided in
 // its first cycle and kept until the client drops it. ddram.sv, its lazy
 // flash-write fill, the read-transfer cache and ddr_bridge.sv are unchanged:
@@ -86,7 +87,7 @@ module vram_sram (
 		used = '0;
 		for (int i = 0; i < 7; i++) used[b[i]] = 1;
 		b[7] = '0;
-		for (int k = 15; k >= 0; k--) if (!used[k]) b[7] = 4'(k);
+		for (int k = 0; k < 16; k++) if (!used[k]) b[7] = 4'(k);   // the highest block not mapped
 		v = '0;
 		for (int k = 0; k < 16; k++) s[k] = '0;
 		for (int i = 7; i >= 0; i--) begin   // the lowest slot of a block that is listed twice

@@ -446,8 +446,11 @@ DMA included, because the 3DO's DRAM uses the same SDRAM in lock step (the board
 SDRAM chips share one bus). The board also has a 512 KiB asynchronous SRAM on a bus of
 its own, which nothing else uses: VRAM there needs no pause. Eight 64 KiB VRAM blocks are
 in it: MiSTer's BRAM4 and BRAM2 windows and the BRAM1 block (the per-game table moves
-them to where a game keeps its frame buffers) and the lowest block left, by default VRAM
-0x00000-0x7FFFF. `ddram.sv`, its lazy flash fill, the read-transfer cache and
+them to where a game keeps its frame buffers) and the highest block left, by default VRAM
+0x80000-0xFFFFF, where Portfolio keeps its screens (the BIOS's and Cannon Fodder's frame
+buffer is at 0xC0000). MiSTer's default placement (0x00000-0x6FFFF) left them in the
+SDRAM, where every access pauses the 3DO, video DMA included: the top lines of the BIOS
+screens showed stale data in every VRAM mode. `ddram.sv`, its lazy flash fill, the read-transfer cache and
 `ddr_bridge.sv` are unchanged: each request of the bridge's 16-bit word stream goes to
 the SRAM or to the SDRAM by its address. `sram_sec.sv` drives every SRAM pin from an I/O
 block register (the Game Bub fork's SRAM controller found on the board that fabric
@@ -571,6 +574,12 @@ the 3DO documentation found fifteen differences, all fixed:
   buffer. On a line without picture data (a letterbox border, for instance) a
   34-word download put 34 coloured dots at the line's left edge. Only single-port
   captures inside the line's read window are pixels now.
+* CLIO accepted palette (VDL colour) words only inside a fixed window of the
+  horizontal blanking, but MADAM starts a pending download whenever it gets the bus
+  after that window opens. A download that started late (MADAM busy or paused) lost
+  its last words: in a fade to black, entries 24-31 and the background kept their old
+  colours for a frame. A VDL word (both serial ports captured together) now writes the
+  palette wherever it falls; pixels never do.
 * The video encoder kept its dot clock and blanking outputs as they were while the
   3DO was in reset (including every BIOS software reset). The capture to the Game
   Bub framebuffer keeps running, and a dot clock held at 1 sent a dot every clock:

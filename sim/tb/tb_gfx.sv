@@ -29,6 +29,12 @@
 //    picture data: on a line without pixels it gives no DE, at its usual
 //    position and late enough to run into the next line; after a line of
 //    pixels it does not change that line's DE count or colours.
+// 11. A palette (VDL) download that starts late in the horizontal blanking
+//    (MADAM starts a pending one at any time from HCOUNT 1339 on) writes all
+//    of its entries: a fade of all 32 entries and the background to black
+//    (and back to white), started in, late in, and after CLIO's usual palette
+//    window, shows every palette pen (2-31) in the new colour on the next
+//    lines.
 // 10. VE (video encoder) held in reset during active display, at each of the
 //    four dot-clock phases: no dot clock, horizontal and vertical blanking
 //    (the capture to the framework keeps running through a 3DO reset).
@@ -277,6 +283,31 @@ module tb_gfx;
 		end
 		@(negedge clk); l2_n = 1; r2_n = 1;
 	endtask
+
+	// 11: a VDL download of the given words (both ports, one word per tick)
+	task automatic vdl_words(input int h, input bit [31:0] w [$]);
+		at_h(h);
+		foreach (w[i]) begin
+			@(negedge clk); s2 = w[i]; l2_n = 0; r2_n = 0;
+		end
+		@(negedge clk); l2_n = 1; r2_n = 1;
+	endtask
+	// n pixels with pen {e,e,e}, e = 0..31 in turn
+	task automatic line_pens(input int n);
+		at_h(30);
+		for (int i = 0; i < n; i++) begin
+			bit [4:0] e;
+			e = 5'(i);
+			@(negedge clk); s2 = {2{1'b0, e, e, e}}; l2_n = i[0]; r2_n = ~i[0];
+			@(negedge clk); l2_n = 1; r2_n = 1;
+		end
+	endtask
+	// all 32 colour entries (all components) and the background in one colour
+	function automatic void palette_words(input [23:0] c, output bit [31:0] w [$]);
+		w.delete();
+		for (int e = 0; e < 32; e++) w.push_back({3'b000, 5'(e), c});
+		w.push_back({8'hE0, c});
+	endfunction
 
 	// 10: VE with its own video clock
 	reg         vclk = 0, ve_rst_n = 0;
@@ -651,6 +682,43 @@ module tb_gfx;
 			if (de2_rgb != r0) fail("a pixel line with a late VDL download: the colours differ from the same line without it");
 			line_run = 0;
 			$display("[%0t] VDL downloads vs. pixels: %0d DE per pixel line, %0d errors", $realtime, d0, errors - e0);
+		end
+
+		// ---------------- 11. late palette downloads ----------------
+		begin
+			int e0, starts [5];
+			bit [31:0] w [$];
+			e0 = errors;
+			starts = '{1340, 1362, 1373, 1390, 1450};
+			line_run = 1;
+			repeat (2) at_h(5);
+			for (int dir = 0; dir < 2; dir++) begin
+				bit [23:0] from_c, to_c;
+				from_c = dir ? 24'h000000 : 24'hFFFFFF;
+				to_c   = dir ? 24'hFFFFFF : 24'h000000;
+				foreach (starts[k]) begin
+					int wrong;
+					palette_words(from_c, w);
+					at_h(5); vdl_words(1340, w);                    // in the window: the old colours
+					palette_words(to_c, w);
+					at_h(5); vdl_words(starts[k], w);               // the fade
+					at_h(5); at_h(1500);                            // a line for the palette copy
+					at_h(5);
+					de2_cnt = 0; de2_rgb.delete();
+					line_pens(320);
+					at_h(1500);
+					wrong = 0;
+					// pens 0 and 1 are taken for background (pen 000, blue LSB not
+					// counted) and show the background colour, not a palette entry
+					foreach (de2_rgb[i]) if (i % 32 >= 2 && de2_rgb[i] !== to_c) wrong++;
+					checks++;
+					if (de2_cnt == 0 || wrong != 0)
+						fail($sformatf("palette %s, download of 33 words started at HCOUNT %0d: %0d of %0d pixels not in the new colour",
+						               dir ? "fade in" : "fade out", starts[k], wrong, de2_cnt));
+				end
+			end
+			line_run = 0;
+			$display("[%0t] late palette downloads: %0d errors", $realtime, errors - e0);
 		end
 
 		// ---------------- 10. VE outputs in reset ----------------

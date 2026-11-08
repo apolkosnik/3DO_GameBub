@@ -167,8 +167,9 @@ module tb_rtcache;
 
 	// VRAM blocks in the SRAM (vram_sram.sv, as in the core): +sram_mode=0
 	// (two cycles per word, the default), 1 (three), 2 (none: all in the
-	// SDRAM). With the per-game defaults and the on-chip block at 0xC0000 the
-	// SRAM has blocks 0-6 and C; the test rows are in both memories.
+	// SDRAM). With these offsets (BRAM4 0, BRAM2 4, on-chip block at 0xC0000)
+	// the SRAM has blocks 0-5, C and F (the highest one left); the test rows
+	// are in both memories.
 	bit  [ 1:0] sram_mode = 2'd0;
 	initial begin
 		int m;

@@ -580,7 +580,7 @@ module tb_top;
 			$display("tb_top: %0d CD-DA sectors, %0d gaps checked at 1x, %0d at 2x", audio_secs, audio_gaps_1x, audio_gaps_2x);
 			if (audio_secs != 4 || audio_gaps_1x != 1 || audio_gaps_2x != 1) fail("CD-DA: expected 4 audio sectors in two pairs (1x, 2x)");
 		end
-		// test ROM test 4 writes VRAM 0x200000 (block 0: in the SRAM unless it is off)
+		// test ROM test 4 writes VRAM 0x2A0400 (block A: in the SRAM unless it is off)
 		if (sram_mode != 2 && sram.writes == 0) fail("no VRAM write reached the SRAM");
 		if (sram_mode == 2 && sram.writes != 0) fail("VRAM writes reached the SRAM with it off");
 		$display("tb_top: TB errors=%0d, SDRAM model errors=%0d, SRAM model errors=%0d (%0d SRAM writes)",

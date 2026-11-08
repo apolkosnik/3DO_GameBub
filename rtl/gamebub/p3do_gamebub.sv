@@ -260,7 +260,11 @@ module p3do_gamebub #(
 	reg  [ 3:0] BRAM4_OFFS, BRAM2_OFFS, BRAM1_OFFS;
 	reg         NEED_DSP_PAUSE;
 	always @(posedge clk_sys) begin
-		{BRAM4_OFFS,BRAM2_OFFS,BRAM1_OFFS} <= {4'h0,4'h4,4'h6};
+		// Game Bub: default VRAM blocks C-F, A-B, 9 (+ 8 in the SRAM), Portfolio's
+		// screens (BIOS, Cannon Fodder: 0xC0000), as most of the table below;
+		// MiSTer's default {0,4,6} left them in the SDRAM, which pauses the
+		// 3DO for every access (late video lines at the top of the frame)
+		{BRAM4_OFFS,BRAM2_OFFS,BRAM1_OFFS} <= {4'hC,4'hA,4'h9};
 		NEED_DSP_PAUSE <= 0;
 		if (disc_info_valid) begin
 			if (disc_id == 32'h29E4D882) {BRAM4_OFFS,BRAM2_OFFS,BRAM1_OFFS} <= {4'hC,4'hA,4'h9};//3D Atlas (US)

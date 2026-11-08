@@ -167,6 +167,16 @@ module CLIO_VIDEO
 		end
 	end 
 	wire CAPCLKEN_N = LSCAP_N & RSCAP_N;
+	// a VDL word: both ports captured together (lines up with CAPEND1_N and SCAP).
+	// It writes the palette wherever it falls: MADAM starts a pending download
+	// at any time from HCOUNT 1339 on (MADAM_SPORT), so a late one ran past the
+	// end of the WRITE_EN window and lost its last entries (a fade left entries
+	// 24-31 and the background at their old colours). Pixels never write it.
+	bit          CLUT_CAP;
+	always @(posedge CLK or negedge RST_N) begin
+		if (!RST_N) CLUT_CAP <= 0;
+		else if (EN && VCE) CLUT_CAP <= ~LSCAP_N & ~RSCAP_N;
+	end
 	
 	bit  [15: 0] LSCAP_BUF;
 	bit  [15: 0] RSCAP_BUF;
@@ -348,10 +358,10 @@ module CLIO_VIDEO
 		.INPUT(INPUT ^ {1'b0,{15{DBG_HL_DOT}}}),
 		
 		.SCAP(SCAP),
-		.WRITE(~CAPEND1_N),
+		.WRITE(CLUT_CAP),
 		.READCLKEN(~CAPEND2_N),
 		.COPY_EN(COPY_EN),
-		.WRITE_EN(WRITE_EN),
+		.WRITE_EN(WRITE_EN | CLUT_CAP),
 		.CURR_PREV(CURR_PREV),
 //		.BG_CTL(DISPCTL[29]),
 		.BG_DET(BG_DET),

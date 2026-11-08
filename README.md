@@ -83,10 +83,15 @@ firmware also when you pause.
   With an NTSC BIOS, keep the Region setting on NTSC (or By BIOS); PAL discs then run in
   NTSC mode.
 * Only the 64 KiB "BRAM1" VRAM block is on chip, because the framework's double
-  framebuffer uses most of the block RAM. The rest of VRAM is in SDRAM, behind the
-  original MiSTer DDR3 logic (`ddram.sv`). Video reads from it go through a prefetching
-  cache (below), but CPU and CEL-engine accesses outside the block are slower than on
-  MiSTer.
+  framebuffer uses most of the block RAM. The rest of VRAM is in the SRAM (eight blocks)
+  and the SDRAM, behind the original MiSTer DDR3 logic (`ddram.sv`). Video reads from it
+  go through a prefetching cache (below), but CPU and CEL-engine accesses outside the
+  block are slower than on MiSTer.
+* Movies and other heavy scenes still show broken lines (Microcosm's intro, a line or two
+  in Cannon Fodder's title), with the VRAM in the SRAM or in the SDRAM: being
+  investigated. The SRAM removed the pauses between Microcosm's animated sequences.
+* CLIO's horizontal and vertical interpolation are off: the picture is captured at
+  320 x 240, which keeps neither the interpolated dots nor the interpolated lines.
 * Video lines that start before their VRAM transfer (see *Video lines that started late*)
   are not all gone: before the two fixes there, the Wolfenstein 3D boot had 247 in its
   first 12.5 s, 216 of them from the CPU's CLIO accesses; the remaining ones in its 3D
@@ -103,6 +108,11 @@ firmware also when you pause.
 * **Region**: NTSC or PAL video timing, either by BIOS (a PAL Panasonic FZ-1 BIOS is
   recognised by its checksum, as on MiSTer) or set by hand. Takes effect at the next
   reset.
+* **VRAM memory**: where the VRAM blocks outside the on-chip one live. `SRAM` (default):
+  eight 64 KiB blocks in the 512 KiB SRAM, two 10 ns cycles per 16-bit word; `SRAM, safe
+  timing`: three cycles per word, for a slower part (the board's SRAM is not documented);
+  `SDRAM only`: all of them in the SDRAM, as before. Takes effect at the next reset or
+  game start.
 * **Buttons**: which Game Bub buttons are the 3DO's A, B, C and X (stop).
   `Y B A = A B C` (default): Y, B, A are A, B, C, left to right as on a 3DO pad, and X
   is stop. `A B X = A B C`: A, B, X are A, B, C and Y is stop, for a pad with A B C D in
@@ -116,7 +126,7 @@ firmware also when you pause.
 | MiSTer                                  | Game Bub                                                          |
 |-----------------------------------------|-------------------------------------------------------------------|
 | SDRAM: 3DO DRAM (`sdram.sv`)            | `sdram_3do.sv`, same MCLK-locked TDM scheduling, banks 0/1        |
-| DDR3: VRAM overflow, BIOS, kanji, NVRAM | `ddram.sv` (two write fixes, below), on `ddr_bridge.sv` to SDRAM bank 2 |
+| DDR3: VRAM overflow, BIOS, kanji, NVRAM | `ddram.sv` (two write fixes, below), on `ddr_bridge.sv` to SDRAM bank 2; eight 64 KiB VRAM blocks in the SRAM (`vram_sram.sv`, below) |
 | HPS: CD image streaming                 | `cdd_emu.sv`: sectors on request from the firmware (fork), or an ISO preloaded into SDRAM |
 | HPS: BIOS/save loading                  | framework file transfers, `gb_host.sv`                            |
 | Altera megafunctions                    | `rtl/compat/altera_compat.sv`, Xilinx-inferable rewrites          |
@@ -262,6 +272,20 @@ The lookup now uses the waiting write's own address, and a write that has not be
 keeps MADAM paused. `tb_rtcache` reproduces both with MADAM's write timing, and `tb_boot`
 checks every VRAM write during a boot.
 
+**Write transfers with the VRAM halves out of step (fix to `ddram.sv`).** Games clear
+their frame buffers with runs of the CPU's SPORT write transfers, one row after another
+(Syndicate, every frame). Each VRAM half takes the transfer when it is free, and the
+video DMA's transfers go to one half at a time, so one half can start its write burst
+later than the other. `ddram.sv` writes a half's row in two passes of 128 beats and
+serves the left half first; a pass counter bit says which pass ends the burst. A left
+burst that started between the right half's two passes took that bit from the right
+half's first pass and ended after one pass: the left VRAM module then waited for the rest
+of its row for ever and the 3DO stayed paused (Syndicate hung 9.5-12 s after power-on
+with every BIOS), and the right half's second pass was counted as a first one, so a third
+ran on into the next row. Each pass now takes the bit from its own address. `tb_rtcache`
+runs such loops with either half late, and `tb_boot` reports a pause of 500 µs as a hung
+memory system.
+
 **VRAM page copies (fix to `vram.sv`).** Software copies VRAM a row at a time (2 KiB per
 VRAM half) through MADAM's SPORT address space: the CPU reads an address there (a read
 transfer, the source row into the VRAM's serial register), then writes one (a write
@@ -279,6 +303,162 @@ skips a split read transfer of the half-row the serial register already holds; a
 into that row now makes the next one reload it.
 `tb_rtcache` makes video transfers inside copies, and `tb_boot` checks every copy of a
 boot (see *Simulation*).
+
+**VRAM write masks and split transfers (fixes to `vram.sv`).** The data the CPU writes to
+start a write transfer or a flash write (the SDK's `CopyVRAMPages` / `SetVRAMPages` mask)
+is a write mask, one per VRAM half: 1 bits are written, 0 bits keep the row's bits. The
+MiSTer core ignored it (its mask capture was commented out), so a copy or flash write with
+a partial mask overwrote the protected bits, and one with mask 0 rewrote the whole row.
+The mask now applies: mask FFFF works as before; 0 writes nothing; a partial mask merges
+the new data with the row, on chip by reading and writing each 16-column block, outside
+the FPGA by first reading the destination row (through the read-transfer cache, without
+prefetch) and then writing it merged. The lazy flash fill of `ddram.sv` covers both VRAM
+halves and has no mask, so it is used only when both halves have mask FFFF and start
+together; otherwise each half writes its colour itself. In the core the CPU's write data
+is on the bus from CAS (PHASE2 of the access), not yet when RAS falls, so the VRAM takes
+the mask, as it took the flash colour, once CAS is low; a command taken late (after a
+pause) finds CAS low already, which the old flash path, waiting for a CAS edge, missed.
+Also, the skipped split read transfer (see above) now reloads its half-row after a flash
+write or a random write into it, not only after a copy: it had returned the old pixels.
+`tb_rtcache` phase 13 runs masked copies and flash writes and split transfers after each
+kind of write in on-chip, SRAM and SDRAM rows (26,084 errors before the fix), and test 9
+of the test BIOS makes them from the CPU (see *Simulation*).
+
+**CLIO timers and interrupt summary (fixes to `CLIO.sv`).**
+
+* INT0 bit 31 reads as the summary of the enabled INT1 interrupts, as the FIQ already
+  was (Opera emulator). It was a latched bit, set by any player bus interrupt, enabled or
+  not, until cleared through 0x44, and never by the other INT1 sources.
+* A cascaded timer takes the borrow of the timer below it in the same count: a pair goes
+  0001:0000, 0000:FFFF. It came one count (16 µs) late, through 0001:FFFF; the OS keeps
+  its clock in cascaded timers.
+* The timer controls read back at the set and the clear address of each bank (they read
+  0).
+* TimerSlack (0x220) sets the count period, 64 + TimerSlack ticks of 25 MHz (Opera); the
+  OS writes 336 for 16 µs. It was fixed at 400 ticks and read 0. Its value after reset is
+  not documented: 336 keeps the old period until the OS writes it.
+
+* The DSP FIFOs (input and output, and the 32-bit DMA FIFOs): a read and a write in the
+  same cycle on an empty FIFO (a DSP reading while a DMA refill arrives) advanced the
+  write pointer but not the count, so the FIFO miscounted its words from then on (read
+  twice or lost); a full FIFO read and written lost count the same way, and a write to a
+  full FIFO overwrote its oldest word. Writes and reads are now taken by the FIFO's
+  state (an empty FIFO hands the incoming word to a read in the same cycle) and the count
+  follows them.
+* The output FIFOs' status (0x3C0-0x3CC) returned input FIFOs 0-3 again.
+* A 32-bit read of the DSP's output memory returned the even word twice; it now returns
+  the even word in bits 31-16 and the odd one in bits 15-0, as 32-bit writes store them.
+* An empty input FIFO keeps giving the DSP the word it holds. Each read took the FIFO's
+  next word even when it had none, so a drained sample read as a stale RAM word.
+* The DSP's frame counter keeps the reload value the DSP wrote. Every frame start set it
+  back to 565, so a program's own frame rate held for one frame. It is 565 from
+  power-on, and a CPU reset leaves it (Opera).
+* In audio lock the frames start only with the audio word strobe; the counter started
+  them as well.
+* CSTAT (0x28) writes as Opera takes them: power-on, rollover and DIPIR reset (bits 0,
+  1, 6) are only cleared by writing 0 (a write set them again), the watchdog bits are
+  not written, ClearDIPIR is not stored, and SoftReset with ClearDIPIR sets DIPIR reset.
+  Writing 0x40 cleared the DIPIR reset flag.
+* ADBIO (0x84) reads back its direction bits and the pads (Portfolio clio.h RWDIR /
+  RWPADS; the pads as this core drives them, its output latch). It read the unconnected
+  inputs, 0, so Portfolio's read/modify/write updates (cdipir.c) dropped the ROM bank
+  select.
+
+**Audio DMA (fixes to `MADAM_EXTPIF.sv`, `MADAM_AG.sv` and `CLIO.sv`).** Checked
+against the DMA description in WO 94/10641:
+
+* A transfer whose length ran out in the middle of a burst went on into the next
+  buffer even when there was none (next address 0): it read from, or for the DSP's
+  output FIFOs wrote to, address 0. The loop test now ends the burst when the next
+  address is 0 ("These values of zero are used as control flags").
+* A complete transfer (no next buffer) started again when the DSP's FIFO asked for
+  more, at address 0. MADAM now tells CLIO which block ends loop and which complete
+  (both still interrupt, as in Opera; Portfolio queues the next buffer from that
+  interrupt), and a complete transfer clears the channel's DMA enable, which
+  Portfolio sets again with every buffer (dsphSetDMANext, dsphSetFullDMA).
+* A CPU write of an audio channel's current address or remaining length sets its
+  next address or next length to zero in the next clock, as the patent describes
+  (channels 0x00-0x0C and 0x10-0x13).
+
+Not changed: a buffer that runs out in the middle of a burst and loops continues
+the burst without an interrupt for that buffer end. Test 13 of the test BIOS checks
+the three on the real system: a DSP program fills output FIFO 0 for a 4-word
+transfer to memory with no next buffer.
+
+**DSP core (fixes to `CLIO_DSP.sv`).**
+
+* An arithmetic instruction without operands (INC, ACC transfer, ADDC...) computes in
+  the clock it is fetched, before its timing is stored, and took the timing of the
+  instruction before it (the other fields were already taken from the decode). After a
+  reset that was none: the computation never ended and the DSP computed nothing more.
+* Every frame starts with the accumulator and the flags clear (Opera); they carried over
+  from the frame before.
+* A shift with its control from an operand (BS = 1000) stored the instruction's own BS
+  field instead of the operand (bits 3-0 the shift, bit 4 logical), and counted that
+  operand among the instruction's operands, so the fetch ended one early and the result
+  was never written to its output address. The count leaves it out, as the DSP patent
+  says (WO 94/16383: "It does not include a Barrel Shifter operand") and MAME's DSPP
+  does ("Implicit barrel shift", `++numops`); the Opera emulator counts it.
+* INC and DEC added 1 to the 16-bit word (bit 4 of the 20-bit ALU): 16 times too much.
+  They add 1 to the ALU's LSB, as in Opera (+0x1000 on its 32-bit Y) and MAME; a word
+  goes up by one every 16 INCs. In comparisons of 4,100 programs with Opera's routines,
+  these were every DSP difference.
+* An arithmetic operand with an indirect address (D_I) took the pointer as the operand
+  and lost the output write after it; it now reads the operand through the pointer, as
+  the register operands' indirect forms already did.
+
+**Expansion bus (fixes to `CLIO_XBUS.sv`).**
+
+* XB_DMARESET (0x400 bit 14, "also does a flush", Portfolio clio.h) was ignored: a
+  transfer stalled on the full FIFO kept its words and blocked the next one. It now
+  stops the DMA and empties CLIO's expansion FIFO.
+* The control register reads back the DMA direction, DMA on and reset bits at 0x400
+  and 0x404 (they read 0).
+
+`tb_clio` checks these on the CLIO module, accessed as MADAM does, with DSP programs
+and a DMA refill, and the FIFO modules against a reference queue (before the timer and
+interrupt fixes 30 of 63 checks fail; before the FIFO and DSP fixes 4,886 of 5,729;
+before the DSP core, empty-FIFO and frame fixes 46 of 5,788), and test 10 of the test
+BIOS from the CPU. Its sections 8 and 9 check the shifts and the expansion bus control
+(the testbench takes the expansion DMA's words as MADAM does).
+
+**Matrix engine (fix to `MADAM.sv`).** MADAM's matrix multiply summed signed products in
+an expression made unsigned by an unsigned `'0` (SystemVerilog takes the signedness of
+the whole expression from all its operands): the factors were zero-extended, so a
+negative factor gave a wrong product (-0.5 x 0.5 = 7FFFC000 instead of FFFFC000). This
+is in the MiSTer core too. The 3D games' transformations (and the perspective divide of
+command 3) go through it. The CPU's reads of the matrix (0x600-0x63C) returned entry 0
+at every address: the matrix memory was read only at the engine's address. `tb_math`
+(MADAM module, 120 matrix commands of each kind, each with the matrix and vector read
+back; 1,747 of 2,999 checks fail before) and test 11 of the test BIOS check it.
+MSYS (0x04) is read only, as in Opera: it reports the memory configuration MADAM
+decodes the DRAM from (Portfolio's kernel only reads it), and a write of 0 turned the
+DRAM off. `tb_math` checks it first.
+
+Not changed: the perspective divide's quotient is cut to bits 47..16 before it scales
+rows 0 and 1, so 4/3 gives 0x15554 where Opera keeps the full quotient (0x15555); only
+the console can tell which precision MADAM has.
+
+**VRAM in the SRAM (`vram_sram.sv`, `sram_sec.sv`).** Every access to the SDRAM other
+than the 3DO's own DRAM cycles (a read-transfer fill, a write-transfer burst, each random
+VRAM write of the CPU or the CEL engine, a CD sector) first pauses the whole 3DO, video
+DMA included, because the 3DO's DRAM uses the same SDRAM in lock step (the board's two
+SDRAM chips share one bus). The board also has a 512 KiB asynchronous SRAM on a bus of
+its own, which nothing else uses: VRAM there needs no pause. Eight 64 KiB VRAM blocks are
+in it: MiSTer's BRAM4 and BRAM2 windows and the BRAM1 block (the per-game table moves
+them to where a game keeps its frame buffers) and the lowest block left, by default VRAM
+0x00000-0x7FFFF. `ddram.sv`, its lazy flash fill, the read-transfer cache and
+`ddr_bridge.sv` are unchanged: each request of the bridge's 16-bit word stream goes to
+the SRAM or to the SDRAM by its address. `sram_sec.sv` drives every SRAM pin from an I/O
+block register (the Game Bub fork's SRAM controller found on the board that fabric
+delays between the pins corrupted writes) and WE from an ODDR, both edges in the middle
+of a cycle; two cycles of `clk_mem` per word (10 ns WE pulse, data taken 20 ns after the
+address leaves its register) or three with the "safe timing" setting. A half-row fill
+takes 10.4 µs from the SRAM (5.8 µs from the SDRAM, but with the 3DO paused), still a
+beat (two columns of each VRAM half) every 80 ns, ahead of a line's serial read-out.
+On hardware this removed the pauses between Microcosm's animated sequences.
+`sim/models/sram_model.sv` checks the controller against a 10 ns part's datasheet times
+with the routed design's I/O delays; `tb_rtcache` and `tb_top` run in all three modes.
 
 Host file data is stored exactly as received. The byte order of the MCU's words is
 detected from the Opera volume header of a preloaded ISO; otherwise little-endian is
@@ -329,6 +509,93 @@ the fixes fails 30 of the checks. With every fix except the last three it fails 
 when paused) and crashes after the R15 writes. With the R15 fix alone added, it fails 4
 (the nTRANS checks), and 7 when paused.
 
+**Cel engine, pixel processor and display path (fixes to `MADAM_SE.sv`, `CLIO_VIDEO.sv`
+and `CLIO_CLUT.sv`).** Four audits of MADAM's cel engine and CLIO's display path against
+the 3DO documentation found fifteen differences, all fixed:
+
+* The pixel processor's final sum was 8 bits wide and, when not subtracting, was tested
+  for overflow before its sign: with a sign-extended secondary source (AV bit 1) a
+  negative result came out as 31 (white) instead of 0 (136 of 8,192 cases in the
+  audit's sweep). The sum (-32 to 155) is now 9 bits wide, clamped to 0..31 unless AV
+  bit 2 lets it wrap.
+* With MS = 10 the primary divider is the decoder component's two LSBs; for 00 (divide
+  by 16) the core used PIXC's DF instead.
+* In a VDL display control word, 11 in the 2-bit subposition and blue LSB source fields
+  (line and window) means "maintain prior setting" (the SDK's `VDL_*_NOP`, US patent
+  5,502,462 Table 6); the core stored it as a setting of its own. (The SDK's default
+  display control word sets these fields explicitly, so games that use it are not
+  affected.)
+* The CLUT bypass (pen MSB set) filled the 3 low bits of each 8-bit component with the
+  component's own 3 LSBs. They are now zero, the component's 3 MSBs with MSBREP, or a
+  pseudo-random value with RNDM (US patent 6,191,772; the console's generator is not
+  documented, a 15-bit LFSR here).
+* A VDL colour word that sets only the red or only the blue component (bits 30-29 = 11 or
+  01) was written to the background entry instead of its own entry: bit 29 was taken for
+  "background", which is the 111 word type.
+* NOBLK clear (a cel flag) writes a result of 000 as 100 (red 1), which looks black but is
+  not taken for background; the core wrote 000, so the background colour showed through
+  black parts of cels. The computed blue LSB counts for this black detector only when
+  B0POS = 2 puts it in the pen (WO 94/10642, after Table VI).
+* The engine control word's CFBDLSB and IPNLSB (WO 94/10642 Table VI; the SDK's
+  `CFBDLSB_*`, `PDCLSB_*`) select the blue LSB of the frame buffer pixel and of the
+  decoder's pixel as they enter the pixel processor: 0, bit 0, bit 4 or bit 5. The core
+  always used bit 0 (the SDK default, so most games are not affected). An unpacked cel
+  ("totally literal") takes the decoder's selection from its second preamble word
+  (PRE1 TLLSB, Table IX), as in the Opera emulator.
+* SWAPHV (swap the subposition bits H and V, pen bits 0 and 15, for B0POS / B15POS =
+  "same as source") applied even when an unpacked cel's PRE1 has NOSWAP.
+* CFBDSUB (the engine control default) takes H and V from the frame buffer pixel instead
+  of the cel when the pixel processor reads the frame buffer (1S = 1 or 2S = 2); the core
+  always took the cel's. The Opera emulator has its version of this disabled ("causes the
+  wing commander 3 movies to screw up"); it substitutes them without that condition.
+* CLIO's display control word bit 10 (SwapPENms, the SDK's swapPenVH) swaps the pen's MSB
+  and LSB before CLIO uses it (so the swapped MSB decides the CLUT bypass); the core
+  ignored it.
+* The CPU's PLUT access (0x03300180-0x033001FF, SDK madam.h) used the engine's
+  addresses: a write went to the entry pair the last PLUT DMA load would fill next
+  (writing 0x188 changed entries 0 and 1, not 4 and 5), and a read returned the entry
+  the current pixel selects. A write to 0x180 + 4n now sets entries 2n (bits 31-16) and
+  2n+1; a read of 0x180 + 4n returns entry n. Test 12 of the test BIOS checks it from
+  the CPU (fails at the first read before).
+* SPRSTOP (0x03300104) was not decoded, so the cel engine could not be aborted (the SDK's
+  DrawSprytes writes it when a cel list runs too long). It now resets the engine's state
+  (SPRON and the pause clear) but not the registers the CPU and the CCB DMA write.
+* The regional fill's end below the clip rectangle (ASCALL) compared the row with the clip
+  Y limit taken as signed: a limit of 1024 to 2047 (2047 is the largest, "no clipping")
+  was negative, and every regional fill ended at once. The limit is unsigned, as in the
+  clipping tests next to it.
+
+* A VDL download (the display list's control and colour words, captured from both
+  VRAM serial ports at once in the horizontal blanking, US patent 5,502,462) went
+  down CLIO's pixel path as well: each word became a dot in the video encoder's line
+  buffer. On a line without picture data (a letterbox border, for instance) a
+  34-word download put 34 coloured dots at the line's left edge. Only single-port
+  captures inside the line's read window are pixels now.
+* The video encoder kept its dot clock and blanking outputs as they were while the
+  3DO was in reset (including every BIOS software reset). The capture to the Game
+  Bub framebuffer keeps running, and a dot clock held at 1 sent a dot every clock:
+  one malformed frame. In reset the encoder now outputs blanking and no dot clock.
+
+Not changed: a partial PLUT load (fewer than 32 entries) starts at entry 0. The patent
+describes loading into the bank PIPA selects; the Opera emulator also loads at entry 0,
+so only the console can tell.
+* A display control word with COLONLY ("colors only after this point") did not stop the
+  later display control words of the same VDL entry from loading. They are now ignored
+  until the next CLUT download window.
+
+
+`tb_gfx` checks the pixel processor (224,608 whole pens: every PIXC field, NOBLK, the
+blue LSB selections, B0POS / B15POS with SWAPHV, NOSWAP and CFBDSUB, against a model
+written from the documentation and the Opera emulator's math, in full precision) and
+the display path (the control word fields, COLONLY, the pen swap, the bypass expansion
+and single-component palette writes, VDL downloads against pixel lines with real line
+timing), the video encoder's outputs in reset, and the cel engine's SPRSTOP and clip
+Y end (engine control by the CPU interface and the interrupt request). Before the first four
+fixes it fails 20,252 of the first 224,693 checks; before the second four, 51,344 of
+224,724; before the next five, 28,053 of 224,732; before the last two, 16 of 224,821. The
+secondary divider code AV[4:3] = 11 ("use the two lowest bits of the color component",
+divided by 4 here) is not checked: documentation, core and emulator differ.
+
 Upstream files that were modified are marked with `GameBub` / `Game Bub port` comments.
 
 **Upstream version.** The core follows the MiSTer 3DO core up to commit `2cf0583`
@@ -374,6 +641,16 @@ are needed.
 ```
 sim/lint.sh                    # Verilator lint of the whole core
 sim/run_tb.sh tb_div           # MADAM divider vs. LPM_DIVIDE semantics (20k cases)
+sim/run_tb.sh tb_gfx           # MADAM pixel processor, CLIO display control word and CLUT bypass
+                               # vs. the 3DO documentation
+sim/run_tb.sh tb_clio          # CLIO interrupt summary, timer cascade, timer controls, TimerSlack,
+                               # DSP output memory and FIFO status, FIFOs (DSP reads during DMA refills),
+                               # DSP instructions without operands, frame start state, empty input FIFOs,
+                               # frame reload value, audio lock, shifts with operand control,
+                               # XBUS control read-back and DMA reset flush, indirect operands,
+                               # CSTAT writes, ADBIO read-back
+sim/run_tb.sh tb_math          # MADAM matrix engine: 4x4, 3x3 and 3x3 with divide vs. signed reference,
+                               # matrix and vector read-back, MSYS read only
 sim/run_tb.sh tb_arm6          # ARM60 core vs. datasheet: shifts, MSR, unaligned loads, STM/LDM ^,
                                # undefined instruction trap, R15 writes, LDRT/STRT nTRANS, with the
                                # core paused at random points (needs sim/build_testrom.sh first)
@@ -382,7 +659,10 @@ sim/run_tb.sh tb_sdram         # SDRAM controller vs. timing-checking SDRAM mode
 sim/run_tb.sh tb_rtcache       # VRAM read-transfer cache and ddram.sv: coherence vs. reference VRAM model,
                                # CEL-engine framebuffer writes during cache fills, VDL frame buffer hints,
                                # page copies with video transfers between their read and write transfers,
-                               # a line's two transfers apart with the first missing
+                               # a line's two transfers apart with the first missing, write transfers
+                               # with the VRAM halves out of step, write masks in on-chip, SRAM and
+                               # SDRAM rows, split transfers after writes; +sram_mode=0/1/2 (VRAM
+                               # memory setting)
 sim/build_testrom.sh           # assemble the test BIOS (sim/tb/testrom.S) and sim/tb/arm6_isa.S
 sim/run_tb.sh tb_top           # whole core: boots the test BIOS; checks the Buttons setting
 sim/run_tb.sh tb_top +be       # same with a big-endian host
@@ -409,8 +689,9 @@ outside the memory map, the last CPU bus cycles are written to `cpu_trace.txt`. 
 started late while the 3DO was paused is one, see *Limitations*) or SDRAM model error.
 
 It also keeps a shadow of VRAM, updated from the VRAM bus by its semantics (random
-writes, flash writes, read and write transfers, with the CPU's SPORT transfers on their own
-serial register). Every beat a read transfer gets from the SDRAM path (cache or
+writes, flash writes, read and write transfers under their write masks, with the CPU's
+SPORT transfers on their own serial register). The destination-row reads of masked
+writes are checked against it too. Every beat a read transfer gets from the SDRAM path (cache or
 `ddram.sv`) must match the shadow row as it was when the transfer started, and at the end
 all of SDRAM-backed VRAM must match the shadow. It counts the page copies that had a
 video or VDL transfer between their two halves. `+vram_watch=<row>` (hex) logs one VRAM
@@ -420,6 +701,19 @@ power-on, and every change of that 64-bit word in the SDRAM model (with its flas
 flag and the row's clear colour), together with what the SDRAM's second port was doing.
 At the end it prints how many split read transfers were skipped because the video serial
 register already held their half-row, and the late lines per second.
+
+If the 3DO stays paused for 500 µs, the memory system has hung: a TB error; the state of
+every pause source (VRAM modules, read-transfer cache, `ddram.sv`, the SDRAM's second
+port, MADAM's bus) is printed and the run ends. `+hang_trace_from_us=<µs>` (with
+`+hang_trace_us=`) logs every change of those signals to `hang_trace.txt`.
+`+sram_mode=0/1/2` selects the VRAM memory setting (default 0, SRAM); the end-of-run check
+reads each off-chip VRAM word from the SRAM or the SDRAM model, wherever it is.
+`+copy_log_ms=<ms>` logs the CPU's write transfers (page copies) for 50 ms with the video
+line each starts in, and whether its source row holds one value (a frame buffer clear).
+`+pad_ctl=<file>` presses buttons while the simulation runs: every 50 ms of 3DO time the
+file is read again and its new lines carried out, `<button>[+<button>] <hold_ms>` or
+`wait <ms>` (buttons `a b x y up down left right l r start select`), to get through a
+disc's menus.
 
 The SDRAM model (`sim/models/sdram_model.sv`, used by all of these) puts read data out as
 a real part does at the programmed CAS latency, with the board and I/O delays of the routed
@@ -441,6 +735,12 @@ ISO and BIOS, formats NVRAM, then sends SetupComplete and CoreRun. The test BIOS
 * ROM data
 * NVRAM
 * the CD drive through CLIO XBUS: read capacity, and a two-sector read
+* SPORT copies and flash writes with write masks (some bits, none, all, different in
+  the two VRAM halves) in on-chip, SRAM and SDRAM rows, every word of the destination
+  row checked after each (run from DRAM)
+* CLIO from the CPU: timer controls and TimerSlack read back, a cascaded timer pair
+  right after the low timer's borrow, the INT1 summary in INT0 bit 31
+* MADAM's matrix engine: a 3x3 matrix with negative entries times a vector
 * the CLIO software reset the BIOS uses to boot a disc: the CPU must restart in
   supervisor mode with IRQ and FIQ disabled, the interrupted state in SPSR and R14
 

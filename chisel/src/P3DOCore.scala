@@ -43,6 +43,9 @@ class P3DOCore extends Module with Core {
             bankWidth = 2,
             chips = 1,
         )
+        // VRAM blocks the per-game table places in the 512 KiB SRAM (its
+        // own bus: no 3DO pause for them, see rtl/gamebub/vram_sram.sv)
+        val sram = new SramV0(addressWidth = 18, dataWidth = 16)
     })
 
     bindExtModule("p3do_gamebub", io, Map(

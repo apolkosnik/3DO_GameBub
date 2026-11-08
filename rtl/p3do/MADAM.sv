@@ -251,7 +251,7 @@ module MADAM
 				
 			if (REG_CTRL_SEL && nRW) begin
 				case ({A[7:2],2'b00})
-					8'h04: MSYS <= CPU_DI;
+					8'h04: ;   // MSYS reports the memory configuration: read only (Opera; Portfolio only reads it, mem.c FindRamSize)
 					8'h08: MCTL <= CPU_DI;
 					default:;
 				endcase
@@ -355,7 +355,11 @@ module MADAM
 				end
 			endcase
 			
-			MATH_RES = ($signed(MATH_M) * $signed(MATH_V)) + (MATH_CALC_ROW_START ? '0 : $signed(MATH_ACC));
+			// Game Bub port: a signed zero. With the unsigned '0 the
+			// conditional, and so the whole 64-bit expression, was unsigned:
+			// the factors were zero-extended, -0.5 * 0.5 gave 7FFFC000
+			// instead of FFFFC000 (IEEE 1800-2017 11.8.1).
+			MATH_RES = ($signed(MATH_M) * $signed(MATH_V)) + (MATH_CALC_ROW_START ? 64'sd0 : $signed(MATH_ACC));
 			{MATH_RES_DONE} <= '0;
 			if (MATH_STEP) begin
 				MATH_ACC <= MATH_RES;
@@ -376,7 +380,7 @@ module MADAM
 //	wire         MATH_VECTOR_BANK = 0;//MATH_CTRL[4];
 	
 	wire         MATRIX_WE = REG_MATRIX_SEL && A[7:0] <= 8'h3F && nRW && MCLK_PH2;
-	wire [ 3: 0] MATRIX_RA = {MATH_MROW,MATH_MCOL};
+	wire [ 3: 0] MATRIX_RA = MATH_ON ? {MATH_MROW,MATH_MCOL} : A[5:2];   // the engine, else the CPU's read
 	bit  [31: 0] MATRIX_DO;
 	MADAM_MATH_MATRIX MATH_MATRIX (.CLK(CLK), .WA(A[5:2]), .DIN(CPU_DI), .WE(MATRIX_WE & CE_R), .RA(MATRIX_RA), .DOUT(MATRIX_DO));
 	

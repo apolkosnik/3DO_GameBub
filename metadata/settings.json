@@ -60,6 +60,27 @@
 			"default": "0x0"
 		},
 		{
+			"id": 5,
+			"label": "VRAM memory",
+			"address": "0x00001010",
+			"type": "list",
+			"items": [
+				{
+					"label": "SRAM",
+					"value": "0x0"
+				},
+				{
+					"label": "SRAM, safe timing",
+					"value": "0x1"
+				},
+				{
+					"label": "SDRAM only",
+					"value": "0x2"
+				}
+			],
+			"default": "0x0"
+		},
+		{
 			"id": 2,
 			"label": "Reset",
 			"address": "0x00001004",

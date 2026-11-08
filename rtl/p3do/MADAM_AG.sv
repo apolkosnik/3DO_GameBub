@@ -144,6 +144,25 @@ module MADAM_AG
 	wire [ 6: 0] DMA_STACK_RADDR = {DMA_ADDR_FF_1,DMA_CTL.DMA_REG_READ_SEL ? DMA_CTL.DMA_REG_READ_CTL : DMA_ADDR_FF_0};
 	wire [ 6: 0] DMA_STACK_WADDR = DMA_CTL.DMA_REG_WRITE_SEL ? {DMA_ADDR_FF_1,DMA_ADDR_FF_0} : {DMA_ADDR_FF_1[6:3],DMA_CTL.DMA_REG_WRITE_CTL};
 	wire         DMA_STACK_WE = DMA_CTL.DMA_REG_WRITE_EN;
+	// A CPU write of an audio channel's current address (register 0) or
+	// remaining length (1) sets its next starting address (2) / length (3) to
+	// zero in the next clock tick (WO 94/10641, audio data groups: channels
+	// 0x00-0x0C to the DSP, 0x10-0x13 from it)
+	wire [ 4: 0] CPU_WCHAN = DMA_STACK_WADDR[6:2];
+	wire         CPU_CUR_WRITE = DMA_CTL.DMA_REG_WRITE_SEL && DMA_STACK_WE && !DMA_STACK_WADDR[1] &&
+	                             (CPU_WCHAN <= 5'h0C || (CPU_WCHAN >= 5'h10 && CPU_WCHAN <= 5'h13));
+	bit          NEXT_CLEAR;
+	bit  [ 6: 0] NEXT_CLEAR_ADDR;
+	always @(posedge CLK or negedge RST_N) begin
+		if (!RST_N) begin
+			NEXT_CLEAR <= 0;
+			NEXT_CLEAR_ADDR <= '0;
+		end
+		else if (EN && CE_R) begin
+			NEXT_CLEAR <= CPU_CUR_WRITE;
+			if (CPU_CUR_WRITE) NEXT_CLEAR_ADDR <= DMA_STACK_WADDR | 7'h02;
+		end
+	end
 	
 	bit  [23: 2] DMA_STACK_OUT;
 	MADAM_DMA_STACK DMA_STACK
@@ -152,9 +171,9 @@ module MADAM_AG
 		.CE(CE_R),
 		.EN(EN),
 		
-		.WADDR(DMA_STACK_WADDR),
-		.DIN(DMA_STACK_IN),
-		.WE(DMA_STACK_WE),
+		.WADDR(NEXT_CLEAR ? NEXT_CLEAR_ADDR : DMA_STACK_WADDR),
+		.DIN(NEXT_CLEAR ? 22'h000000 : DMA_STACK_IN),
+		.WE(NEXT_CLEAR || DMA_STACK_WE),
 		
 		.RADDR(DMA_STACK_RADDR),
 		.DOUT(DMA_STACK_OUT)

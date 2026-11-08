@@ -306,14 +306,27 @@ module ddram
 			ram_read  <= 0;
 			case (state)
 				0: begin
-					if (burst_write_lbusy) begin 
+					// Game Bub port: a write burst is two passes of 128 beats,
+					// one per half-row; wpos[7] says which pass this is, and
+					// the second ends the burst. It is the half-row of the
+					// burst's address (a write transfer starts at column 0 and
+					// the address moves to the second half after the first
+					// pass). The original kept wpos[7] from the previous pass,
+					// whichever half's it was: a left burst started between
+					// the right half's two passes (the halves out of step, a
+					// video transfer on one half when a write transfer comes)
+					// ended after one pass, its VRAM module waited for the
+					// rest for ever (the 3DO stayed paused), and the right
+					// half's second pass was taken as a first one, so a third
+					// ran on into the next row.
+					if (burst_write_lbusy) begin
 						burst_lact <= 1;
 						if (burst_write_rbusy && burst_raddr == burst_laddr) burst_ract <= 1;
 						vram_fw_baddr <= burst_laddr[19:3];
 						vram_fw_bwr <= 1;
 						ram_address <= {8'b00000000,burst_laddr[19:3],2'b00};
 						ram_burst   <= 128;
-						wpos[6:0] <= '0;
+						wpos <= {burst_laddr[10], 7'b0000000};
 						blte <= 1;
 						if (burst_write_rbusy && burst_raddr == burst_laddr) brte <= 1;
 						state       <= 4'd1;
@@ -324,7 +337,7 @@ module ddram
 						vram_fw_bwr <= 1;
 						ram_address <= {8'b00000000,burst_raddr[19:3],2'b00};
 						ram_burst   <= 128;
-						wpos[6:0] <= '0;
+						wpos <= {burst_raddr[10], 7'b0000000};
 						brte <= 1;
 						state       <= 4'd1;
 					end

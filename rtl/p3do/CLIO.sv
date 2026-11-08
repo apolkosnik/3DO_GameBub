@@ -102,6 +102,14 @@ module CLIO
 	bit  [15: 0] TM_CNT[16];
 	bit  [15: 0] TM_RELOAD[16];
 	bit  [ 3: 0] TM_CTRL[16];
+	// Game Bub port: TimerSlack (0x220). The timers count once per 64 +
+	// TimerSlack CE_R (M25M) ticks: CLIO scans its 16 timers at 4 ticks
+	// each, then waits TimerSlack ticks (Opera opera_clock.c). The OS sets it
+	// so that a count takes 16 us: (16 us / 40 ns) - 64 = 336 (Portfolio
+	// kernel timer.c, start_timers). The original ignored the register and
+	// counted every 400 ticks; the value after reset is not documented, 336
+	// keeps that period until the OS writes it.
+	bit  [ 9: 0] TM_SLACK;
 	
 	bit  [31: 0] UNCLE_BITS;
 	
@@ -158,13 +166,12 @@ module CLIO
 	bit  [31: 0] IO_DI_LATCH;
 	bit          IO_XBUS_WR;
 	bit          IO_XBUS_RD;
-	bit          XBUS_DMA_READY,DMA_XBUS_ACT;
+	bit          XBUS_DMA_READY,DMA_XBUS_ACT,XBUS_DMA_RST;
 	bit  [31: 0] XBUS_DMA_DO;
 	bit  [31: 0] XBUS_DO;
 	bit          XBUS_READY;
 //	bit  [ 8: 0] DSP_ADDR;
 	bit  [15: 0] DSP_DO;
-	bit  [15: 0] DSP_DO_LATCH;
 	
 	bit          DSP_ACCESS_32;
 	bit          DSP_NRAM32_WE;
@@ -206,10 +213,9 @@ module CLIO
 	always @(posedge CLK or negedge RST_N) begin
 		bit          EINT_N_OLD;
 		bit  [31: 0] DMAEN_OLD;
-		bit  [ 9: 0] TM_CLKDIV;
+		bit  [10: 0] TM_CLKDIV;
 		bit          TM_CLK;
-		bit          TM_CASCADE[16];
-		bit          TM_ZERO[16];
+		bit          TM_CARRY;
 		bit  [ 1: 0] DMA_EXP_WORD_CNT;
 		bit          DMA_EXP_PEND_INC,DMA_EXP_PEND_DEC;
 		bit  [ 2: 0] DMA_DSP_WORD_CNT;
@@ -225,6 +231,7 @@ module CLIO
 			INT1_PEND <= '0;
 			INT0_EN <= '0;
 			INT1_EN <= '0;
+			TM_SLACK <= 10'd336;
 			HDELAY <= '0;
 			UNCLE_BITS <= '0;
 			{ADBIO_D,ADBIO_O} <= '0;
@@ -267,6 +274,7 @@ module CLIO
 			INT1_PEND <= '0;
 			INT0_EN <= '0;
 			INT1_EN <= '0;
+			TM_SLACK <= 10'd336;
 			HDELAY <= '0;
 			UNCLE_BITS <= '0;
 			{ADBIO_D,ADBIO_O} <= '0;
@@ -299,8 +307,8 @@ module CLIO
 		end
 		else if (EN && CE_R) begin
 			if (IO_EN) TM_CLK <= 0;
-			TM_CLKDIV <= TM_CLKDIV + 10'd1;
-			if (TM_CLKDIV == 10'd399) begin//TODO: use TimerSlack register
+			TM_CLKDIV <= TM_CLKDIV + 11'd1;
+			if (TM_CLKDIV >= 11'd63 + {1'b0,TM_SLACK}) begin
 				TM_CLKDIV <= '0;
 				TM_CLK <= 1;
 			end
@@ -380,7 +388,15 @@ module CLIO
 								case ({A[5:2],2'b00})
 									6'h08: VINT0 <= CPU_DI[10:0];
 									6'h0C: VINT1 <= CPU_DI[10:0];
-									6'h28: begin CSTAT <= CPU_DI; CSTAT[6] <= &CPU_DI[5:4]; end
+									// PON, ROLLOVER and DIPIRReset (bits 0, 1, 6) are only
+									// cleared by a write of 0, the watchdog bits (2, 3) are
+									// not written, ClearDIPIR (5) is not stored; SoftReset
+									// (4) starts the reset above and clears itself; both
+									// at once set DIPIRReset (Opera opera_clio_poke 0x28)
+									6'h28: begin
+										CSTAT <= (CPU_DI & 32'hFFFFFF80) | (CSTAT & CPU_DI & 32'h00000043) | (CSTAT & 32'h0000000C) | (CPU_DI & 32'h00000010);
+										if (&CPU_DI[5:4]) CSTAT[6] <= 1;
+									end
 									6'h38: RAND_SEED <= CPU_DI;
 									default:;
 								endcase
@@ -393,7 +409,7 @@ module CLIO
 							end
 							else if (INTERRUPT_SEL) begin
 								case ({A[7:2],2'b00})
-									8'h40: INT0_PEND <= INT0_PEND | CPU_DI;
+									8'h40: INT0_PEND <= INT0_PEND | {1'b0,CPU_DI[30:0]};   //bit 31: the INT1 summary (read only)
 									8'h44: INT0_PEND <= INT0_PEND & ~CPU_DI;
 									8'h48: INT0_EN <= INT0_EN | CPU_DI;
 									8'h4C: INT0_EN <= INT0_EN & ~CPU_DI;
@@ -420,6 +436,7 @@ module CLIO
 									8'h04: {TM_CTRL[ 7],TM_CTRL[ 6],TM_CTRL[ 5],TM_CTRL[ 4],TM_CTRL[ 3],TM_CTRL[ 2],TM_CTRL[ 1],TM_CTRL[ 0]} <= {TM_CTRL[ 7],TM_CTRL[ 6],TM_CTRL[ 5],TM_CTRL[ 4],TM_CTRL[ 3],TM_CTRL[ 2],TM_CTRL[ 1],TM_CTRL[ 0]} & ~CPU_DI;
 									8'h08: {TM_CTRL[15],TM_CTRL[14],TM_CTRL[13],TM_CTRL[12],TM_CTRL[11],TM_CTRL[10],TM_CTRL[ 9],TM_CTRL[ 8]} <= {TM_CTRL[15],TM_CTRL[14],TM_CTRL[13],TM_CTRL[12],TM_CTRL[11],TM_CTRL[10],TM_CTRL[ 9],TM_CTRL[ 8]} |  CPU_DI;
 									8'h0C: {TM_CTRL[15],TM_CTRL[14],TM_CTRL[13],TM_CTRL[12],TM_CTRL[11],TM_CTRL[10],TM_CTRL[ 9],TM_CTRL[ 8]} <= {TM_CTRL[15],TM_CTRL[14],TM_CTRL[13],TM_CTRL[12],TM_CTRL[11],TM_CTRL[10],TM_CTRL[ 9],TM_CTRL[ 8]} & ~CPU_DI;
+									8'h20: TM_SLACK <= CPU_DI[9:0];
 									default:;
 								endcase
 								IO_ST <= IO_IDLE;
@@ -548,7 +565,6 @@ module CLIO
 				endcase
 				IO_A_LATCH <= A[10:2];
 				IO_DI_LATCH <= CPU_DI;
-				DSP_DO_LATCH <= DSP_DO;
 				
 				//Interrupts
 				
@@ -582,12 +598,20 @@ module CLIO
 				if (TMINT_REQ[0]) INT0_PEND[10] <= 1;//Timer1 int
 				
 				//Timers
+				// Game Bub port: timer i counts in the scan right after
+				// timer i-1 (Opera opera_clio_timer_execute), so a cascaded
+				// timer takes the borrow of the one below it in the same
+				// count: a cascaded pair goes 0001:0000 -> 0000:FFFF. The
+				// original passed it on one count (16 us) later, through
+				// 0001:FFFF, and the OS's cascaded clock read wrong values
+				// around each borrow.
 				TMINT_REQ <= '{8{0}};
-				for (int i=0; i<16; i++) begin
-					if (TM_CLK) begin
-						TM_CASCADE[i] = (i == 0 ? 1'b0 : TM_ZERO[i-1]);
-						TM_ZERO[i] <= 0;
-						if (TM_CTRL[i][0] && (!TM_CTRL[i][2] || TM_CASCADE[i])) begin
+				if (TM_CLK) begin
+					TM_CARRY = 0;
+					for (int i=0; i<16; i++) begin
+						bit uf;
+						uf = 0;
+						if (TM_CTRL[i][0] && (!TM_CTRL[i][2] || TM_CARRY)) begin
 							TM_CNT[i] <= TM_CNT[i] - 16'd1;
 							if (TM_CNT[i] == 16'h0000) begin
 								if (TM_CTRL[i][1]) begin
@@ -596,10 +620,11 @@ module CLIO
 								else begin
 									TM_CTRL[i][0] <= 0;
 								end
-								TM_ZERO[i] <= 1;
+								uf = 1;
 								if (i & 1) TMINT_REQ[i/2] <= 1;
 							end
 						end
+						TM_CARRY = uf;
 					end
 				end
 				
@@ -665,9 +690,10 @@ module CLIO
 					INT0_PEND[29] <= 1;
 				end
 				
+				// Game Bub port: INT0 bit 31 is not latched: it reads as the
+				// summary of the enabled INT1 interrupts (below)
 				if (PB_INT) begin
 					INT1_PEND[0] <= 1;
-					INT0_PEND[31] <= 1;
 				end
 				
 				//DMA
@@ -840,8 +866,14 @@ module CLIO
 						if (CLC == 3'h2) begin
 							
 						end
-						if (CLC == 3'h3) begin
+						if (CLC == 3'h3 || CLC == 3'h4) begin
 							DMA_INT_REQ <= 1;
+						end
+						// the transfer is complete (no next buffer): the channel stops
+						// requesting until the CPU enables it again (Portfolio's
+						// dsphSetDMANext / dsphSetFullDMA write DMAREQEN each time)
+						if (CLC == 3'h4) begin
+							DMAEN[DMA_CHAN] <= 0;
 						end
 						DMA_ST <= DMA_END;
 					end
@@ -860,7 +892,7 @@ module CLIO
 						if (CLC == 3'h2) begin
 	//						DMA_INT_REQ <= 1;
 						end
-						if (CLC == 3'h3) begin
+						if (CLC == 3'h3 || CLC == 3'h4) begin
 							DMA_INT_REQ <= 1;
 						end
 						DMA_ST <= DMA_END;
@@ -894,6 +926,13 @@ module CLIO
 				end
 				if ( DMA_EXP_PEND_INC && !DMA_EXP_PEND_DEC) DMA_EXP_PEND <= DMA_EXP_PEND + 2'd1;
 				if (!DMA_EXP_PEND_INC &&  DMA_EXP_PEND_DEC) DMA_EXP_PEND <= DMA_EXP_PEND - 2'd1;
+				// XB_DMARESET: the FIFO is flushed, nothing is left to move
+				if (XBUS_DMA_RST) begin
+					DMA_EXP_PEND <= '0;
+					DMA_EXP_WORD_CNT <= '0;
+					DMA_EXP_FIFO_WRITE <= 0;
+					DMA_EXP_FIFO_READ <= 0;
+				end
 			end
 		end
 	end
@@ -917,8 +956,13 @@ module CLIO
 			endcase
 		else if (INTERRUPT_SEL)
 			case ({A[7:2],2'b00})
+				// Game Bub port: bit 31, an enabled INT1 interrupt is pending
+				// (Opera opera_clio_peek; the FIQ includes them, FIRQ_N). The
+				// original returned a latched bit: set by any player bus
+				// interrupt, enabled or not, until cleared through 0x44, and
+				// never by the other INT1 sources.
 				8'h40,
-				8'h44: CPU_DO <= INT0_PEND;
+				8'h44: CPU_DO <= {|(INT1_PEND & INT1_EN),INT0_PEND[30:0]};
 				8'h48,
 				8'h4C: CPU_DO <= {1'b1,INT0_EN[30:0]};
 				8'h50,
@@ -928,12 +972,27 @@ module CLIO
 				8'h68,
 				8'h6C: CPU_DO <= INT1_EN;
 				8'h80: CPU_DO <= HDELAY;
-				8'h84: CPU_DO <= {16'h0000,12'h000,ADBIO_I};
+				// the direction (RWDIR) and the pads (RWPADS, Portfolio clio.h):
+				// the pads as this core drives them, the output latch (ROM bank,
+				// mute, watchdog follow it); Portfolio updates the register by
+				// read/modify/write (cdipir.c, exceptions.c)
+				8'h84: CPU_DO <= {16'h0000,8'h00,ADBIO_D,ADBIO_O};
 				default: CPU_DO <= '0;
 			endcase
 		else if (TIMER_SEL)
 			if (!A[2]) CPU_DO <= {16'h0000,TM_CNT[A[6:3]]};
 			else       CPU_DO <= {16'h0000,TM_RELOAD[A[6:3]]};
+		// Game Bub port: the timer controls (set and clear address of each
+		// bank alike) and TimerSlack read back (the original returned 0)
+		else if (TIMER_CTRL_SEL)
+			case ({A[7:2],2'b00})
+				8'h00,
+				8'h04: CPU_DO <= {TM_CTRL[ 7],TM_CTRL[ 6],TM_CTRL[ 5],TM_CTRL[ 4],TM_CTRL[ 3],TM_CTRL[ 2],TM_CTRL[ 1],TM_CTRL[ 0]};
+				8'h08,
+				8'h0C: CPU_DO <= {TM_CTRL[15],TM_CTRL[14],TM_CTRL[13],TM_CTRL[12],TM_CTRL[11],TM_CTRL[10],TM_CTRL[ 9],TM_CTRL[ 8]};
+				8'h20: CPU_DO <= {22'h000000,TM_SLACK};
+				default: CPU_DO <= '0;
+			endcase
 		else if (FIFO_SEL)
 			case ({A[7:2],2'b00})
 				8'h04: CPU_DO <= DMAEN;
@@ -953,10 +1012,13 @@ module CLIO
 				8'hB0: CPU_DO <= {28'h0000000,EIFIFO_COUNT[12]};
 //				8'hB4: CPU_DO <= {28'h0000000,EIFIFO_COUNT[ 0]};
 //				8'hB8: CPU_DO <= {28'h0000000,EIFIFO_COUNT[ 0]};
-				8'hC0: CPU_DO <= {28'h0000000,EIFIFO_COUNT[ 0]};
-				8'hC4: CPU_DO <= {28'h0000000,EIFIFO_COUNT[ 1]};
-				8'hC8: CPU_DO <= {28'h0000000,EIFIFO_COUNT[ 2]};
-				8'hCC: CPU_DO <= {28'h0000000,EIFIFO_COUNT[ 3]};
+				// Game Bub port: 0x3C0-0x3CC are the DSPP -> DMA (output) FIFOs'
+				// status (Portfolio clio.h clio_FIFOStatusDSPPtoDMA); the
+				// original returned input FIFOs 0-3 again
+				8'hC0: CPU_DO <= {28'h0000000,EOFIFO_COUNT[ 0]};
+				8'hC4: CPU_DO <= {28'h0000000,EOFIFO_COUNT[ 1]};
+				8'hC8: CPU_DO <= {28'h0000000,EOFIFO_COUNT[ 2]};
+				8'hCC: CPU_DO <= {28'h0000000,EOFIFO_COUNT[ 3]};
 				default: CPU_DO <= '0;
 			endcase
 		else if (XBUS_SEL)
@@ -970,8 +1032,12 @@ module CLIO
 				8'hFC: CPU_DO <= {31'h00000000,DSP_GW};
 				default: CPU_DO <= '0;
 			endcase
+		// Game Bub port: a 32-bit read of the DSP output memory returns the
+		// even word in bits 31-16 and the odd word in bits 15-0 (as a 32-bit
+		// write stores them; Opera). The original returned the even word
+		// twice (DSP_DO_LATCH latched the same address).
 		else if (DSP_EORAM32_SEL)
-			CPU_DO <= {DSP_DO,DSP_DO_LATCH};
+			CPU_DO <= {DSP_DO,DSP_DO_ODD};
 		else if (DSP_EORAM16_SEL)
 			CPU_DO <= {16'h0000,DSP_DO};
 		else if (UNCLE_SEL)
@@ -1024,6 +1090,7 @@ module CLIO
 		.DMA_ACT(DMA_XBUS_ACT),
 		.DMA_RDY(XBUS_DMA_READY),
 		.DMA_DO(XBUS_DMA_DO),
+		.DMA_RST(XBUS_DMA_RST),
 		
 		.EDI(EDI),
 		.EDO(EDO),
@@ -1039,7 +1106,7 @@ module CLIO
 	bit  [31: 0] XBUS_FIFO_Q;
 	bit          XBUS_FIFO_FULL;
 	bit          XBUS_FIFO_EMPTY;
-	CLIO_DMA_FIFO XBUS_FIFO (.CLK(CLK), .EN(EN), .RST(~RST_N), .DATA(XBUS_DMA_DO), .WRREQ(DMA_EXP_FIFO_WRITE & IO_EN & CE_R), .RDREQ(DMA_EXP_FIFO_READ & IO_EN & CE_R), .Q(XBUS_FIFO_Q), .FULL(XBUS_FIFO_FULL), .EMPTY(XBUS_FIFO_EMPTY));
+	CLIO_DMA_FIFO XBUS_FIFO (.CLK(CLK), .EN(EN), .RST(~RST_N | XBUS_DMA_RST), .DATA(XBUS_DMA_DO), .WRREQ(DMA_EXP_FIFO_WRITE & IO_EN & CE_R), .RDREQ(DMA_EXP_FIFO_READ & IO_EN & CE_R), .Q(XBUS_FIFO_Q), .FULL(XBUS_FIFO_FULL), .EMPTY(XBUS_FIFO_EMPTY));
 	
 	//DSP
 	bit          DSP_RESET;
@@ -1124,6 +1191,20 @@ module CLIO
 		
 		.RA(DSP_ADDR[3:0]),
 		.RD(DSP_EORAM_DO)
+	);
+	// Game Bub port: a copy for the odd word of a 32-bit CPU read
+	bit  [15: 0] DSP_EORAM_ODD_DO;
+	CLIO_DSP_EORAM EORAM_ODD
+	(
+		.CLK(CLK),
+		.EN(EN),
+		
+		.WA(DSP_EO_ADDR[3:0]),
+		.WD(DSP_EO_DATA),
+		.WE(DSP_EORAM_WE & DSP_EN & CE_R),
+		
+		.RA({DSP_ADDR[3:1],1'b1}),
+		.RD(DSP_EORAM_ODD_DO)
 	);
 	
 	wire NOISE_OE = (DSP_EI_ADDR == 8'hEA);					//0x0EA
@@ -1227,21 +1308,23 @@ module CLIO
 	bit  [15: 0] CNTR,RELOAD;
 	wire CNTR_OE   = DSP_EI_ADDR == 8'hEF;				//0x0EF
 	wire RELOAD_WE = DSP_EO_ADDR == 8'hEF && DSP_EO_WE;	//0x3EF
+	wire CNTR_OUT  = CNTR == 16'd0 && RELOAD != 16'd0 && DSP_GW;	// the counter ran out
 	always @(posedge CLK or negedge RST_N) begin
 		if (!RST_N) begin
 			CNTR <= '0;
-			RELOAD <= '0;
+			RELOAD <= 16'd565;                  // power-on value (Opera DSPPRLD = SYSTEM_TICKS)
 			DSP_RESET <= 0;
 		end
 		else if (EN && DSP_EN && CE_R) begin
 			DSP_RESET <= 0;
 			
+			// A frame starts when the counter runs out, or with every audio word
+			// strobe in audio lock (then the counter still counts and reloads but
+			// starts nothing), or on the CPU's reset. The reload value stays what
+			// the DSP last wrote (Opera opera_dsp_reset: DSPPCNT = DSPPRLD).
 			if (DSP_GW) CNTR <= CNTR - 16'd1;
-			if ((!CNTR && RELOAD && DSP_GW) || DSP_RST || (AUDWS && AUDLOCK)) begin
-				CNTR <= RELOAD;
-				RELOAD <= 16'd565;
-				DSP_RESET <= 1;
-			end
+			if (CNTR_OUT || DSP_RST != 2'b00 || (AUDWS && AUDLOCK)) CNTR <= RELOAD;
+			if ((CNTR_OUT && !AUDLOCK) || DSP_RST != 2'b00 || (AUDWS && AUDLOCK)) DSP_RESET <= 1;
 			
 			if (RELOAD_WE) begin
 				RELOAD <= DSP_EO_DATA;
@@ -1365,7 +1448,10 @@ module CLIO
 				EOFIFO_WE_LATCH[ 2] <= EOFIFO2_WE;
 				EOFIFO_WE_LATCH[ 3] <= EOFIFO3_WE;
 				
-				if ((EIFIFO_OE || EIFIFO_OE2) && DSP_EI_OE) begin
+				// the next word, if the FIFO has one (or gets one now, the FIFO's
+				// bypass); an empty FIFO keeps giving the word it holds
+				if ((EIFIFO_OE || EIFIFO_OE2) && DSP_EI_OE &&
+				    (EIFIFO_COUNT[DSP_EI_ADDR[3:0]] != 4'd0 || (EIFIFO_WRREQ[DSP_EI_ADDR[3:0]] && IO_EN))) begin
 					EIFIFO_BUF[DSP_EI_ADDR[3:0]] <= EIFIFO_Q[DSP_EI_ADDR[3:0]];
 //					EIFIFO_BUF_EMPTY[DSP_EI_ADDR[3:0]] <= 1;
 				end
@@ -1448,13 +1534,18 @@ module CLIO
 						      PC_OE ? DSP_PC :
 						      CNTR_OE ? CNTR : '0;
 								
-	assign DSP_DO = DSP_ADDR[7:0] >= 8'h00 && DSP_ADDR[7:0] <= 8'h0F ? DSP_EORAM_DO :
-	                DSP_ADDR[7:0] == 8'hEB ? {AUDLOCK,15'b000_0000_0000_0000} : 
-	                DSP_ADDR[7:0] == 8'hEC ? {12'b0000_0000_0000,DSP_SEMAPHORE_STAT} :
-	                DSP_ADDR[7:0] == 8'hED ? DSP_SEMAPHORE :
-	                DSP_ADDR[7:0] == 8'hEE ? DSP_CPUINT :
-	                DSP_ADDR[7:0] == 8'hEF ? RELOAD :
-						 '0;
+	function automatic [15:0] dsp_eo_read(input [7:0] a, input [15:0] eoram);
+		return a <= 8'h0F ? eoram :
+		       a == 8'hEB ? {AUDLOCK,15'b000_0000_0000_0000} :
+		       a == 8'hEC ? {12'b0000_0000_0000,DSP_SEMAPHORE_STAT} :
+		       a == 8'hED ? DSP_SEMAPHORE :
+		       a == 8'hEE ? DSP_CPUINT :
+		       a == 8'hEF ? RELOAD :
+		       '0;
+	endfunction
+	assign DSP_DO = dsp_eo_read(DSP_ADDR[7:0], DSP_EORAM_DO);
+	// the odd word of a 32-bit CPU read (DSP_ADDR is the even one)
+	wire [15: 0] DSP_DO_ODD = dsp_eo_read({DSP_ADDR[7:1],1'b1}, DSP_EORAM_ODD_DO);
 	
 	CLIO_VIDEO VIDEO
 	(

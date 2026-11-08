@@ -35,6 +35,12 @@
 // and a fill pauses the 3DO for ~6 us, which held the second of them back
 // past the start of the line when a prefetch started after the first.
 //
+// A VRAM module's read of a write transfer's destination row (vram.sv, a
+// write mask: the row is read, merged and written back) is not for the
+// display: it prefetches nothing (l_esnp / r_esnp) and leaves the queued
+// prefetches alone. Its prefetches would have evicted the display's rows,
+// and the fill of the row after it waited behind the merged write burst.
+//
 // For the same reason a demand fill for one side waits while MADAM is still
 // in its video DMA sequence (vid_dma), until the other side has requested
 // too, or 2 us have passed. When a line's first transfer missed, the fill
@@ -69,12 +75,14 @@ module vram_rtcache #(
 
 	// VRAM modules, external path
 	input              l_esrd,
+	input              l_esnp,             // the request is not for the display: no prefetch
 	input      [17: 0] l_esaddr,
 	input              l_eswr,
 	input              l_esfw,
 	output             l_este,
 	output     [31: 0] l_esq,
 	input              r_esrd,
+	input              r_esnp,
 	input      [17: 0] r_esaddr,
 	input              r_eswr,
 	output             r_este,
@@ -163,6 +171,7 @@ module vram_rtcache #(
 	reg  [ 9:0] fill_h;
 
 	reg         req_v    [2];     // registered new requests (ESRD)
+	reg         req_np   [2];     // ... not for the display (ESNP)
 	reg  [17:0] req_a    [2];
 
 	reg         dem_pend [2];     // demand misses waiting for an entry
@@ -308,8 +317,8 @@ module vram_rtcache #(
 		if (frame && !frame_d && last_v[0]) frame_pend <= 1;
 		hint_d   <= hint;
 		hint_q   <= 0;
-		req_v[0] <= l_esrd; req_a[0] <= l_esaddr;
-		req_v[1] <= r_esrd; req_a[1] <= r_esaddr;
+		req_v[0] <= l_esrd; req_a[0] <= l_esaddr; req_np[0] <= l_esnp;
+		req_v[1] <= r_esrd; req_a[1] <= r_esaddr; req_np[1] <= r_esnp;
 		sn_we  <= ddr_we && ddr_addr[24:17] == '0;
 		sn_h   <= ddr_addr[16:7];
 		sn_fw  <= l_esfw;
@@ -368,8 +377,10 @@ module vram_rtcache #(
 						dem_h[s]    <= h;
 						dem_beat[s] <= {1'b0, req_a[s][7:1]};
 					end
-					if (!is_internal(10'(h + 1))) begin pf_v[0] <= 1; pf_h[0] <= 10'(h + 1); pf_hint[0] <= 0; end
-					if (!is_internal(10'(h + 2))) begin pf_v[1] <= 1; pf_h[1] <= 10'(h + 2); pf_hint[1] <= 0; end
+					if (!req_np[s]) begin
+						if (!is_internal(10'(h + 1))) begin pf_v[0] <= 1; pf_h[0] <= 10'(h + 1); pf_hint[0] <= 0; end
+						if (!is_internal(10'(h + 2))) begin pf_v[1] <= 1; pf_h[1] <= 10'(h + 2); pf_hint[1] <= 0; end
+					end
 				end
 			end
 

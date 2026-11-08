@@ -21,6 +21,10 @@
 //   * a line's two transfers ~0.15 us apart, as MADAM's video DMA issues
 //     them, with the first missing: its fill waits for the second while
 //     MADAM is in its video DMA sequence, at most 2 us (phase 11)
+//   * write transfers with the halves out of step (phase 12)
+//   * write masks on copies and flash writes in on-chip, SRAM and SDRAM
+//     rows, and split transfers after writes into the half-row the video
+//     shift register holds (phase 13)
 // and checks every word shifted out against a reference model of VRAM. The
 // important cases write to rows that are already in the cache.
 //
@@ -69,22 +73,29 @@ module tb_rtcache;
 	wire vctl_t vctl_r = (r_delay == 0) ? vctl_now : vctl_hist[r_delay - 1];
 	// MADAM's bus is in a video DMA sequence (vram_rtcache.sv)
 	reg vid_dma = 0;
+	// The video DMA's transfers go to one VRAM half at a time (MADAM's
+	// LEFT_TRANS / RIGHT_TRANS): l_off / r_off keep that half's RAS high
+	// (phase 12).
+	reg l_off = 0, r_off = 0;
+	wire v_lbusy, v_rbusy, v_lnp, v_rnp;
 
 	P3DO_VRAM #(0) vram_l (
 		.CLK(clk_sys), .CLK_MEM(clk_mem), .RST_N(~rst),
-		.A(A), .D(DL), .Q(), .RAS_N(RAS_N), .CAS_N(CAS_N), .WE_N(WE_N), .OE_N(OE_N), .DSF1(DSF1),
+		.A(A), .D(DL), .Q(), .RAS_N(RAS_N | l_off), .CAS_N(CAS_N), .WE_N(WE_N), .OE_N(OE_N), .DSF1(DSF1),
 		.SC(SC), .SE_N(1'b0), .SQ(SQL), .QSF(), .RDY(RDYL),
-		.EQ(16'h0), .ESADDR(v_laddr), .ESDATA(bldata), .ESWR(v_lwr), .ESRD(v_lrd), .ESFW(v_lfw),
+		.EQ(16'h0), .ESADDR(v_laddr), .ESDATA(bldata), .ESWR(v_lwr), .ESRD(v_lrd), .ESNP(v_lnp), .ESFW(v_lfw),
 		.ESQ(v_lq), .ESTE(v_lte),
-		.BRAM4_OFFS(4'h0), .BRAM2_OFFS(4'h4), .BRAM1_OFFS(BRAM1_OFFS), .SP_CPU(SP_CPU), .DBG_WAIT_CNT()
+		.BRAM4_OFFS(4'h0), .BRAM2_OFFS(4'h4), .BRAM1_OFFS(BRAM1_OFFS), .SP_CPU(SP_CPU),
+		.DP(DR), .PEER_BUSY(v_rbusy), .XBUSY(v_lbusy), .DBG_WAIT_CNT()
 	);
 	P3DO_VRAM #(0) vram_r (
 		.CLK(clk_sys), .CLK_MEM(clk_mem), .RST_N(~rst),
-		.A(vctl_r.a), .D(DR), .Q(), .RAS_N(vctl_r.ras_n), .CAS_N(vctl_r.cas_n), .WE_N(vctl_r.we_n), .OE_N(vctl_r.oe_n), .DSF1(vctl_r.dsf1),
+		.A(vctl_r.a), .D(DR), .Q(), .RAS_N(vctl_r.ras_n | r_off), .CAS_N(vctl_r.cas_n), .WE_N(vctl_r.we_n), .OE_N(vctl_r.oe_n), .DSF1(vctl_r.dsf1),
 		.SC(SC), .SE_N(1'b0), .SQ(SQR), .QSF(), .RDY(RDYR),
-		.EQ(16'h0), .ESADDR(v_raddr), .ESDATA(brdata), .ESWR(v_rwr), .ESRD(v_rrd), .ESFW(),
+		.EQ(16'h0), .ESADDR(v_raddr), .ESDATA(brdata), .ESWR(v_rwr), .ESRD(v_rrd), .ESNP(v_rnp), .ESFW(),
 		.ESQ(v_rq), .ESTE(v_rte),
-		.BRAM4_OFFS(4'h0), .BRAM2_OFFS(4'h4), .BRAM1_OFFS(BRAM1_OFFS), .SP_CPU(SP_CPU), .DBG_WAIT_CNT()
+		.BRAM4_OFFS(4'h0), .BRAM2_OFFS(4'h4), .BRAM1_OFFS(BRAM1_OFFS), .SP_CPU(SP_CPU),
+		.DP(DL), .PEER_BUSY(v_lbusy), .XBUSY(v_rbusy), .DBG_WAIT_CNT()
 	);
 
 	// ---------------- cache + ddram.sv ----------------
@@ -105,8 +116,8 @@ module tb_rtcache;
 
 	vram_rtcache #(.ENTRIES(16)) cache (
 		.clk(clk_mem), .rst(rst), .BRAM1_OFFS(BRAM1_OFFS),
-		.l_esrd(v_lrd), .l_esaddr(v_laddr), .l_eswr(v_lwr), .l_esfw(v_lfw), .l_este(v_lte), .l_esq(v_lq),
-		.r_esrd(v_rrd), .r_esaddr(v_raddr), .r_eswr(v_rwr), .r_este(v_rte), .r_esq(v_rq),
+		.l_esrd(v_lrd), .l_esnp(v_lnp), .l_esaddr(v_laddr), .l_eswr(v_lwr), .l_esfw(v_lfw), .l_este(v_lte), .l_esq(v_lq),
+		.r_esrd(v_rrd), .r_esnp(v_rnp), .r_esaddr(v_raddr), .r_eswr(v_rwr), .r_este(v_rte), .r_esq(v_rq),
 		.d_bladdr(ddr_bladdr), .d_blrd(ddr_blrd), .d_blwr(ddr_blwr), .d_bfw(ddr_bfw),
 		.d_braddr(ddr_braddr), .d_brrd(ddr_brrd), .d_brwr(ddr_brwr),
 		.d_blte(ddr_blte), .d_brte(ddr_brte), .d_bout(ddr_bout), .d_ba(ddr_ba), .d_bbusy(ddr_bbusy),
@@ -154,6 +165,40 @@ module tb_rtcache;
 		.sec_rdata(sec_rdata), .sec_rvalid(sec_rvalid), .sec_done(sec_done)
 	);
 
+	// VRAM blocks in the SRAM (vram_sram.sv, as in the core): +sram_mode=0
+	// (two cycles per word, the default), 1 (three), 2 (none: all in the
+	// SDRAM). With the per-game defaults and the on-chip block at 0xC0000 the
+	// SRAM has blocks 0-6 and C; the test rows are in both memories.
+	bit  [ 1:0] sram_mode = 2'd0;
+	initial begin
+		int m;
+		if ($value$plusargs("sram_mode=%d", m)) sram_mode = 2'(m);
+		$display("tb_rtcache: VRAM memory mode %0d (%s)", sram_mode,
+		         sram_mode == 0 ? "SRAM, 2 cycles per word" : sram_mode == 1 ? "SRAM, 3 cycles per word" : "SDRAM only");
+	end
+	wire        d_req, d_wnext, d_rvalid, d_done;
+	wire [15:0] d_rdata;
+	wire        sr_ce_n, sr_we_n, sr_oe_n, sr_dir;
+	wire [ 1:0] sr_mask_n;
+	wire [17:0] sr_a;
+	wire [15:0] sr_dout, sr_din;
+	wire [15:0] vs_map_v;
+	wire [ 2:0] vs_map_slot [16];
+	vram_sram vsram (
+		.clk(clk_mem), .rst(rst), .mode(sram_mode),
+		.BRAM4_OFFS(4'h0), .BRAM2_OFFS(4'h4), .BRAM1_OFFS(BRAM1_OFFS),
+		.c_req(sec_req), .c_we(sec_we), .c_addr(sec_addr), .c_len(sec_len), .c_wdata(sec_wdata), .c_wbe(sec_wbe),
+		.c_wnext(sec_wnext), .c_rdata(sec_rdata), .c_rvalid(sec_rvalid), .c_done(sec_done),
+		.s_req(d_req), .s_wnext(d_wnext), .s_rdata(d_rdata), .s_rvalid(d_rvalid), .s_done(d_done),
+		.sram_ceN(sr_ce_n), .sram_weN(sr_we_n), .sram_oeN(sr_oe_n), .sram_writeMaskN(sr_mask_n),
+		.sram_address(sr_a), .sram_dataIn(sr_din), .sram_dataOut(sr_dout), .sram_dataDir(sr_dir),
+		.map_v(vs_map_v), .map_slot(vs_map_slot)
+	);
+	sram_model sram (
+		.ce_n(sr_ce_n), .we_n(sr_we_n), .oe_n(sr_oe_n), .mask_n(sr_mask_n), .a(sr_a),
+		.dq_from_fpga(sr_dout), .dq_dir(sr_dir), .dq_to_fpga(sr_din)
+	);
+
 	wire        s_clk, s_cke, s_cs, s_ras, s_cas, s_we, s_oe;
 	wire [ 1:0] s_dqm, s_ba;
 	wire [12:0] s_a;
@@ -168,15 +213,42 @@ module tb_rtcache;
 		.sync(1'b0), .laddr('0), .lwe('0), .lras(1'b0), .lcode('0), .raddr('0), .rwe('0), .rras(1'b0),
 		.rcode('0), .din('0), .dout(),
 		.CORE_RST(1'b1), .SEC_PAUSED(1'b0), .SEC_HOLD(),
-		.sec_req(sec_req), .sec_we(sec_we), .sec_addr(sec_addr), .sec_len(sec_len),
-		.sec_wdata(sec_wdata), .sec_wbe(sec_wbe), .sec_wnext(sec_wnext),
-		.sec_rdata(sec_rdata), .sec_rvalid(sec_rvalid), .sec_done(sec_done)
+		.sec_req(d_req), .sec_we(sec_we), .sec_addr(sec_addr), .sec_len(sec_len),
+		.sec_wdata(sec_wdata), .sec_wbe(sec_wbe), .sec_wnext(d_wnext),
+		.sec_rdata(d_rdata), .sec_rvalid(d_rvalid), .sec_done(d_done)
 	);
 
 	sdram_model model (
 		.clk(s_clk), .cke(s_cke), .cs_n(s_cs), .ras_n(s_ras), .cas_n(s_cas), .we_n(s_we),
 		.dqm(s_dqm), .ba(s_ba), .a(s_a), .dq_from_fpga(s_dq_out), .dq_oe_fpga(s_oe), .dq_to_fpga(s_dq_in)
 	);
+
+	// VRAM rows in the SRAM (vram_sram.sv map)
+	function automatic bit in_sram(input [8:0] row);
+		return sram_mode != 2'd2 && vs_map_v[row[8:5]];
+	endfunction
+	// Every read-transfer fill from the SRAM must keep ahead of a line's
+	// serial read-out started with it: at least one 64-bit beat (two columns
+	// of each VRAM half) per 160 ns, two video dots; 128 beats in 20.48 us.
+	// Fills from the SDRAM pause the 3DO and are timed by phases 10 and 11.
+	realtime fr_t0;
+	real     fr_max [2] = '{0.0, 0.0};
+	int      fr_n [2] = '{0, 0};
+	bit      fr_sram;
+	always @(posedge clk_mem) begin
+		if (cache.fill_issue) begin
+			fr_t0 = $realtime;
+			fr_sram = in_sram(cache.fill_h[9:1]);
+		end
+		if (cache.fill_busy && cache.d_blte && cache.d_ba[8:2] == 7'd127) begin
+			real us;
+			us = ($realtime - fr_t0) / 1000.0;
+			fr_n[fr_sram]++;
+			if (us > fr_max[fr_sram]) fr_max[fr_sram] = us;
+			if (fr_sram && us > 20.48)
+				fail($sformatf("SRAM fill of half-row %03h took %0.2f us: slower than a line's serial read-out", cache.fill_h, us));
+		end
+	end
 
 	// ---------------- reference model ----------------
 	bit [15:0] ref_l [bit [17:0]];
@@ -202,7 +274,7 @@ module tb_rtcache;
 		do begin
 			mem_cycles(8);
 			to++;
-		end while ((vram_l.RT_EXEC || vram_l.MWT_EXEC || vram_l.FW_EXEC || vram_r.RT_EXEC || vram_r.MWT_EXEC ||
+		end while ((vram_l.XBUSY || vram_r.XBUSY ||
 		            cache.fill_busy || cache.dl_act[0] || cache.dl_act[1] || ddr_bbusy ||
 		            ddram.state != 0 || ddram.write_lpend || ddram.write_rpend || sec_req) && to < 20000);
 		if (to >= 20000) fail("timeout waiting for idle");
@@ -272,12 +344,35 @@ module tb_rtcache;
 		ref_l[a] = dl; ref_r[a] = dr;
 	endtask
 
+	// Write masks: the CPU's write data to MADAM's SPORT space is the write
+	// mask of a write transfer or flash write (1: the bit is written, 0: the
+	// row keeps it), one per VRAM half. In the core it is on the data bus
+	// from CAS (PHASE2 of the access; P3DO.sv registers the CPU's write data
+	// at PHASE1), not yet when RAS falls: the bus model puts the mask's
+	// complement there until CAS, as a stand-in for the stale data.
+	function automatic [15:0] merge(input [15:0] new_, input [15:0] old, input [15:0] m);
+		return (new_ & m) | (old & ~m);
+	endfunction
+	task automatic sport_ras(input [17:0] a, input bit oe_n, input [1:0] we_n, input bit dsf,
+	                         input [15:0] dl, input [15:0] dr);
+		@(posedge clk_mem); DL <= ~dl; DR <= ~dr;
+		ras_cycle(a, oe_n, we_n, dsf);
+	endtask
+	task automatic sport_cas(input [15:0] dl, input [15:0] dr);
+		@(posedge clk_mem); DL <= dl; DR <= dr; CAS_N <= 0;
+		mem_cycles(4);
+	endtask
+
 	// MWT: write the current shift register into row 'row'
-	task automatic mwt(input [8:0] row);
-		ras_cycle({row, 9'h0}, 0, 2'b00, 0);
+	task automatic mwt(input [8:0] row, input [15:0] ml = 16'hFFFF, input [15:0] mr = 16'hFFFF);
+		sport_ras({row, 9'h0}, 0, 2'b00, 0, ml, mr);
+		sport_cas(ml, mr);
 		ras_end();
 		wait_idle();
-		for (int i = 0; i < 512; i++) begin ref_l[{row, 9'(i)}] = sr_l[i]; ref_r[{row, 9'(i)}] = sr_r[i]; end
+		for (int i = 0; i < 512; i++) begin
+			ref_l[{row, 9'(i)}] = merge(sr_l[i], rl({row, 9'(i)}), ml);
+			ref_r[{row, 9'(i)}] = merge(sr_r[i], rr({row, 9'(i)}), mr);
+		end
 	endtask
 
 	// The CPU's SPORT read transfer (MADAM: SPORT space read, column 0, full
@@ -290,28 +385,121 @@ module tb_rtcache;
 		wait_idle();
 		for (int i = 0; i < 512; i++) begin sc_l[i] = rl({row, 9'(i)}); sc_r[i] = rr({row, 9'(i)}); end
 	endtask
-	task automatic cpu_mwt(input [8:0] row);
+	task automatic cpu_mwt(input [8:0] row, input [15:0] ml = 16'hFFFF, input [15:0] mr = 16'hFFFF);
 		@(posedge clk_mem); SP_CPU <= 1;
-		ras_cycle({row, 9'h0}, 0, 2'b00, 0);
+		sport_ras({row, 9'h0}, 0, 2'b00, 0, ml, mr);
+		sport_cas(ml, mr);
 		ras_end();
 		SP_CPU <= 0;
 		wait_idle();
-		for (int i = 0; i < 512; i++) begin ref_l[{row, 9'(i)}] = sc_l[i]; ref_r[{row, 9'(i)}] = sc_r[i]; end
+		for (int i = 0; i < 512; i++) begin
+			ref_l[{row, 9'(i)}] = merge(sc_l[i], rl({row, 9'(i)}), ml);
+			ref_r[{row, 9'(i)}] = merge(sc_r[i], rr({row, 9'(i)}), mr);
+		end
 	endtask
 
-	// FW: load the colour registers, flash-write row 'row'
-	task automatic flash_write(input [8:0] row, input [15:0] cl, input [15:0] cr);
-		// colour load: RAS with DSF and no OE/WE, then CAS with the colour
-		ras_cycle({row, 9'h0}, 1, 2'b11, 1);
-		@(posedge clk_mem); DL <= cl; DR <= cr; mem_cycles(2);
-		CAS_N <= 0; mem_cycles(4);
+	// Phase 12: commands issued as soon as MADAM may, as in the core: when a
+	// RAS falls while a VRAM half is still busy with a transfer, that half's
+	// RDY drops, PAUSE stops MADAM with the command on the pins, and the half
+	// takes the command when it becomes ready. 'paused_hung' is set if a half
+	// never becomes ready.
+	bit paused_hung = 0;
+	task automatic hold_until_ready(input string what);
+		int to;
+		mem_cycles(4);
+		to = 0;
+		while ((!RDYL || !RDYR) && to < 20000) begin @(posedge clk_mem); to++; end
+		if (to >= 20000) begin
+			fail($sformatf("%s: a VRAM half never became ready (L RDY %b MWT %b, R RDY %b MWT %b): its write transfer did not end",
+			               what, RDYL, vram_l.MWT_EXEC, RDYR, vram_r.MWT_EXEC));
+			paused_hung = 1;
+		end
+		mem_cycles(4);
+	endtask
+	// the CPU's write transfer into 'row', not waiting for it to end
+	// (CAS falls before the busy half is ready: the half takes the command
+	// late, with CAS already low)
+	task automatic cpu_mwt_paused(input [8:0] row);
+		@(posedge clk_mem); SP_CPU <= 1;
+		sport_ras({row, 9'h0}, 0, 2'b00, 0, 16'hFFFF, 16'hFFFF);
+		sport_cas(16'hFFFF, 16'hFFFF);
+		hold_until_ready($sformatf("write transfer into row %03h", row));
 		ras_end();
-		// flash write: RAS with WE and DSF, then CAS
-		ras_cycle({row, 9'h0}, 1, 2'b00, 1);
-		@(posedge clk_mem); CAS_N <= 0; mem_cycles(4);
+		SP_CPU <= 0;
+		for (int i = 0; i < 512; i++) begin ref_l[{row, 9'(i)}] = sc_l[i]; ref_r[{row, 9'(i)}] = sc_r[i]; end
+	endtask
+	// a video split read transfer to one half only, not waiting for it to end
+	task automatic half_rt_paused(input bit right, input [17:0] a);
+		if (right) l_off = 1; else r_off = 1;
+		ras_cycle(a, 0, 2'b11, 1);
+		hold_until_ready($sformatf("%s read transfer %05h", right ? "right" : "left", a));
+		ras_end();
+		l_off = 0; r_off = 0;
+	endtask
+
+	// Phase 12 coverage. ddram.sv serves a half's write burst in two passes
+	// of 128 beats (one half-row each) and serves the left half first.
+	// l_between: a left write burst started while the right half's burst was
+	// between its two passes (its first done, its second still to come);
+	// r_during_l: a right write burst latched while only the left half's
+	// burst was in progress.
+	int ph12_l_between = 0, ph12_r_during_l = 0;
+	bit ph12_brwr_d = 0, ph12_lstart_d = 0;
+	always @(posedge clk_mem) begin
+		ph12_brwr_d <= ddr_brwr;
+		if (ddr_brwr && !ph12_brwr_d && ddram.burst_write_lbusy && !ddram.burst_write_rbusy) ph12_r_during_l++;
+		if (ddram.state == 0 && !DDRAM_BUSY && ddram.burst_write_lbusy && !ph12_lstart_d &&
+		    ddram.burst_write_rbusy && ddram.burst_raddr[10] && ddram.burst_raddr != ddram.burst_laddr) ph12_l_between++;
+		ph12_lstart_d <= ddram.state == 0 && !DDRAM_BUSY && ddram.burst_write_lbusy;
+	end
+
+	// FW: load the colour registers, flash-write row 'row' (MADAM: the
+	// CPU's writes to SPORT space with address bit 13, the colour, and bit
+	// 14, the mask)
+	task automatic flash_write(input [8:0] row, input [15:0] cl, input [15:0] cr,
+	                           input [15:0] ml = 16'hFFFF, input [15:0] mr = 16'hFFFF);
+		// colour load: RAS with DSF and no OE/WE, then CAS with the colour
+		sport_ras({row, 9'h0}, 1, 2'b11, 1, cl, cr);
+		sport_cas(cl, cr);
+		ras_end();
+		// flash write: RAS with WE and DSF, then CAS with the mask
+		sport_ras({row, 9'h0}, 1, 2'b00, 1, ml, mr);
+		sport_cas(ml, mr);
 		ras_end();
 		wait_idle();
-		for (int i = 0; i < 512; i++) begin ref_l[{row, 9'(i)}] = cl; ref_r[{row, 9'(i)}] = cr; end
+		for (int i = 0; i < 512; i++) begin
+			ref_l[{row, 9'(i)}] = merge(cl, rl({row, 9'(i)}), ml);
+			ref_r[{row, 9'(i)}] = merge(cr, rr({row, 9'(i)}), mr);
+		end
+	endtask
+
+	// on-chip VRAM in this testbench (vram.sv USE_INT_RAM1 with USE_BRAM 0):
+	// the BRAM1 window and the VDL area
+	function automatic bit on_chip(input [17:0] a);
+		return (a >= ({BRAM1_OFFS, 16'h0000} >> 2) && a <= ({BRAM1_OFFS, 16'hBFFF} >> 2)) || a >= (20'hFC000 >> 2);
+	endfunction
+	// A random write as the core makes it: the VRAM pins (RAS, then WE with
+	// the data: on-chip VRAM is written there, and vram.sv sees the write)
+	// and, for VRAM outside, ddram.sv's write port at the same time
+	task automatic pin_write(input [17:0] a, input [15:0] dl, input [15:0] dr);
+		bit ext;
+		ext = !on_chip(a);
+		while (ddram.busy) @(posedge clk_mem);
+		@(posedge clk_mem);
+		A <= a; DL <= dl; DR <= dr; OE_N <= 1; WE_N <= 2'b11; DSF1 <= 0;
+		if (ext) begin w_addr <= a; w_ldata <= dl; w_rdata <= dr; w_ras <= 1; end
+		mem_cycles(2);
+		RAS_N <= 0;
+		mem_cycles(4);
+		WE_N <= 2'b00;
+		if (ext) begin w_lwe <= 2'b11; w_rwe <= 2'b11; end
+		mem_cycles(4);
+		WE_N <= 2'b11;
+		if (ext) begin w_lwe <= 0; w_rwe <= 0; w_ras <= 0; end
+		mem_cycles(2);
+		RAS_N <= 1;
+		mem_cycles(4);
+		ref_l[a] = dl; ref_r[a] = dr;
 	endtask
 
 	// ---------------- CEL-engine style framebuffer writes ----------------
@@ -431,6 +619,24 @@ module tb_rtcache;
 	bit dl_act_d [2];
 	always @(posedge clk_mem) begin dl_act_d[0] <= cache.dl_act[0]; dl_act_d[1] <= cache.dl_act[1]; end
 
+	// phase 13 coverage: the ways vram.sv carries out a masked write.
+	// n_mrd: destination-row reads outside (partial mask); n_rmw: on-chip
+	// merged block writes; n_lazy: ddram.sv lazy flash fills (both halves
+	// FFFF, in step); n_fwm: a half's flash colour written as a burst
+	int  n_mrd = 0, n_rmw = 0, n_lazy = 0, n_fwm = 0;
+	bit  mrd_l_d = 0, mrd_r_d = 0, bfw_d = 0, fwm_l_d = 0, fwm_r_d = 0;
+	always @(posedge clk_mem) begin
+		mrd_l_d <= vram_l.MRD_EXEC; mrd_r_d <= vram_r.MRD_EXEC; bfw_d <= ddr_bfw;
+		fwm_l_d <= vram_l.MWT_EXEC && vram_l.FWM; fwm_r_d <= vram_r.MWT_EXEC && vram_r.FWM;
+		if (vram_l.MRD_EXEC && !mrd_l_d) n_mrd++;
+		if (vram_r.MRD_EXEC && !mrd_r_d) n_mrd++;
+		if (ddr_bfw && !bfw_d) n_lazy++;
+		if (vram_l.MWT_EXEC && vram_l.FWM && !fwm_l_d) n_fwm++;
+		if (vram_r.MWT_EXEC && vram_r.FWM && !fwm_r_d) n_fwm++;
+		if (vram_l.MEM_SWR && vram_l.MASKED) n_rmw++;
+		if (vram_r.MEM_SWR && vram_r.MASKED) n_rmw++;
+	end
+
 	// read transfers the left VRAM module executes (a skipped split transfer
 	// does not start one)
 	int  n_rt_l = 0;
@@ -446,7 +652,13 @@ module tb_rtcache;
 			         cache.dl_e[s], cache.tag[cache.dl_e[s]], cache.valid[cache.dl_e[s]], cache.filled[cache.dl_e[s]], cache.dl_beat[s]);
 		if (|cache.snoop_hit) $display("[%0t] RTC invalidate %b (we %b h=%03h fw %b row=%03h)", $realtime, cache.snoop_hit,
 		                               cache.sn_we, cache.sn_h, cache.sn_fw, cache.sn_row);
+		if (ddr_blwr != tr_blwr_d || ddr_brwr != tr_brwr_d)
+			$display("[%0t] RTC write burst L %b R %b (L %05h R %05h)", $realtime, ddr_blwr, ddr_brwr, ddr_bladdr, ddr_braddr);
+		if (cache.fill_busy && cache.d_blte && cache.d_ba[8:2] == 7'd127)
+			$display("[%0t] RTC fill h=%03h done", $realtime, cache.fill_h);
 	end
+	bit tr_blwr_d = 0, tr_brwr_d = 0;
+	always @(posedge clk_mem) begin tr_blwr_d <= ddr_blwr; tr_brwr_d <= ddr_brwr; end
 
 	initial begin
 		bit [8:0] rows [8];
@@ -643,13 +855,17 @@ module tb_rtcache;
 		// 10) VDL frame buffer hint: MADAM_AG.sv passes the frame buffer
 		//     addresses a VDL entry loads ~7 us before the video DMA's first
 		//     transfers from them. Those half-rows must then be in the cache
-		//     and completely filled (else the fill pauses MADAM past the
-		//     start of the line).
+		//     and, in the SDRAM, completely filled (else the fill pauses
+		//     MADAM past the start of the line); in the SRAM (no pause) the
+		//     fill must be under way.
 		begin
 			bit [8:0] rows_h [6];
-			int errors0, m0, h0, pf0;
+			int errors0, m0, h0, pf0, fill_cyc;
 			errors0 = errors;
 			rows_h = '{9'h0C0, 9'h0C2, 9'h0C4, 9'h0C6, 9'h0C8, 9'h0CA};
+			// one fill (clk_mem cycles) from the memory these rows are in:
+			// two hinted rows are fetched one after the other
+			fill_cyc = !in_sram(rows_h[0]) ? 700 : sram_mode == 2'd1 ? 1600 : 1100;
 			foreach (rows_h[i]) begin
 				for (int w = 0; w < 512; w += 5) cpu_write({rows_h[i], 9'(w)}, $urandom(), $urandom());
 				wait_idle();
@@ -668,8 +884,13 @@ module tb_rtcache;
 				bit [4:0] f0, f1;
 				f0 = cache.find({rows_h[1], 1'b0});
 				f1 = cache.find({rows_h[1], 1'b1});
-				if (!f0[4] || cache.filled[f0[3:0]] != 8'd128)
-					fail($sformatf("phase 10: hinted half-row %03h not filled 7 us after the hint", {rows_h[1], 1'b0}));
+				// An SDRAM fill pauses the 3DO, so it must have ended before the
+				// line. An SRAM fill pauses nothing and runs ahead of a line's
+				// serial read-out (fill-rate check below): it must be under way.
+				if (!f0[4] || (cache.filled[f0[3:0]] != 8'd128 &&
+				               !(in_sram(rows_h[1]) && cache.fill_busy && cache.fill_e == f0[3:0] && cache.filled[f0[3:0]] != 0)))
+					fail($sformatf("phase 10: hinted half-row %03h not %s 7 us after the hint", {rows_h[1], 1'b0},
+					               in_sram(rows_h[1]) ? "filling" : "filled"));
 				// only what the first line needs: the next half-row is
 				// prefetched by the line's first transfer
 				if (f1[4]) fail($sformatf("phase 10: half-row %03h fetched for the hint as well", {rows_h[1], 1'b1}));
@@ -679,7 +900,7 @@ module tb_rtcache;
 			if (st_hits == h0) fail("phase 10: transfer after the hint did not hit");
 			// current and previous frame buffers in different rows
 			vdl_hint({rows_h[2], 9'h0}, 1, {rows_h[3], 9'h0}, 1);
-			mem_cycles(1400);
+			mem_cycles(2 * fill_cyc);
 			if (!cache.find({rows_h[2], 1'b0})[4]) fail("phase 10: current frame buffer row not prefetched");
 			if (!cache.find({rows_h[3], 1'b0})[4]) fail("phase 10: previous frame buffer row not prefetched");
 			m0 = st_misses;
@@ -699,7 +920,7 @@ module tb_rtcache;
 					vdl_hint({rows_h[4], 9'h0}, 1, {rows_h[5], 9'h0}, 1);
 				end
 			join
-			mem_cycles(1400);
+			mem_cycles(2 * fill_cyc);
 			if (!cache.find({rows_h[4], 1'b0})[4] || !cache.find({rows_h[5], 1'b0})[4])
 				fail("phase 10: hint during a transfer request was lost");
 			rt_read({rows_h[4], 9'h0}, 0, 64);
@@ -740,8 +961,8 @@ module tb_rtcache;
 					cpu_write({fb, 9'(w)}, $urandom(), $urandom());
 				end
 				wait_idle();
-				vdl_hint({fa, 9'h0}, 1, '0, 0); mem_cycles(800);
-				vdl_hint({fb, 9'h0}, 1, '0, 0); mem_cycles(800);
+				vdl_hint({fa, 9'h0}, 1, '0, 0); mem_cycles(fill_cyc + 100);
+				vdl_hint({fb, 9'h0}, 1, '0, 0); mem_cycles(fill_cyc + 100);
 				if (!cache.find({fa, 1'b0})[4] || !cache.find({fb, 1'b0})[4])
 					fail("phase 10: frame buffer rows not fetched for their hints");
 				// other rows push them out of the cache
@@ -754,7 +975,7 @@ module tb_rtcache;
 					fail("phase 10: frame buffer rows fetched again without a frame start");
 				@(posedge clk_sys); frame <= 1;
 				@(posedge clk_sys); @(posedge clk_sys); frame <= 0;
-				mem_cycles(1400);           // two fills
+				mem_cycles(2 * fill_cyc);   // two fills
 				if (!cache.find({fa, 1'b0})[4] || !cache.find({fb, 1'b0})[4])
 					fail("phase 10: frame buffer rows not fetched again at the frame start");
 				m0 = st_misses;
@@ -824,11 +1045,196 @@ module tb_rtcache;
 			$display("[%0t] phase 11: a line's two transfers apart, errors=%0d", $realtime, errors - errors0);
 		end
 
+		// ---------------- phase 12: write transfers with the halves out of step ----------------
+		// A frame buffer clear as games do it: the CPU's SPORT read transfer
+		// of a source row, then write transfers into one row after another,
+		// each issued as soon as MADAM may (held while a VRAM half is busy,
+		// as PAUSE does in the core). The video DMA's transfers go to one
+		// half at a time, so a half can still be busy with one when a write
+		// transfer comes: the other half starts its write burst first.
+		// ddram.sv serves a half's write burst in two passes of 128 beats
+		// and serves the left half first, so a left burst can start between
+		// the right half's two passes. It used to count that pass as the
+		// second one and end the burst after it: the left module then waited
+		// for the rest of its write transfer for ever (the core hung, paused),
+		// and the right half's second pass was counted as a first one and a
+		// third ran on into the next row.
+		// (a) a video transfer to the left half before every write transfer
+		// (the left half starts late), (b) to the right half, (c) none. The
+		// destination rows and the row after each (a guard row nothing
+		// writes) are flash-filled before and read back after, and every
+		// transfer must end.
+		begin
+			bit [8:0] src, vid [2], dst [6];
+			int errors0;
+			errors0 = errors;
+			src = 9'h140; vid = '{9'h150, 9'h152};
+			foreach (dst[i]) dst[i] = 9'(9'h160 + 2 * i);
+			for (int w = 0; w < 512; w += 3) cpu_write({src, 9'(w)}, $urandom(), $urandom());
+			foreach (vid[i]) for (int w = 0; w < 512; w += 9) cpu_write({vid[i], 9'(w)}, $urandom(), $urandom());
+			wait_idle();
+			for (int c = 0; c < 3 && !paused_hung; c++) begin
+				int lb0, rl0, n;
+				lb0 = ph12_l_between; rl0 = ph12_r_during_l;
+				foreach (dst[i]) begin
+					flash_write(dst[i], 16'hD100 + 16'(c), 16'h2E00 + 16'(c));
+					flash_write(9'(dst[i] + 1), 16'h5A00 + 16'(c), 16'hA500 + 16'(c));
+				end
+				cpu_rt(src);
+				// the video rows' half-rows in the cache, so a video transfer
+				// ends ~1.3 us after it starts (a miss would wait for the
+				// write bursts to end)
+				foreach (vid[i]) rt_read({vid[i], 9'h0}, 0, 0);
+				n = 0;
+				foreach (dst[i]) begin
+					if (paused_hung) break;
+					// a different half-row each time: a split transfer of the
+					// half-row the video shift register holds is skipped
+					if (c != 2) half_rt_paused(c == 1, {vid[i % 2], (i / 2) % 2 == 1, 8'h00});
+					if (paused_hung) break;
+					cpu_mwt_paused(dst[i]);
+					n++;
+				end
+				if (!paused_hung) wait_idle();
+				if (vram_l.MWT_EXEC || vram_r.MWT_EXEC || vram_l.RT_EXEC || vram_r.RT_EXEC) begin
+					fail($sformatf("phase 12 (%s): a transfer never ended (left MWT %b RT %b, right MWT %b RT %b)",
+					               c == 0 ? "left half late" : c == 1 ? "right half late" : "in step",
+					               vram_l.MWT_EXEC, vram_l.RT_EXEC, vram_r.MWT_EXEC, vram_r.RT_EXEC));
+					paused_hung = 1;
+				end
+				if (paused_hung) break;
+				foreach (dst[i]) begin
+					rt_read({dst[i], 9'h0}, 0, 512);
+					rt_read({9'(dst[i] + 1), 9'h0}, 0, 512);
+				end
+				$display("[%0t] phase 12 (%s): %0d write transfers; left bursts started between the right half's passes %0d, right bursts latched during a left one %0d",
+				         $realtime, c == 0 ? "left half late" : c == 1 ? "right half late" : "in step", n,
+				         ph12_l_between - lb0, ph12_r_during_l - rl0);
+				if (c == 0 && ph12_l_between == lb0)
+					fail("phase 12: no left write burst started between the right half's two passes (case not exercised)");
+				if (c == 1 && ph12_r_during_l == rl0)
+					fail("phase 12: no right write burst latched during a left one (case not exercised)");
+			end
+			$display("[%0t] phase 12: write transfers with the halves out of step, errors=%0d", $realtime, errors - errors0);
+		end
+
+		// ---------------- phase 13: write masks; split transfers after writes ----------------
+		// The CPU's write transfers (SPORT copies) and flash writes take a
+		// write mask, one per VRAM half: 1 bits are written, 0 bits keep the
+		// row's (US 5,502,462). The core ignored it: a zero or partial mask
+		// overwrote the whole row. For a row in each memory (on-chip, SRAM,
+		// SDRAM): copies and flash writes with partial masks, no bits, all
+		// bits, and different masks in the two halves, each followed by a
+		// read-back of every word of the row and of the next (guard) row.
+		// Then split transfers: the half-row the video shift register holds
+		// is not transferred again (MiSTer core); a flash write, a masked
+		// copy or a random write into that half must make its next split
+		// transfer reload it, and a write into the other half must not.
+		begin
+			bit [8:0] srcs [3], dsts [3];
+			int errors0;
+			errors0 = errors;
+			srcs = '{9'h188, 9'h040, 9'h1A0};   // on-chip (BRAM1 window), SRAM (SDRAM with it off), SDRAM
+			dsts = '{9'h18A, 9'h042, 9'h1A2};
+			for (int k = 0; k < 3; k++) begin
+				bit [8:0] s, d;
+				string mem;
+				int e0, mrd0, rmw0, lazy0, fwm0, n0;
+				s = srcs[k]; d = dsts[k];
+				mem = on_chip({d, 9'h0}) ? "on-chip" : in_sram(d) ? "SRAM" : "SDRAM";
+				if ((k == 0) != on_chip({d, 9'h0}) || (k == 1 && sram_mode != 2'd2 && !in_sram(d)) || (k == 2 && in_sram(d)))
+					fail($sformatf("phase 13: row %03h is not in the memory the test needs (%s)", d, mem));
+				e0 = errors; mrd0 = n_mrd; rmw0 = n_rmw; lazy0 = n_lazy; fwm0 = n_fwm;
+				// every word of the source and destination rows its own
+				flash_write(9'(d + 1), 16'hC3C3, 16'h3C3C);
+				for (int w = 0; w < 512; w++) begin
+					pin_write({s, 9'(w)}, $urandom(), $urandom());
+					pin_write({d, 9'(w)}, $urandom(), $urandom());
+				end
+				wait_idle();
+				// copies and flash writes, each read back (row and guard row)
+				for (int op = 0; op < 12; op++) begin
+					int e1;
+					string what;
+					e1 = errors;
+					case (op)
+						0:  begin
+						        int pf0;
+						        // the destination row's read is not for the display: no prefetch
+						        cpu_rt(s); mem_cycles(400); wait_idle();
+						        pf0 = st_pf;
+						        cpu_mwt(d, 16'h00FF, 16'h0F0F); mem_cycles(400); wait_idle();
+						        if (st_pf != pf0) fail($sformatf("phase 13 (%s): the masked copy's destination-row read started %0d prefetches", mem, st_pf - pf0));
+						        what = "copy, masks 00FF/0F0F";
+						    end
+						1:  begin cpu_rt(s); cpu_mwt(d, 16'h0000, 16'h0000); what = "copy, masks 0000/0000"; end
+						2:  begin flash_write(d, 16'h1234, 16'h5678, 16'hF0F0, 16'hFF00); what = "flash, masks F0F0/FF00"; end
+						3:  begin flash_write(d, 16'h9ABC, 16'hDEF0, 16'h0000, 16'h0000); what = "flash, masks 0000/0000"; end
+						4:  begin cpu_rt(s); cpu_mwt(d, 16'hFFFF, 16'h3C3C); what = "copy, masks FFFF/3C3C"; end
+						5:  begin flash_write(d, 16'h2468, 16'h1357, 16'hFFFF, 16'h0000); what = "flash, masks FFFF/0000"; end
+						6:  begin flash_write(d, 16'h7531, 16'h8642, 16'h0000, 16'hFFFF); what = "flash, masks 0000/FFFF"; end
+						7:  begin cpu_rt(s); cpu_mwt(d, 16'h0000, 16'hA5A5); what = "copy, masks 0000/A5A5"; end
+						8:  begin flash_write(d, 16'h0F1E, 16'h2D3C, 16'h5555, 16'hFFFF); what = "flash, masks 5555/FFFF"; end
+						9:  begin rt_read({s, 9'h0}, 0, 0); mwt(d, 16'h33CC, 16'hFFFF); what = "video write transfer, masks 33CC/FFFF"; end
+						10: begin flash_write(d, 16'h4B4B, 16'hB4B4); what = "flash, masks FFFF/FFFF"; end
+						default: begin cpu_rt(s); cpu_mwt(d); what = "copy, masks FFFF/FFFF"; end
+					endcase
+					rt_read({d, 9'h0}, 0, 512);
+					rt_read({9'(d + 1), 9'h0}, 0, 512);
+					if (errors != e1) $display("[%0t] phase 13 (%s): %s: %0d mismatches", $realtime, mem, what, errors - e1);
+				end
+				// the way each memory carries them out
+				if (k == 0 && (n_rmw == rmw0 || n_mrd != mrd0 || n_lazy != lazy0 || n_fwm != fwm0))
+					fail($sformatf("phase 13 (on-chip): merged writes %0d, row reads %0d, lazy fills %0d, colour bursts %0d (expected merged writes only)",
+					               n_rmw - rmw0, n_mrd - mrd0, n_lazy - lazy0, n_fwm - fwm0));
+				if (k != 0 && (n_mrd == mrd0 || n_fwm == fwm0 || n_lazy == lazy0 || n_rmw != rmw0))
+					fail($sformatf("phase 13 (%s): row reads %0d, colour bursts %0d, lazy fills %0d, merged on-chip writes %0d (expected all but the last)",
+					               mem, n_mrd - mrd0, n_fwm - fwm0, n_lazy - lazy0, n_rmw - rmw0));
+				$display("[%0t] phase 13 (%s): masked copies and flash writes, errors=%0d (row reads %0d, merged on-chip writes %0d, lazy fills %0d, colour bursts %0d)",
+				         $realtime, mem, errors - e0, n_mrd - mrd0, n_rmw - rmw0, n_lazy - lazy0, n_fwm - fwm0);
+
+				// split transfers after writes into the half-row the video
+				// shift register holds (the lower one: the transfer started
+				// at column 0); 256 words read out, so the upper half is the
+				// one being shifted out and the lower one the inactive half
+				e0 = errors;
+				for (int c = 0; c < 5; c++) begin
+					string what;
+					bit reload;
+					rt_read({d, 9'h000}, 0, 256);
+					n0 = n_rt_l;
+					rt_read({d, 9'h000}, 1, 0);
+					if (n_rt_l != n0) fail($sformatf("phase 13 (%s): split transfer of the half-row the video shift register holds was not skipped", mem));
+					rt_read({d, 9'h000}, 0, 256);
+					reload = 1;
+					case (c)
+						0: begin flash_write(d, 16'h1357, 16'h2468); what = "flash write"; end
+						1: begin flash_write(d, 16'hE1E1, 16'h1E1E, 16'h0FF0, 16'hF00F); what = "masked flash write"; end
+						2: begin cpu_rt(s); cpu_mwt(d, 16'hFF00, 16'h00FF); what = "masked copy"; end
+						3: begin pin_write({d, 9'h013}, 16'hBEEF, 16'hF00D); what = "random write"; end
+						default: begin pin_write({d, 9'h1F3}, 16'hCAFE, 16'hD00D); what = "random write into the other half"; reload = 0; end
+					endcase
+					n0 = n_rt_l;
+					rt_read({d, 9'h000}, 1, 512);
+					if (reload && n_rt_l == n0) fail($sformatf("phase 13 (%s): split transfer after a %s into its half-row was skipped", mem, what));
+					if (!reload && n_rt_l != n0) fail($sformatf("phase 13 (%s): split transfer was not skipped after a %s", mem, what));
+				end
+				$display("[%0t] phase 13 (%s): split transfers after writes, errors=%0d", $realtime, mem, errors - e0);
+			end
+			$display("[%0t] phase 13: write masks, split transfers after writes, errors=%0d", $realtime, errors - errors0);
+		end
+
 		$display("tb_rtcache: %0d words checked, hits %0d misses %0d prefetches %0d invalidations %0d",
 		         checks, st_hits, st_misses, st_pf, st_inv);
-		$display("tb_rtcache: TB errors=%0d, SDRAM model errors=%0d", errors, model.errors);
+		$display("tb_rtcache: read-transfer fills: %0d from the SDRAM (longest %0.2f us), %0d from the SRAM (longest %0.2f us)",
+		         fr_n[0], fr_max[0], fr_n[1], fr_max[1]);
+		if (sram_mode != 2'd2 && fr_n[1] == 0) fail("no read-transfer fill came from the SRAM");
+		$display("tb_rtcache: TB errors=%0d, SDRAM model errors=%0d, SRAM model errors=%0d (%0d SRAM writes)",
+		         errors, model.errors, sram.errors, sram.writes);
+		if (sram_mode != 2 && sram.writes == 0) fail("no VRAM write reached the SRAM");
+		if (sram_mode == 2 && sram.writes != 0) fail("VRAM writes reached the SRAM with it off");
 		// a failure ends with a non-zero exit status ($fatal), so scripts see it
-		if (errors == 0 && model.errors == 0 && st_inv > 0) begin $display("tb_rtcache: PASS"); $finish; end
+		if (errors == 0 && model.errors == 0 && sram.errors == 0 && st_inv > 0) begin $display("tb_rtcache: PASS"); $finish; end
 		else $fatal(1, "tb_rtcache: FAIL");
 	end
 

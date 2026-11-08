@@ -51,3 +51,26 @@ set_input_delay -clock sdram_clk_out -max 6.8 [get_ports sdram_dq[*]]
 set_input_delay -clock sdram_clk_out -min 2.7 [get_ports sdram_dq[*]]
 set_multicycle_path -setup 2 -from [get_clocks sdram_clk_out] \
     -to [get_clocks -of_objects [get_pins -hier -filter {NAME =~ */clocks/mmcm0/CLKOUT1}]]
+
+########################################
+# SRAM (sram_sec.sv: VRAM blocks in the SRAM, vram_sram.sv)
+########################################
+# Every SRAM pin comes from an I/O block register and WE from an ODDR, so the
+# pins change together (the fork's SRAM controller found on the board that
+# placement-dependent fabric delays between them corrupted writes). The read
+# data goes into I/O block registers. The data bus direction is one fabric
+# register for all 16 pins (the framework has a single direction bit); the
+# bus only turns around with an idle cycle in between.
+set_property IOB TRUE [get_cells -hier -filter {(NAME =~ */vsram/sram/o_addr_reg* || NAME =~ */vsram/sram/o_data_reg* || NAME =~ */vsram/sram/o_mask_reg* || NAME =~ */vsram/sram/o_oe_n_reg* || NAME =~ */vsram/sram/i_data_reg*) && IS_SEQUENTIAL}]
+# The SRAM is asynchronous. sram_sec.sv takes read data two clk_mem cycles
+# after the clk_mem edge that puts the address out (three with the "safe
+# timing" setting), and the next address goes out at that edge. Read data:
+# the address's clock-to-pad delay (at most 5 ns), the traces (0.5 ns each
+# way) and a 10 ns part's access time; it holds for the address's minimum
+# clock-to-pad delay (1.5 ns) plus the part's output hold (2.5 ns) after the
+# next address goes out.
+set sram_clk_mem [get_clocks -of_objects [get_pins -hier -filter {NAME =~ */clocks/mmcm0/CLKOUT1}]]
+set_input_delay -clock $sram_clk_mem -max 16.0 [get_ports sram_io[*]]
+set_input_delay -clock $sram_clk_mem -min  4.0 [get_ports sram_io[*]]
+set_multicycle_path -setup 2 -from [get_ports sram_io[*]]
+set_multicycle_path -hold 1 -from [get_ports sram_io[*]]

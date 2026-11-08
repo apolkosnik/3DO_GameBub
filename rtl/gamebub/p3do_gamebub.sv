@@ -75,7 +75,15 @@ module p3do_gamebub #(
 	output logic [12:0] sdram_address,
 	input  logic [15:0] sdram_dataIn,
 	output logic [15:0] sdram_dataOut,
-	output logic        sdram_dataDir
+	output logic        sdram_dataDir,
+	output logic        sram_ceN,
+	output logic        sram_weN,
+	output logic        sram_oeN,
+	output logic [1:0]  sram_writeMaskN,
+	output logic [17:0] sram_address,
+	input  logic [15:0] sram_dataIn,
+	output logic [15:0] sram_dataOut,
+	output logic        sram_dataDir
 );
 	/////////////////////////  CLOCKS / RESET  ///////////////////////////////
 	wire clk_mem, clk_sdram, clk_vid, clk_sys_gen;
@@ -114,6 +122,7 @@ module p3do_gamebub #(
 	wire [ 1:0] region_sel;
 	wire        bios_pal;
 	wire        button_layout;
+	wire [ 1:0] vram_mem;
 	wire        disc_stream, disc_change;
 	wire        toc_we, sb_we;
 	wire [ 8:0] toc_wa;
@@ -154,6 +163,7 @@ module p3do_gamebub #(
 		.region_sel      (region_sel),
 		.bios_pal        (bios_pal),
 		.button_layout   (button_layout),
+		.vram_mem        (vram_mem),
 		.disc_stream     (disc_stream),
 		.disc_change     (disc_change),
 		.toc_we          (toc_we),
@@ -525,11 +535,12 @@ module p3do_gamebub #(
 	wire [15:0] ddr_sec_wdata;
 	wire [ 1:0] ddr_sec_wbe;
 	wire [ 2:0] arb_wnext, arb_rvalid, arb_done;
+	wire        vs_sdram_req;
 
 	sec_arb #(.N(3)) arb (
 		.clk     (clk_mem),
 		.rst     (rst_mem),
-		.c_req   ({host_sec_req, cdd_sec_req, ddr_sec_req}),
+		.c_req   ({host_sec_req, cdd_sec_req, vs_sdram_req}),
 		.c_we    ({host_sec_we,  cdd_sec_we,  ddr_sec_we}),
 		.c_addr  ('{ddr_sec_addr,  cdd_sec_addr,  host_sec_addr}),
 		.c_len   ('{ddr_sec_len,   cdd_sec_len,   host_sec_len}),
@@ -550,7 +561,49 @@ module p3do_gamebub #(
 		.m_rvalid(m_rvalid),
 		.m_done  (m_done)
 	);
-	wire ddr_sec_wnext  = arb_wnext[0],  ddr_sec_rvalid  = arb_rvalid[0],  ddr_sec_done  = arb_done[0];
+	// ddr_bridge.sv's requests for VRAM blocks in the SRAM go there instead
+	// (vram_sram.sv): no SDRAM access, so no pause of the 3DO
+	wire        ddr_sec_wnext, ddr_sec_rvalid, ddr_sec_done;
+	wire [15:0] ddr_sec_rdata;
+	// the "VRAM memory" setting, taken while the 3DO is in reset (the map
+	// must not change under a running game)
+	reg  [ 1:0] vram_mem_r = 2'd0;
+	always @(posedge clk_sys) if (reset_3do) vram_mem_r <= vram_mem;
+	wire [15:0] vsram_map_v;
+	wire [ 2:0] vsram_map_slot [16];
+	vram_sram vsram (
+		.clk            (clk_mem),
+		.rst            (rst_mem),
+		.mode           (vram_mem_r),
+		.BRAM4_OFFS     (BRAM4_OFFS),
+		.BRAM2_OFFS     (BRAM2_OFFS),
+		.BRAM1_OFFS     (BRAM1_OFFS),
+		.c_req          (ddr_sec_req),
+		.c_we           (ddr_sec_we),
+		.c_addr         (ddr_sec_addr),
+		.c_len          (ddr_sec_len),
+		.c_wdata        (ddr_sec_wdata),
+		.c_wbe          (ddr_sec_wbe),
+		.c_wnext        (ddr_sec_wnext),
+		.c_rdata        (ddr_sec_rdata),
+		.c_rvalid       (ddr_sec_rvalid),
+		.c_done         (ddr_sec_done),
+		.s_req          (vs_sdram_req),
+		.s_wnext        (arb_wnext[0]),
+		.s_rdata        (sec_rdata),
+		.s_rvalid       (arb_rvalid[0]),
+		.s_done         (arb_done[0]),
+		.sram_ceN       (sram_ceN),
+		.sram_weN       (sram_weN),
+		.sram_oeN       (sram_oeN),
+		.sram_writeMaskN(sram_writeMaskN),
+		.sram_address   (sram_address),
+		.sram_dataIn    (sram_dataIn),
+		.sram_dataOut   (sram_dataOut),
+		.sram_dataDir   (sram_dataDir),
+		.map_v          (vsram_map_v),
+		.map_slot       (vsram_map_slot)
+	);
 	assign cdd_sec_wnext  = arb_wnext[1];
 	assign cdd_sec_rvalid = arb_rvalid[1];
 	assign cdd_sec_done   = arb_done[1];
@@ -572,6 +625,7 @@ module p3do_gamebub #(
 	wire [17: 0] v_laddr, v_raddr;
 	wire         v_lwr, v_rwr, v_lrd, v_rrd, v_lfw;
 	wire         v_lte, v_rte;
+	wire         v_lbusy, v_rbusy, v_lnp, v_rnp;
 	wire [31: 0] v_lq, v_rq;
 	wire [17: 0] ddr_bladdr, ddr_braddr;
 	wire         ddr_blwr, ddr_brwr, ddr_blrd, ddr_brrd, ddr_bfw;
@@ -586,10 +640,11 @@ module p3do_gamebub #(
 		.RAS_N(LRAS0_N), .CAS_N(LCAS_N), .WE_N(LWE_N), .OE_N(LOE_N), .DSF1(LDSF),
 		.SC(LSC), .SE_N(1'b0), .SQ(VRAM_SQ[31:16]), .QSF(LQSF), .RDY(VRAM_LRDY),
 		.EQ(ddr_do[31:16]), .ESADDR(v_laddr), .ESDATA(vram_bldata),
-		.ESWR(v_lwr), .ESRD(v_lrd), .ESFW(v_lfw),
+		.ESWR(v_lwr), .ESRD(v_lrd), .ESNP(v_lnp), .ESFW(v_lfw),
 		.ESQ(v_lq), .ESTE(v_lte),
 		.BRAM4_OFFS(BRAM4_OFFS), .BRAM2_OFFS(BRAM2_OFFS), .BRAM1_OFFS(BRAM1_OFFS),
 		.SP_CPU(VRAM_SP_CPU),
+		.DP(RAM_DO[15:0]), .PEER_BUSY(v_rbusy), .XBUSY(v_lbusy),
 		.DBG_WAIT_CNT()
 	);
 
@@ -599,10 +654,11 @@ module p3do_gamebub #(
 		.RAS_N(RRAS0_N), .CAS_N(RCAS_N), .WE_N(RWE_N), .OE_N(ROE_N), .DSF1(RDSF),
 		.SC(RSC), .SE_N(1'b0), .SQ(VRAM_SQ[15:0]), .QSF(RQSF), .RDY(VRAM_RRDY),
 		.EQ(ddr_do[15:0]), .ESADDR(v_raddr), .ESDATA(vram_brdata),
-		.ESWR(v_rwr), .ESRD(v_rrd), .ESFW(),
+		.ESWR(v_rwr), .ESRD(v_rrd), .ESNP(v_rnp), .ESFW(),
 		.ESQ(v_rq), .ESTE(v_rte),
 		.BRAM4_OFFS(BRAM4_OFFS), .BRAM2_OFFS(BRAM2_OFFS), .BRAM1_OFFS(BRAM1_OFFS),
 		.SP_CPU(VRAM_SP_CPU),
+		.DP(RAM_DO[31:16]), .PEER_BUSY(v_lbusy), .XBUSY(v_rbusy),
 		.DBG_WAIT_CNT()
 	);
 
@@ -688,8 +744,8 @@ module p3do_gamebub #(
 	vram_rtcache #(.ENTRIES(16)) rtcache (
 		.clk(clk_mem), .rst(rst_mem | reset_3do),
 		.BRAM1_OFFS(BRAM1_OFFS),
-		.l_esrd(v_lrd), .l_esaddr(v_laddr), .l_eswr(v_lwr), .l_esfw(v_lfw), .l_este(v_lte), .l_esq(v_lq),
-		.r_esrd(v_rrd), .r_esaddr(v_raddr), .r_eswr(v_rwr), .r_este(v_rte), .r_esq(v_rq),
+		.l_esrd(v_lrd), .l_esnp(v_lnp), .l_esaddr(v_laddr), .l_eswr(v_lwr), .l_esfw(v_lfw), .l_este(v_lte), .l_esq(v_lq),
+		.r_esrd(v_rrd), .r_esnp(v_rnp), .r_esaddr(v_raddr), .r_eswr(v_rwr), .r_este(v_rte), .r_esq(v_rq),
 		.d_bladdr(ddr_bladdr), .d_blrd(ddr_blrd), .d_blwr(ddr_blwr), .d_bfw(ddr_bfw),
 		.d_braddr(ddr_braddr), .d_brrd(ddr_brrd), .d_brwr(ddr_brwr),
 		.d_blte(ddr_blte), .d_brte(ddr_brte), .d_bout(ddr_bout), .d_ba(ddr_ba), .d_bbusy(ddr_bbusy),
@@ -722,7 +778,7 @@ module p3do_gamebub #(
 		.sec_wdata       (ddr_sec_wdata),
 		.sec_wbe         (ddr_sec_wbe),
 		.sec_wnext       (ddr_sec_wnext),
-		.sec_rdata       (sec_rdata),
+		.sec_rdata       (ddr_sec_rdata),
 		.sec_rvalid      (ddr_sec_rvalid),
 		.sec_done        (ddr_sec_done)
 	);

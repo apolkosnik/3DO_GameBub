@@ -58,6 +58,12 @@ module tb_top;
 	wire [15:0] s_dq_out, s_dq_in;
 
 	reg  [11:0] buttons = 0;
+	wire        sr_ce_n, sr_we_n, sr_oe_n, sr_dir;
+	wire [ 1:0] sr_mask_n;
+	wire [17:0] sr_a;
+	wire [15:0] sr_din, sr_dout;
+	int         sram_mode = 0;
+	initial void'($value$plusargs("sram_mode=%d", sram_mode));
 
 	p3do_gamebub #(.DISPLAY_DIVIDER(31)) dut (
 		.clock(clk_sys), .reset(reset),
@@ -78,7 +84,16 @@ module tb_top;
 		.input_buttons_r(buttons[9]), .input_buttons_start(buttons[10]), .input_buttons_select(buttons[11]),
 		.sdram_clock(s_clk), .sdram_cke(s_cke), .sdram_cs(s_cs), .sdram_ras(s_ras), .sdram_cas(s_cas),
 		.sdram_we(s_we), .sdram_dqm(s_dqm), .sdram_bank(s_ba), .sdram_address(s_a),
-		.sdram_dataIn(s_dq_in), .sdram_dataOut(s_dq_out), .sdram_dataDir(s_oe)
+		.sdram_dataIn(s_dq_in), .sdram_dataOut(s_dq_out), .sdram_dataDir(s_oe),
+		.sram_ceN(sr_ce_n), .sram_weN(sr_we_n), .sram_oeN(sr_oe_n), .sram_writeMaskN(sr_mask_n),
+		.sram_address(sr_a), .sram_dataIn(sr_din), .sram_dataOut(sr_dout), .sram_dataDir(sr_dir)
+	);
+
+	// the SRAM ("VRAM memory" setting, +sram_mode=0 SRAM (default), 1 SRAM
+	// with three cycles per word, 2 SDRAM only)
+	sram_model sram (
+		.ce_n(sr_ce_n), .we_n(sr_we_n), .oe_n(sr_oe_n), .mask_n(sr_mask_n), .a(sr_a),
+		.dq_from_fpga(sr_dout), .dq_dir(sr_dir), .dq_to_fpga(sr_din)
 	);
 
 	sdram_model sdram (
@@ -418,6 +433,14 @@ module tb_top;
 		host_wr(32'h0000_100C, 32'h0);
 		check_buttons(0);
 		$display("[%0t] Buttons setting: %0d pad words checked", $realtime, pad_checks);
+		host_wr(32'h0000_1010, 32'(sram_mode));   // "VRAM memory", taken while the 3DO is in reset
+		begin
+			bit [31:0] q;
+			host_rd(32'h0000_1010, q);
+			if (q != 32'(sram_mode)) fail($sformatf("VRAM memory setting reads %0d, written %0d", q, sram_mode));
+		end
+		$display("[%0t] VRAM memory setting %0d (%s)", $realtime, sram_mode,
+		         sram_mode == 0 ? "SRAM, 2 cycles per word" : sram_mode == 1 ? "SRAM, 3 cycles per word" : "SDRAM only");
 		host_cmd(16'h0200, 1, 0, 0, r, e);   // NotifyFocus(1)
 		host_cmd(16'h0100, 0, 0, 0, r, e);   // CoreRun
 		$display("[%0t] core running", $realtime);
@@ -443,7 +466,10 @@ module tb_top;
 			$display("[%0t] test ROM: %s test=%0d addr=%08h checks=%0d", $realtime,
 			         {nvram[256], nvram[257], nvram[258], nvram[259]}, test, addr, checks);
 			if ({nvram[256], nvram[257], nvram[258], nvram[259]} != "PASS") fail("test ROM reported FAIL");
-			if (checks != 64*4 + 1 + 64*5 + 2 + 16 + 1 + 2 + 4) fail($sformatf("unexpected number of checks %0d", checks));
+			// tests 1-8, test 9 (SPORT write masks): 3 regions x (13 checks of a
+			// row), test 10 (CLIO timers and interrupt summary): 10, test 11
+			// (matrix engine): 3
+			if (checks != 64*4 + 1 + 64*5 + 2 + 16 + 1 + 2 + 4 + 3 * 13 * 512 + 10 + 3 + 64 + 16) fail($sformatf("unexpected number of checks %0d", checks));
 			for (int i = 0; i < 16; i++)
 				if (nvram[8'h80 + i] != 8'(8'hA5 + 8'h13 * i)) fail($sformatf("NVRAM byte %02h = %02h", 8'h80 + i, nvram[8'h80 + i]));
 		end
@@ -460,9 +486,13 @@ module tb_top;
 			$display("tb_top: %0d disc sectors served by the firmware model", sectors_served);
 			if (sectors_served < 3) fail("streaming mode: the core did not request the sectors");
 		end
-		$display("tb_top: TB errors=%0d, SDRAM model errors=%0d", errors, sdram.errors);
+		// test ROM test 4 writes VRAM 0x200000 (block 0: in the SRAM unless it is off)
+		if (sram_mode != 2 && sram.writes == 0) fail("no VRAM write reached the SRAM");
+		if (sram_mode == 2 && sram.writes != 0) fail("VRAM writes reached the SRAM with it off");
+		$display("tb_top: TB errors=%0d, SDRAM model errors=%0d, SRAM model errors=%0d (%0d SRAM writes)",
+		         errors, sdram.errors, sram.errors, sram.writes);
 		// a failure ends with a non-zero exit status ($fatal), so scripts see it
-		if (errors == 0 && sdram.errors == 0) begin $display("tb_top: PASS"); $finish; end
+		if (errors == 0 && sdram.errors == 0 && sram.errors == 0) begin $display("tb_top: PASS"); $finish; end
 		else $fatal(1, "tb_top: FAIL");
 	end
 

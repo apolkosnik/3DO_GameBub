@@ -5,11 +5,37 @@
 @   1. DRAM word write/read (SDRAM TDM part), several pages
 @   2. DRAM byte writes (lane enables) + word read
 @   3. VRAM in the on-chip BRAM1 window (0x260000) and the VDL area (0x2FC000)
-@   4. VRAM in the SDRAM overflow tier (0x200000, 0x2A0000) via ddram.sv
+@   4. VRAM through ddram.sv: 0x200000 (block 0, in the SRAM by default,
+@      vram_sram.sv) and 0x2A0400 (block A, in the SDRAM overflow tier)
 @   5. ROM data reads (literal table in ROM)
 @   6. NVRAM byte writes/reads (0x03140000, one byte per word, low byte)
 @   7. CD-ROM through CLIO XBUS -> OSA -> 3DO_CDROM -> cdd_emu -> SDRAM:
 @      "read capacity" (disc-info block) and a 2-sector data read (NEXT)
+@   9. SPORT copies (the CPU's read transfer of a row, then its write
+@      transfer into another) and flash writes with write masks (the data the
+@      CPU writes to SPORT space is the mask: 1 bits are written, 0 bits keep
+@      the row's), in on-chip VRAM (0x262000), block 0 (SRAM) and block A
+@      (SDRAM): masks with some bits, none, all, different in the two VRAM
+@      halves; every word of the destination row is checked after each, and
+@      the row after it at the end. Runs from DRAM (copied there), before 8.
+@  10. CLIO from the CPU: the timer controls read back at both addresses of
+@      a bank; TimerSlack reads back (336 after power-on, 10 bits); a
+@      cascaded timer pair 0001:0000 reads 0000:FFFF right after the low
+@      timer's borrow (the high timer takes it in the same count); INT0 bit
+@      31 is the summary of the enabled INT1 interrupts. Before 8.
+@  11. MADAM's matrix engine from the CPU: a 3x3 matrix with negative
+@      entries times a vector (16.16, signed products): rows -0.75, 2.875,
+@      1.0. Before 8.
+@  12. The CEL engine's PLUT from the CPU (SDK madam.h): 16 pairs written at
+@      0x03300180 (entries 2n in bits 31-16, 2n+1 in 15-0), the 32 entries
+@      read back one per word; pair 2 written again changes only entries 4
+@      and 5. Before 8.
+@  13. Audio DMA (WO 94/10641): writing a channel's current address clears
+@      its next address and writing its length the next length (channel 0,
+@      DSPPToRam0; not RamToUncle); DSPPToRam0 with 4 words and no next
+@      buffer, filled by a DSP program: the words arrive, the transfer ends
+@      in its short last burst (nothing at address 0 or past the buffer) and
+@      the channel's enable bit clears. Before 8.
 @   8. CLIO software reset (CSTAT bits 4 and 5, the BIOS's DIPIR reset): the
 @      ARM must start at 0 in SVC mode with IRQ and FIQ disabled (CPSR I and F
 @      set, flags kept), the interrupted CPSR in SPSR_svc and the interrupted
@@ -38,6 +64,8 @@
 	.equ PON_CPSR,   0x00001104	@ DRAM: CPSR found at power-on
 	.equ SRST_SAVE,  0x00001108	@ DRAM: checks performed before the reset
 	.equ SRST_STUB,  0x00001200	@ DRAM: code that triggers the software reset
+	.equ SPORT_CODE, 0x00010000	@ DRAM: test 9's code, copied there
+	.equ SPORT_REF,  0x00012000	@ DRAM: test 9's expected destination row
 
 _start:
 	@ At reset the ROM is also visible at 0; jump to its real address (the
@@ -107,7 +135,7 @@ entry:
 	ldr	r0, =0x002FC000
 	bl	vram_test
 
-	@ ---- 4. VRAM, SDRAM overflow tier (ddram.sv) ----
+	@ ---- 4. VRAM through ddram.sv: SRAM (0x200000) and SDRAM (0x2A0400) ----
 	mov	r12, #4
 	ldr	r0, =0x00200000
 	bl	vram_test
@@ -225,6 +253,338 @@ entry:
 	add	r8, r8, #1
 	cmp	r8, #3
 	bne	9b
+
+	@ ---- 9. SPORT copies and flash writes with write masks ----
+	@ (before test 8, which ends with the reset; from DRAM: fetches from
+	@ the ROM would make its 20000 checks slow)
+	mov	r12, #9
+	ldr	r3, =SPORT_CODE
+	ldr	r4, =ROM_BASE + sport_code
+	ldr	r5, =ROM_BASE + sport_code_end
+13:	ldr	r6, [r4], #4
+	str	r6, [r3], #4
+	cmp	r4, r5
+	bcc	13b
+	ldr	r3, =SPORT_CODE
+	mov	lr, pc
+	mov	pc, r3
+
+	@ ---- 10. CLIO timers and interrupt summary from the CPU ----
+	@ (FIQ is masked in the CPSR here: the INT1 interrupt does nothing else)
+	mov	r12, #10
+	ldr	r0, =0x03400000
+	mvn	r1, #0
+	str	r1, [r0, #0x204]	@ all timer controls clear
+	str	r1, [r0, #0x20C]
+	mov	r1, #0x72
+	str	r1, [r0, #0x200]
+	add	r2, r0, #0x200		@ controls 0-7, set address
+	ldr	r6, [r2]
+	cmp	r6, #0x72
+	bne	fail
+	add	r2, r0, #0x204		@ ... clear address
+	ldr	r6, [r2]
+	cmp	r6, #0x72
+	bne	fail
+	mov	r1, #0x30000000
+	str	r1, [r0, #0x208]
+	add	r2, r0, #0x20C		@ controls 8-15, clear address
+	ldr	r6, [r2]
+	cmp	r6, #0x30000000
+	bne	fail
+	mvn	r1, #0
+	str	r1, [r0, #0x204]
+	str	r1, [r0, #0x20C]
+	add	r2, r0, #0x220		@ TimerSlack: 336 after power-on
+	ldr	r6, [r2]
+	cmp	r6, #336
+	bne	fail
+	ldr	r1, =0xFFFF
+	str	r1, [r0, #0x220]
+	ldr	r6, [r2]
+	ldr	r5, =0x3FF		@ 10 bits (and 43 us between counts below)
+	cmp	r6, r5
+	bne	fail
+	add	r11, r11, #5
+	@ cascaded pair 0001:0000 (timer 1 on timer 0), both reloading FFFF
+	mov	r1, #0
+	str	r1, [r0, #0x100]
+	ldr	r1, =0xFFFF
+	str	r1, [r0, #0x104]
+	str	r1, [r0, #0x10C]
+	mov	r1, #1
+	str	r1, [r0, #0x108]
+	mov	r1, #0x73
+	str	r1, [r0, #0x200]
+	add	r2, r0, #0x100
+14:	ldr	r6, [r2]		@ until timer 0 borrows
+	cmp	r6, #0
+	beq	14b
+	add	r2, r0, #0x108
+	ldr	r5, [r2]		@ timer 1 took the borrow in the same count
+	cmp	r5, #0
+	bne	fail
+	ldr	r5, =0xFFFF
+	cmp	r6, r5
+	addne	r2, r0, #0x100
+	bne	fail
+	mvn	r1, #0
+	str	r1, [r0, #0x204]
+	mov	r1, #336
+	str	r1, [r0, #0x220]
+	add	r11, r11, #2
+	@ INT0 bit 31: the summary of the enabled INT1 interrupts
+	add	r2, r0, #0x40
+	mvn	r1, #0
+	str	r1, [r0, #0x6C]		@ INT1 interrupts disabled
+	mov	r1, #2
+	str	r1, [r0, #0x60]		@ INT1 source 1 pending
+	ldr	r6, [r2]
+	tst	r6, #0x80000000		@ not enabled: no summary
+	bne	fail
+	str	r1, [r0, #0x68]		@ enabled
+	ldr	r6, [r2]
+	tst	r6, #0x80000000
+	beq	fail
+	str	r1, [r0, #0x64]		@ acknowledged
+	ldr	r6, [r2]
+	tst	r6, #0x80000000
+	bne	fail
+	str	r1, [r0, #0x6C]
+	add	r11, r11, #3
+
+	@ ---- 11. MADAM matrix engine (signed 16.16) ----
+	@ M = [-0.5 0.25 0; 0.75 -1 0.5; 0 0 1], V = [0.5 -2 1]
+	mov	r12, #11
+	ldr	r0, =0x03300000
+	mov	r1, #0
+	mov	r2, #0x600		@ clear the matrix (16 words) and the vector
+15:	str	r1, [r0, r2]
+	add	r2, r2, #4
+	cmp	r2, #0x650
+	bne	15b
+	ldr	r1, =0xFFFF8000		@ -0.5
+	str	r1, [r0, #0x600]	@ M[0][0]
+	mov	r1, #0x4000		@ 0.25
+	str	r1, [r0, #0x604]	@ M[0][1]
+	mov	r1, #0xC000		@ 0.75
+	str	r1, [r0, #0x610]	@ M[1][0]
+	ldr	r1, =0xFFFF0000		@ -1
+	str	r1, [r0, #0x614]	@ M[1][1]
+	mov	r1, #0x8000		@ 0.5
+	str	r1, [r0, #0x618]	@ M[1][2]
+	mov	r1, #0x10000		@ 1
+	str	r1, [r0, #0x628]	@ M[2][2]
+	mov	r1, #0x8000
+	str	r1, [r0, #0x640]	@ V[0]
+	ldr	r1, =0xFFFE0000		@ -2
+	str	r1, [r0, #0x644]	@ V[1]
+	mov	r1, #0x10000
+	str	r1, [r0, #0x648]	@ V[2]
+	mov	r1, #2			@ 3x3 multiply
+	add	r2, r0, #0x7F0
+	str	r1, [r2, #0xC]
+16:	ldr	r6, [r2, #0x8]		@ until done
+	tst	r6, #1
+	bne	16b
+	mov	r1, #0
+	str	r1, [r2, #0xC]		@ result bank to the CPU
+	add	r2, r0, #0x660		@ row 0: -0.75
+	ldr	r6, [r2]
+	ldr	r5, =0xFFFF4000
+	cmp	r6, r5
+	bne	fail
+	add	r2, r2, #4		@ row 1: 2.875
+	ldr	r6, [r2]
+	ldr	r5, =0x0002E000
+	cmp	r6, r5
+	bne	fail
+	add	r2, r2, #4		@ row 2: 1.0
+	ldr	r6, [r2]
+	cmp	r6, #0x10000
+	bne	fail
+	add	r11, r11, #3
+
+	@ ---- 12. CEL engine PLUT from the CPU (SDK madam.h) ----
+	@ a write to 0x03300180 + 4n sets entries 2n (bits 31-16) and 2n+1;
+	@ a read of 0x03300180 + 4n returns entry n. Entry e = 0x1000 + e * 0x123;
+	@ then pair 2 (0x188) is written again: only entries 4 and 5 change.
+	mov	r12, #12
+	ldr	r0, =0x03300180
+	ldr	r7, =0x123
+	mov	r3, #0x1000
+	mov	r2, r0
+17:	add	r4, r3, r7		@ the odd entry
+	orr	r1, r4, r3, lsl #16
+	str	r1, [r2], #4
+	add	r3, r4, r7
+	add	r1, r0, #0x40
+	cmp	r2, r1
+	bne	17b
+	mov	r8, #0			@ 0: all pairs written, 1: pair 2 written again
+18:	mov	r3, #0x1000
+	mov	r2, r0
+19:	ldr	r6, [r2]
+	mov	r6, r6, lsl #16
+	mov	r6, r6, lsr #16
+	mov	r5, r3
+	cmp	r8, #0
+	beq	20f
+	sub	r1, r2, r0
+	cmp	r1, #0x10
+	ldreq	r5, =0x6002		@ entry 4
+	cmp	r1, #0x14
+	ldreq	r5, =0x7002		@ entry 5
+20:	cmp	r6, r5
+	bne	fail
+	add	r3, r3, r7
+	add	r2, r2, #4
+	add	r1, r0, #0x80
+	cmp	r2, r1
+	bne	19b
+	add	r11, r11, #32
+	cmp	r8, #0
+	bne	21f
+	mov	r8, #1
+	ldr	r1, =0x60027002
+	str	r1, [r0, #8]
+	b	18b
+21:
+
+	@ ---- 13. Audio DMA (WO 94/10641): reload clearing, end of transfer ----
+	mov	r12, #13
+	ldr	r0, =0x03300000
+	@ (a) a current address write clears the next address, a remaining
+	@ length write the next length: channel 0 (0x400) and DSPPToRam0 (0x500)
+	mov	r3, #0x400
+30:	add	r4, r0, r3
+	ldr	r1, =0x00012340
+	str	r1, [r4, #8]		@ next address
+	ldr	r1, =0x00000FFC
+	str	r1, [r4, #0xC]		@ next length
+	ldr	r1, =0x00020000
+	str	r1, [r4]		@ current address
+	add	r2, r4, #8
+	ldr	r6, [r2]
+	cmp	r6, #0			@ next address cleared
+	bne	fail
+	add	r2, r4, #0xC
+	ldr	r6, [r2]
+	ldr	r5, =0x00000FFC
+	cmp	r6, r5			@ next length kept
+	bne	fail
+	ldr	r1, =0x00012340
+	str	r1, [r4, #8]
+	mov	r1, #0xC
+	str	r1, [r4, #4]		@ remaining length
+	add	r2, r4, #0xC
+	ldr	r6, [r2]
+	cmp	r6, #0			@ next length cleared
+	bne	fail
+	add	r2, r4, #8
+	ldr	r6, [r2]
+	ldr	r5, =0x00012340
+	cmp	r6, r5			@ next address kept
+	bne	fail
+	add	r11, r11, #4
+	cmp	r3, #0x500
+	movne	r3, #0x500
+	bne	30b
+	add	r4, r0, #0x4D0		@ RamToUncle is not an audio group
+	ldr	r1, =0x00012340
+	str	r1, [r4, #8]
+	ldr	r1, =0x00020000
+	str	r1, [r4]
+	add	r2, r4, #8
+	ldr	r6, [r2]
+	ldr	r5, =0x00012340
+	cmp	r6, r5
+	bne	fail
+	mov	r1, #0
+	str	r1, [r4, #8]
+	str	r1, [r4]
+	add	r11, r11, #1
+	@ (b) DSPPToRam0: 4 words to 0x40000, no next buffer. The DSP fills
+	@ output FIFO 0 with 1..8 every frame; CLIO asks at 6 samples (3 words), so
+	@ the second burst ends after one word: the transfer must end there, not
+	@ go on at address 0, and the channel must not start again.
+	ldr	r3, =0x00040000
+	ldr	r1, =0xDEAD0000
+	mov	r4, #0
+31:	add	r5, r1, r4
+	str	r5, [r3, r4, lsl #2]
+	add	r4, r4, #1
+	cmp	r4, #8
+	bne	31b
+	mov	r4, #0
+	ldr	r7, [r4]		@ DRAM word 0, restored below
+	ldr	r1, =0x5EED5EED
+	str	r1, [r4]
+	ldr	r8, =0x03400000
+	ldr	r4, =0x034017E8
+	mov	r1, #0
+	str	r1, [r4, #0x14]		@ DSP stopped (0x17FC)
+	add	r4, r8, #0x300
+	mov	r1, #0x10000
+	str	r1, [r4]		@ output FIFO 0 initialised (its DMA off)
+	add	r4, r0, #0x500
+	str	r3, [r4]		@ current address 0x40000
+	mov	r1, #0xC
+	str	r1, [r4, #4]		@ 16 bytes (the next registers clear)
+	add	r4, r8, #0x2000		@ DSP: 8 x MOVE output FIFO 0 <- k, SLEEP
+	ldr	r5, =0x9BF0
+	ldr	r6, =0xC001
+	mov	r1, #8
+32:	str	r5, [r4], #4
+	str	r6, [r4], #4
+	add	r6, r6, #1
+	subs	r1, r1, #1
+	bne	32b
+	ldr	r5, =0x8380
+	str	r5, [r4], #4
+	ldr	r5, =0x8000
+	str	r5, [r4], #4
+	str	r5, [r4], #4
+	add	r4, r8, #0x300
+	mov	r1, #0x10000
+	str	r1, [r4, #4]		@ DMA from output FIFO 0 enabled
+	ldr	r4, =0x034017E8
+	mov	r1, #0
+	str	r1, [r4]		@ DSP from 0
+	mov	r1, #1
+	str	r1, [r4, #0x14]		@ run
+	ldr	r1, =5000		@ about 35 DSP frames
+33:	subs	r1, r1, #1
+	bne	33b
+	mov	r1, #0
+	str	r1, [r4, #0x14]		@ DSP stopped
+	ldr	r5, =0x00010002		@ samples 1,2 3,4 5,6 7,8
+	ldr	r1, =0x00020002
+	mov	r4, #0
+34:	add	r2, r3, r4, lsl #2
+	ldr	r6, [r2]
+	cmp	r6, r5
+	bne	fail
+	add	r5, r5, r1
+	add	r4, r4, #1
+	cmp	r4, #4
+	bne	34b
+	add	r2, r3, #0x10		@ the word after the buffer
+	ldr	r6, [r2]
+	ldr	r5, =0xDEAD0004
+	cmp	r6, r5
+	bne	fail
+	mov	r2, #0			@ address 0
+	ldr	r6, [r2]
+	ldr	r5, =0x5EED5EED
+	cmp	r6, r5
+	bne	fail
+	str	r7, [r2]
+	add	r2, r8, #0x304		@ the channel stopped itself
+	ldr	r6, [r2]
+	tst	r6, #0x10000
+	bne	fail
+	add	r11, r11, #7
 
 	@ ---- 8. CLIO software reset ----
 	mov	r12, #8
@@ -369,3 +729,147 @@ vram_check:
 romdata:
 	.word	0xCAFEF00D
 	.word	0x0BADBEEF
+
+@ ---- test 9, copied to SPORT_CODE and run there (position independent,
+@ its own literal pool). r11 = checks; a mismatch goes to fail with its
+@ address in r2. The CPU's SPORT accesses (MADAM: 0x0320xxxx, row in
+@ address bits 10..2): a read is a read transfer of the row into the CPU's
+@ shift register, a write a write transfer from it with the written data
+@ as the mask; a write with address bit 13 loads the flash colour, with
+@ bit 14 flash-writes the row (mask: the written data). Bits 31..16 go to
+@ the left VRAM half, 15..0 to the right one, each with its own mask.
+	.align 4
+sport_code:
+	mov	r7, lr
+	ldr	r0, =0x00262000		@ on-chip VRAM (BRAM1 window)
+	bl	sp_region
+	ldr	r0, =0x00204000		@ block 0 (SRAM, SDRAM with it off)
+	bl	sp_region
+	ldr	r0, =0x002A4000		@ block A (SDRAM)
+	bl	sp_region
+	mov	pc, r7
+
+@ source row r0, destination row r0 + 0x800, guard row r0 + 0x1000
+sp_region:
+	mov	r13, lr
+	sub	r8, r0, #0x00200000	@ SPORT address of the source row:
+	mov	r8, r8, lsr #9		@ 0x03200000 + 4 * row, row = offset / 0x800
+	add	r8, r8, #0x03200000
+	add	r9, r8, #4		@ ... of the destination row
+	@ every word of the three rows its own; the destination's in SPORT_REF
+	mov	r1, #512
+	mov	r2, r0
+	ldr	r4, =0x2468ACE1
+	ldr	r5, =0x13579BDF
+	ldr	r10, =SPORT_REF
+51:	eor	r6, r4, r2, lsl #3
+	str	r6, [r2]
+	eor	r6, r5, r2, lsl #5
+	str	r6, [r2, #0x800]
+	str	r6, [r10], #4
+	mvn	r6, r6
+	add	r3, r2, #0x1000
+	str	r6, [r3]
+	add	r2, r2, #4
+	subs	r1, r1, #1
+	bne	51b
+	bl	sp_check
+	ldr	r3, =0x00FF0F0F		@ copies: mask r3
+	bl	sp_copy
+	mov	r3, #0
+	bl	sp_copy
+	ldr	r4, =0x12345678		@ flash writes: colour r4, mask r3
+	ldr	r3, =0xF0F0FF00
+	bl	sp_flash
+	ldr	r4, =0x9ABCDEF0
+	mov	r3, #0
+	bl	sp_flash
+	ldr	r3, =0xFFFF3C3C
+	bl	sp_copy
+	ldr	r4, =0x24681357
+	ldr	r3, =0xFFFF0000
+	bl	sp_flash
+	ldr	r4, =0x75318642
+	ldr	r3, =0x0000FFFF
+	bl	sp_flash
+	ldr	r3, =0x0000A5A5
+	bl	sp_copy
+	ldr	r4, =0x0F1E2D3C
+	ldr	r3, =0x5555FFFF
+	bl	sp_flash
+	ldr	r4, =0x4B4BB4B4
+	mvn	r3, #0
+	bl	sp_flash
+	mvn	r3, #0
+	bl	sp_copy
+	@ the guard row: no transfer wrote it
+	mov	r1, #512
+	add	r2, r0, #0x1000
+	ldr	r4, =0x13579BDF
+52:	sub	r3, r2, #0x1000		@ its source row's address made its value
+	eor	r6, r4, r3, lsl #5
+	mvn	r6, r6
+	ldr	r5, [r2]
+	cmp	r5, r6
+	ldrne	pc, =ROM_BASE + fail
+	add	r11, r11, #1
+	add	r2, r2, #4
+	subs	r1, r1, #1
+	bne	52b
+	mov	pc, r13
+
+@ copy with mask r3: read transfer of the source row, write transfer into
+@ the destination row; reference = (source & mask) | (reference & ~mask)
+sp_copy:
+	ldr	r6, [r8]
+	str	r3, [r9]
+	mov	r1, #512
+	mov	r2, r0
+	ldr	r10, =SPORT_REF
+	ldr	r5, =0x2468ACE1
+53:	eor	r6, r5, r2, lsl #3
+	and	r6, r6, r3
+	ldr	r4, [r10]
+	bic	r4, r4, r3
+	orr	r4, r4, r6
+	str	r4, [r10], #4
+	add	r2, r2, #4
+	subs	r1, r1, #1
+	bne	53b
+	b	sp_check
+
+@ flash write of colour r4 with mask r3 into the destination row;
+@ reference = (colour & mask) | (reference & ~mask)
+sp_flash:
+	add	r6, r9, #0x2000
+	str	r4, [r6]
+	add	r6, r9, #0x4000
+	str	r3, [r6]
+	and	r4, r4, r3
+	mov	r1, #512
+	ldr	r10, =SPORT_REF
+54:	ldr	r6, [r10]
+	bic	r6, r6, r3
+	orr	r6, r6, r4
+	str	r6, [r10], #4
+	subs	r1, r1, #1
+	bne	54b
+	@ fall through
+
+@ every word of the destination row against the reference
+sp_check:
+	mov	r1, #512
+	add	r2, r0, #0x800
+	ldr	r10, =SPORT_REF
+55:	ldr	r5, [r2]
+	ldr	r6, [r10], #4
+	cmp	r5, r6
+	ldrne	pc, =ROM_BASE + fail
+	add	r11, r11, #1
+	add	r2, r2, #4
+	subs	r1, r1, #1
+	bne	55b
+	mov	pc, lr
+
+	.ltorg
+sport_code_end:

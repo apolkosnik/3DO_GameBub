@@ -50,6 +50,7 @@ module gb_host (
 	output reg [ 1: 0] cd_speed,
 	output reg [ 1: 0] region_sel,       // 0 by BIOS, 1 NTSC, 2 PAL
 	output reg         button_layout,    // "Buttons": 0 Y B A = 3DO A B C, 1 A B X = 3DO A B C
+	output reg [ 1: 0] vram_mem,         // "VRAM memory": 0 SRAM, 1 SRAM slow timing, 2 SDRAM only (vram_sram.sv)
 	output             bios_pal,         // the loaded BIOS is a PAL one (MiSTer checksums)
 
 	// disc streaming (fork firmware "disc" files, see docs/disc_streaming.md)
@@ -275,6 +276,7 @@ module gb_host (
 			cd_speed      <= 2'd1;
 			region_sel    <= 2'd0;
 			button_layout <= 0;
+			vram_mem      <= 2'd0;
 			disc_stream   <= 0;
 			nvram_dirty   <= 0;
 			bios_sum_le   <= '0;
@@ -321,6 +323,7 @@ module gb_host (
 							8'h04: if (mem_dataWrite[0]) core_reset_pulse <= 1;
 							8'h08: region_sel <= mem_dataWrite[1:0];
 							8'h0C: button_layout <= mem_dataWrite[0];
+							8'h10: vram_mem <= mem_dataWrite[1:0];
 							default: ;
 						endcase
 						mem_dataRead <= 32'h0;
@@ -329,6 +332,7 @@ module gb_host (
 							8'h00: mem_dataRead <= {30'd0, cd_speed};
 							8'h08: mem_dataRead <= {30'd0, region_sel};
 							8'h0C: mem_dataRead <= {31'd0, button_layout};
+							8'h10: mem_dataRead <= {30'd0, vram_mem};
 							default: mem_dataRead <= 32'h0;
 						endcase
 					end

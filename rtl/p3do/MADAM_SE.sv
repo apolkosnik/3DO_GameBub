@@ -189,8 +189,35 @@ module MADAM_SE
 	wire PIX_WRITE = (BUS_STATE_FF == CFB_WRITE1);
 	
 	wire SPRSTRT_WRITE = SEL && MADR[7:2] == (8'h00>>2) && MWR;
+	wire SPRSTOP_WRITE = SEL && MADR[7:2] == (8'h04>>2) && MWR;
 	wire SPRCNTU_WRITE = SEL && MADR[7:2] == (8'h08>>2) && MWR;
 	wire SPRPAUS_WRITE = SEL && MADR[7:2] == (8'h0C>>2) && MWR;
+
+	// Game Bub port: SPRSTOP (0x03300104) aborts the cel engine (the SDK's
+	// DrawSprytes writes it when a list runs too long; the Opera emulator:
+	// engine idle). It resets the engine's state (main and corner engines,
+	// unpackers, FIFOs, pixel pipes, math, region fill, frame buffer
+	// addresses; SPRON and the pause clear) but not the registers the CPU and
+	// the CCB DMA write. The CPU writes it while the engine has released the
+	// bus (paused by an interrupt or between cels), not in a transfer. The
+	// original did not decode it, so the engine could not be aborted.
+	bit          ENG_STOP;
+	always @(posedge CLK or negedge RST_N) begin
+		bit          SPRSTOP_WRITE_OLD;
+
+		if (!RST_N) begin
+			SPRSTOP_WRITE_OLD <= 0;
+			ENG_STOP <= 0;
+		end
+		else begin
+			ENG_STOP <= 0;
+			if (EN && CE_R) begin
+				SPRSTOP_WRITE_OLD <= SPRSTOP_WRITE;
+				if (SPRSTOP_WRITE && SPRSTOP_WRITE_OLD) ENG_STOP <= 1;
+			end
+		end
+	end
+	wire         ENG_RST_N = RST_N & ~ENG_STOP;
 	
 	bit          CRNA_READY,CRNB_READY;
 	bit          CRNA_FINISH,CRNB_FINISH;
@@ -208,7 +235,7 @@ module MADAM_SE
 	wire         SPRDRAW_ACK = (BUS_STATE_FF == CFB_INIT0);
 	wire         SPRDATA_LAST = ((BUS_STATE_FF == SPR_OFFS3 || BUS_STATE_FF == SPR_CALC1 || BUS_STATE_FF == SPR_DATA1) && DMA_REG_ZERO);
 	wire         SPRDATA_BURST_LAST = (BUS_STATE_FF == SPR_OFFS3 || (BUS_STATE_FF == SPR_DATA1 && BURST_LAST) || (BUS_STATE_FF == SPR_DATA1 && DMA_REG_ZERO));
-	always @(posedge CLK or negedge RST_N) begin
+	always @(posedge CLK or negedge ENG_RST_N) begin
 		bit          SPRSTRT_WRITE_OLD,SPRCNTU_WRITE_OLD,SPRPAUS_WRITE_OLD;
 		bit  [ 1: 0] SPRDATA_DELAY;
 		bit          SPRDATA_BURST_LAST_FF;
@@ -223,7 +250,7 @@ module MADAM_SE
 		bit  [ 7: 0] DBG_EXT_OLD;
 `endif
 		
-		if (!RST_N) begin
+		if (!ENG_RST_N) begin
 			MAIN_ST <= MS_IDLE;
 			SCOBLD_REQ <= '0;
 			SPRDATA_REQ <= '0;
@@ -601,6 +628,9 @@ module MADAM_SE
 	bit          PDATA_LOAD_A0;
 	bit  [15: 0] LOAD_BUF;
 	wire         PLUT_WRITE = PLUT_SEL && MWR;
+	bit          CPU_PLUT_ODD;
+	bit  [ 3: 0] CPU_PLUT_PAIR;
+	bit  [15: 0] CPU_PLUT_LO;
 	always @(posedge CLK or negedge RST_N) begin
 		if (!RST_N) begin
 			SCOB_FLAG <= SCoBFlag_INIT;
@@ -611,6 +641,9 @@ module MADAM_SE
 			REG_LOAD_A0 <= 0;
 			PIP_LOAD_CNT <= '0;
 			PDATA_LOAD_A0 <= 0;
+			CPU_PLUT_ODD <= 0;
+			CPU_PLUT_PAIR <= '0;
+			CPU_PLUT_LO <= '0;
 			// synopsys translate_off
 			LOAD_BUF <= '0;
 			// synopsys translate_on
@@ -652,9 +685,16 @@ module MADAM_SE
 			end
 			
 			PIP_WA[0] <= 0;
-			if (PIP_FETCH || PLUT_WRITE) begin
+			if (PIP_FETCH) begin
 				PIP_WA[0] <= 1;
 				LOAD_BUF <= MDTI[15:0];
+			end
+			// CPU write of a PLUT pair (0x180 + 4n: entries 2n in bits 31-16,
+			// 2n+1 in 15-0, SDK madam.h plut_write): the odd entry next tick
+			CPU_PLUT_ODD <= PLUT_WRITE;
+			if (PLUT_WRITE) begin
+				CPU_PLUT_PAIR <= MADR[5:2];
+				CPU_PLUT_LO <= CPU_DI[15:0];
 			end
 			if (PIP_FETCH) begin
 				PIP_LOAD_CNT <= PIP_LOAD_CNT + 4'd1;
@@ -682,8 +722,13 @@ module MADAM_SE
 	wire         LAST_PIP = (PIP_LOAD_CNT == 4'h3 && SCOB_PRE0.BPP <= 3'd2) || (PIP_LOAD_CNT == 4'h7 && SCOB_PRE0.BPP == 3'd3) || (PIP_LOAD_CNT == 4'hF && SCOB_PRE0.BPP >= 3'd4);
 	
 	bit  [ 4: 0] PIP_WA;
-	wire [15: 0] PIP_DIN = !PIP_WA[0] ? MDTI[31:16] : LOAD_BUF;
-	wire         PIP_WE = PIP_FETCH || PLUT_WRITE || PIP_WA[0];
+	wire [15: 0] PIP_DMA_DIN = !PIP_WA[0] ? MDTI[31:16] : LOAD_BUF;
+	// the CPU's PLUT writes (even entry, then odd), else the CEL's PLUT DMA
+	wire [ 4: 0] PIP_WADDR = PLUT_WRITE ? {MADR[5:2],1'b0} : CPU_PLUT_ODD ? {CPU_PLUT_PAIR,1'b1} : PIP_WA;
+	wire [15: 0] PIP_DIN   = PLUT_WRITE ? CPU_DI[31:16]    : CPU_PLUT_ODD ? CPU_PLUT_LO          : PIP_DMA_DIN;
+	wire         PIP_WE = PIP_FETCH || PLUT_WRITE || PIP_WA[0] || CPU_PLUT_ODD;
+	// CPU reads: one entry per word, 0x180 + 4n = entry n (SDK plut_read)
+	wire [ 4: 0] PIP_CPU_RA = MADR[6:2];
 	bit  [ 4: 0] PIP_A_RA;
 	bit  [15: 0] PIP_DOUT;
 	MADAM_PIP PIP 
@@ -691,11 +736,11 @@ module MADAM_SE
 		.CLK(CLK),
 		.EN(EN),
 		
-		.WA(PIP_WA),
+		.WA(PIP_WADDR),
 		.DIN(PIP_DIN),
 		.WE(PIP_WE & CE_R),
 		
-		.RA(/*PLUT_SEL ? MADR[6:2] :*/ PIP_A_RA),//???
+		.RA(PLUT_SEL ? PIP_CPU_RA : PIP_A_RA),
 		.DOUT(PIP_DOUT)
 	);
 	assign PLUT_DO = {16'h0000,PIP_DOUT};
@@ -707,18 +752,18 @@ module MADAM_SE
 		.CLK(CLK),
 		.EN(EN),
 		
-		.WA(PIP_WA),
+		.WA(PIP_WADDR),
 		.DIN(PIP_DIN),
 		.WE(PIP_WE & CE_R),
 		
-		.RA(/*PLUT_SEL ? MADR[6:2] :*/ PIP_B_RA),//???
+		.RA(PLUT_SEL ? PIP_CPU_RA : PIP_B_RA),
 		.DOUT(PIP_B_DOUT)
 	);
 	
 	bit  [ 1: 0] BURST_CNT;
 	bit          BURST0;
-	always @(posedge CLK or negedge RST_N) begin
-		if (!RST_N) begin
+	always @(posedge CLK or negedge ENG_RST_N) begin
+		if (!ENG_RST_N) begin
 			BURST_CNT <= '0;
 			BURST0 <= 0;
 		end
@@ -756,9 +801,9 @@ module MADAM_SE
 	bit          UNPACKER_A_LOAD_NEXT,UNPACKER_B_LOAD_NEXT;
 	bit          UNPACKER_A_EOL,UNPACKER_B_EOL;
 	bit          UNPACKER_A_READY,UNPACKER_B_READY;
-	always @(posedge CLK or negedge RST_N) begin
+	always @(posedge CLK or negedge ENG_RST_N) begin
 		
-		if (!RST_N) begin
+		if (!ENG_RST_N) begin
 			CSA_ST <= CS_IDLE;
 			CSB_ST <= CS_IDLE;
 			UNPACKER_A_NEWL_EN <= 0;
@@ -892,7 +937,7 @@ module MADAM_SE
 	(
 		.CLK(CLK),
 		.EN(EN),
-		.RST(SPR_FIFO_A_RES | ~RST_N),
+		.RST(SPR_FIFO_A_RES | ~ENG_RST_N),
 		
 		.DIN(SPR_FIFO_A_DIN),
 		.WRREQ(SPR_FIFO_A_WE & CE_R),
@@ -914,7 +959,7 @@ module MADAM_SE
 	(
 		.CLK(CLK),
 		.EN(EN),
-		.RST(SPR_FIFO_B_RES | ~RST_N),
+		.RST(SPR_FIFO_B_RES | ~ENG_RST_N),
 		
 		.DIN(SPR_FIFO_B_DIN),
 		.WRREQ(SPR_FIFO_B_WE & CE_R),
@@ -931,7 +976,7 @@ module MADAM_SE
 	MADAM_UNPACKER UNPACKER_A
 	(
 		.CLK(CLK),
-		.RST(SPR_FIFO_A_RES | ~RST_N),
+		.RST(SPR_FIFO_A_RES | ~ENG_RST_N),
 		.EN(EN),
 		
 		.CE(CE_R),
@@ -956,7 +1001,7 @@ module MADAM_SE
 	MADAM_UNPACKER UNPACKER_B
 	(
 		.CLK(CLK),
-		.RST(SPR_FIFO_B_RES | ~RST_N),
+		.RST(SPR_FIFO_B_RES | ~ENG_RST_N),
 		.EN(EN),
 		
 		.CE(CE_R),
@@ -1005,14 +1050,14 @@ module MADAM_SE
 		endcase
 	end
 	
-	always @(posedge CLK or negedge RST_N) begin
+	always @(posedge CLK or negedge ENG_RST_N) begin
 		PPMPCx_t     PPMPC;
 		bit          PPMPC_SEL;
 		bit          D,T,RMODE,SPH,SPV;
 		bit  [ 4: 0] R,G,B;
 		bit  [ 2: 0] MR,MG,MB;
 		
-		if (!RST_N) begin
+		if (!ENG_RST_N) begin
 			IPN_A <= '0;
 		end
 		else if (IPS_A_EN && EN && CE_F) begin
@@ -1050,14 +1095,14 @@ module MADAM_SE
 		end
 	end
 	
-	always @(posedge CLK or negedge RST_N) begin
+	always @(posedge CLK or negedge ENG_RST_N) begin
 		PPMPCx_t     PPMPC;
 		bit          PPMPC_SEL;
 		bit          D,T,RMODE,SPH,SPV;
 		bit  [ 4: 0] R,G,B;
 		bit  [ 2: 0] MR,MG,MB;
 		
-		if (!RST_N) begin
+		if (!ENG_RST_N) begin
 			IPN_B <= '0;
 		end
 		else if (IPS_B_EN && EN && CE_F) begin
@@ -1096,8 +1141,8 @@ module MADAM_SE
 	end
 	
 	IPN_t        IPN_A_FF,IPN_B_FF;
-	always @(posedge CLK or negedge RST_N) begin		
-		if (!RST_N) begin
+	always @(posedge CLK or negedge ENG_RST_N) begin		
+		if (!ENG_RST_N) begin
 			IPN_A_FF <= '0;
 			IPN_B_FF <= '0;
 		end
@@ -1113,7 +1158,7 @@ module MADAM_SE
 	(
 		.CLK(CLK),
 		.EN(EN),
-		.RST(SPR_NEXT | ~RST_N),
+		.RST(SPR_NEXT | ~ENG_RST_N),
 		
 		.DIN(LF_A_REQ ? IPN_A : IPN_A_FF),
 		.WRREQ(XY_FIFO_A_WRREQ & CE_R),
@@ -1130,7 +1175,7 @@ module MADAM_SE
 	(
 		.CLK(CLK),
 		.EN(EN),
-		.RST(SPR_NEXT | ~RST_N),
+		.RST(SPR_NEXT | ~ENG_RST_N),
 		
 		.DIN(LF_B_REQ ? IPN_B : IPN_B_FF),
 		.WRREQ(XY_FIFO_A_WRREQ & CE_R),
@@ -1145,10 +1190,10 @@ module MADAM_SE
 	IPN_t        IPN_PIPE;
 	
 	bit  [15: 0] CFBD_PIPE,CFBD_PIPE_A,CFBD_PIPE_B;
-	always @(posedge CLK or negedge RST_N) begin
+	always @(posedge CLK or negedge ENG_RST_N) begin
 		IPN_t        IPS_FIFO_B_OUT_FF;
 		
-		if (!RST_N) begin
+		if (!ENG_RST_N) begin
 			IPN_PIPE <= '0;
 			CFBD_PIPE_A <= '0;
 			CFBD_PIPE_B <= '0;
@@ -1175,13 +1220,14 @@ module MADAM_SE
 	MADAM_PPMP PPMP	
 	(
 		.CLK(CLK),
-		.RST(~RST_N),
+		.RST(~ENG_RST_N),
 		.EN(EN),
 		
 		.CE(CE_R),
 		
 		.SCOBCTL(SCOBCTL),
 		.SCOB_FLAG(SCOB_FLAG),
+		.SCOB_PRE1(SCOB_PRE1),
 		.PPMPCA(PPMPCA),
 		.PPMPCB(PPMPCB),
 		
@@ -1227,14 +1273,17 @@ module MADAM_SE
 		CLIPX_A = ($signed(MATH_A_XL) > $signed({1'b0,REGCTL1.CLIPX}) && $signed(MATH_A_XR) > $signed({1'b0,REGCTL1.CLIPX})) || ($signed(MATH_A_XL) < 0 && $signed(MATH_A_XR) < 0);
 		CLIPY_A = $signed(Y_A) > $signed({1'b0,REGCTL1.CLIPY}) || $signed(Y_A) < 0;
 		REGIS_A_START = (CRNA_ST == CRN_CALC && !UNPACKER_A_EOL && !MATH_A_STAT.NP && !(MATH_A_STAT.MF || SCOB_FLAG.MARIA) && !MATH_A_STAT.RC);
-		REGIS_A_TERMINATE = ($signed(MATH_A_Y) > $signed(REGCTL1.CLIPY)) && SCOBCTL.ASCALL;
+		// Game Bub port: the clip Y limit (REGCTL1, 11 bits, the last row) is
+		// unsigned, as in CLIPY_A above; signed, a limit of 1024..2047 was
+		// negative and ended every regional fill at once
+		REGIS_A_TERMINATE = ($signed(MATH_A_Y) > $signed({1'b0,REGCTL1.CLIPY})) && SCOBCTL.ASCALL;
 	end
 	bit          REGIS_A_LF_REQ;
 	bit          REGIS_A_DONE;
 	MADAM_REGIS REGIS_A 
 	(
 		.CLK(CLK),
-		.RST(~RST_N),
+		.RST(~ENG_RST_N),
 		.EN(EN),
 		
 		.CE(CE_R),
@@ -1257,14 +1306,14 @@ module MADAM_SE
 		CLIPX_B = ($signed(MATH_B_XL) > $signed({1'b0,REGCTL1.CLIPX}) && $signed(MATH_B_XR) > $signed({1'b0,REGCTL1.CLIPX})) || ($signed(MATH_B_XL) < 0 && $signed(MATH_B_XR) < 0);
 		CLIPY_B = $signed(Y_B) > $signed({1'b0,REGCTL1.CLIPY}) || $signed(Y_B) < 0;
 		REGIS_B_START = (CRNB_ST == CRN_CALC && !UNPACKER_B_EOL && !MATH_B_STAT.NP && !(MATH_B_STAT.MF || SCOB_FLAG.MARIA) && !MATH_B_STAT.RC);
-		REGIS_B_TERMINATE = ($signed(MATH_B_Y) > $signed(REGCTL1.CLIPY)) && SCOBCTL.ASCALL;
+		REGIS_B_TERMINATE = ($signed(MATH_B_Y) > $signed({1'b0,REGCTL1.CLIPY})) && SCOBCTL.ASCALL;
 	end
 	bit          REGIS_B_LF_REQ;
 	bit          REGIS_B_DONE;
 	MADAM_REGIS REGIS_B 
 	(
 		.CLK(CLK),
-		.RST(~RST_N),
+		.RST(~ENG_RST_N),
 		.EN(EN),
 		
 		.CE(CE_R),
@@ -1282,10 +1331,10 @@ module MADAM_SE
 	
 	bit          CRNA_DONE,CRNB_DONE;
 	bit          LF_SKIP;
-	always @(posedge CLK or negedge RST_N) begin	
+	always @(posedge CLK or negedge ENG_RST_N) begin	
 		bit  [11: 0] X1_A_CLIPPED,X2_A_CLIPPED,X1_B_CLIPPED,X2_B_CLIPPED,LF_A_X2,LF_B_X2;
 		
-		if (!RST_N) begin
+		if (!ENG_RST_N) begin
 			CRNA_ST <= CRN_IDLE;
 			CRNB_ST <= CRN_IDLE;
 			{LF_A_REQ,LF_B_REQ} <= '0;
@@ -1734,8 +1783,8 @@ module MADAM_SE
 	end
 	
 	bit          SUB_H,SUB_V;
-	always @(posedge CLK or negedge RST_N) begin
-		if (!RST_N) begin
+	always @(posedge CLK or negedge ENG_RST_N) begin
+		if (!ENG_RST_N) begin
 			{SUB_H,SUB_V} <= '0;
 		end
 		else if (EN && CE_R) begin
@@ -1756,8 +1805,8 @@ module MADAM_SE
 
 	bit  [ 2: 0] REG_STACK_ADDR_L;
 	bit          REG_STACK_HALF_L;
-	always @(posedge CLK or negedge RST_N) begin			
-		if (!RST_N) begin
+	always @(posedge CLK or negedge ENG_RST_N) begin			
+		if (!ENG_RST_N) begin
 			// synopsys translate_off
 			REG_STACK_ADDR_L <= '0;
 			REG_STACK_HALF_L <= 0;
@@ -1982,8 +2031,8 @@ module MADAM_SE
 `endif
 	
 	bit  [15: 0] REG_XOUT_FF,REG_YOUT_FF;
-	always @(posedge CLK or negedge RST_N) begin
-		if (!RST_N) begin
+	always @(posedge CLK or negedge ENG_RST_N) begin
+		if (!ENG_RST_N) begin
 			REG_XOUT_FF <= '0;
 			REG_YOUT_FF <= '0;
 		end
@@ -2001,7 +2050,7 @@ module MADAM_SE
 	MADAM_MATH_PLATFORM MATH_A 
 	(
 		.CLK(CLK),
-		.RST(~RST_N),
+		.RST(~ENG_RST_N),
 		.EN(EN),
 		
 		.CE(CE_R),
@@ -2030,7 +2079,7 @@ module MADAM_SE
 	MADAM_MATH_PLATFORM MATH_B 
 	(
 		.CLK(CLK),
-		.RST(~RST_N),
+		.RST(~ENG_RST_N),
 		.EN(EN),
 		
 		.CE(CE_R),
@@ -2068,8 +2117,8 @@ module MADAM_SE
 	
 	YX_t         XY_A_LATCH,XY_B_LATCH;
 	bit          XY_A_REQ_LATCH,XY_B_REQ_LATCH;
-	always @(posedge CLK or negedge RST_N) begin
-		if (!RST_N) begin
+	always @(posedge CLK or negedge ENG_RST_N) begin
+		if (!ENG_RST_N) begin
 			{XY_A_LATCH,XY_B_LATCH} <= '0;
 			{XY_A_REQ_LATCH,XY_B_REQ_LATCH} <= '0;
 		end
@@ -2093,7 +2142,7 @@ module MADAM_SE
 	(
 		.CLK(CLK),
 		.EN(EN),
-		.RST(SPR_NEXT | ~RST_N),
+		.RST(SPR_NEXT | ~ENG_RST_N),
 		
 		.DIN(XY_A_REQ ? {1'b1,IPN_RMODE,LF_A_LAST&~IPN_RMODE,XY_A} : {XY_A_REQ_LATCH,1'b0,LF_A_LAST,XY_A_LATCH}),
 		.WRREQ(XY_FIFO_A_WRREQ & CE_R),
@@ -2114,7 +2163,7 @@ module MADAM_SE
 	(
 		.CLK(CLK),
 		.EN(EN),
-		.RST(SPR_NEXT | ~RST_N),
+		.RST(SPR_NEXT | ~ENG_RST_N),
 		
 		.DIN(XY_B_REQ ? {1'b1,IPN_RMODE,LF_B_LAST&~IPN_RMODE,XY_B} : {XY_B_REQ_LATCH,1'b0,LF_B_LAST,XY_B_LATCH}),
 		.WRREQ(XY_FIFO_A_WRREQ & CE_R),
@@ -2140,10 +2189,10 @@ module MADAM_SE
 	wire         IPS_FIFO_RMODE = (XY_FIFO_A_DRAW & !XY_FIFO_A_EMPTY & XY_FIFO_A_DOLO) | (XY_FIFO_B_DRAW & !XY_FIFO_A_EMPTY & XY_FIFO_B_DOLO);
 	bit          DOLO_CYCLE;
 	bit          SYNC_FIFO_READ;
-	always @(posedge CLK or negedge RST_N) begin
+	always @(posedge CLK or negedge ENG_RST_N) begin
 		bit          XY_FIFO_CORNER_PREV;
 		
-		if (!RST_N) begin
+		if (!ENG_RST_N) begin
 			DOLO_CYCLE <= 0;
 			SYNC_FIFO_READ <= '0;
 		end
@@ -2166,7 +2215,7 @@ module MADAM_SE
 	bit          DST_WRITE_A,DST_WRITE_B;
 	bit          DST_READ;
 	bit          DST_LAST_A,DST_LAST_B,DST_SUSPEND;
-	always @(posedge CLK or negedge RST_N) begin	
+	always @(posedge CLK or negedge ENG_RST_N) begin	
 		bit  [ 3: 0] G1,G2;
 		bit  [23: 2] BASE;
 		bit  [23: 1] ADDR_FF_A,ADDR_FF_B;
@@ -2175,7 +2224,7 @@ module MADAM_SE
 		bit  [23:11] DST_PAGE_A,DST_PAGE_B;
 		bit          DST_PB_A,DST_PB_B;
 		
-		if (!RST_N) begin
+		if (!ENG_RST_N) begin
 			{DST_ADDR_A,DST_ADDR_B} <= '0;
 			{DST_WRITE_A,DST_WRITE_B} <= '0;
 			{DST_LAST_A,DST_LAST_B} <= '0;
@@ -2990,6 +3039,7 @@ module MADAM_PPMP (
 	
 	input SCoBCtl_t   SCOBCTL,
 	input SCoBFlag_t  SCOB_FLAG,
+	input SCoBPre1_t  SCOB_PRE1,     // Game Bub port: NOSWAP, TLLSBIPN of an unpacked cel
 	input PPMPCx_t    PPMPCA,
 	input PPMPCx_t    PPMPCB,
 	
@@ -3018,6 +3068,7 @@ module MADAM_PPMP (
 	bit          SPH_PIPE,SPV_PIPE;
 	bit          NEG_PIPE;
 	bit          CLIP_PIPE;
+	bit          NOBLK_PIPE;
 	always @(posedge CLK or posedge RST) begin
 		bit  [ 4: 0] AV;
 		bit  [ 2: 0] MV_R,MV_G,MV_B;
@@ -3031,6 +3082,8 @@ module MADAM_PPMP (
 		bit  [ 6: 0] ADDA_R,ADDA_G,ADDA_B;
 		bit  [ 4: 0] ADDB_R,ADDB_G,ADDB_B;
 		bit          ADDB6_R,ADDB6_G,ADDB6_B;
+		bit  [ 4: 0] IPN_BLUE,CFB_BLUE;
+		bit          SWAP,SUB_H,SUB_V;
 		
 		if (RST) begin
 			DV2_PIPE <= 0;
@@ -3040,21 +3093,42 @@ module MADAM_PPMP (
 			CLIP_PIPE <= 0;
 		end
 		else if (EN) begin
+			// Game Bub port: the blue components' LSB as they enter the pixel
+			// processor, by the engine control word (WO 94/10642 Table VI;
+			// SDK PDCLSB_* for the decoder's pixel (IPNLSB), CFBDLSB_* for
+			// the frame buffer's): 0, bit 0, bit 4, bit 5 of the 16-bit
+			// pixel. An unpacked ("totally literal") cel's second preamble
+			// word has its own selection (TLLSB, Table IX; as in the Opera
+			// emulator); PRE1 is cleared for packed cels. The original always
+			// used bit 0 (the SDK default).
+			case (!SCOB_FLAG.PACKED ? SCOB_PRE1.TLLSBIPN : SCOBCTL.IPNLSB)
+				2'd0: IPN_BLUE = {IPN.B[4:1],1'b0};
+				2'd1: IPN_BLUE = IPN.B;
+				2'd2: IPN_BLUE = {IPN.B[4:1],IPN.B[4]};
+				2'd3: IPN_BLUE = {IPN.B[4:1],IPN.G[0]};
+			endcase
+			case (SCOBCTL.CFBDLSB)
+				2'd0: CFB_BLUE = {CFBD[4:1],1'b0};
+				2'd1: CFB_BLUE = CFBD[4:0];
+				2'd2: CFB_BLUE = {CFBD[4:1],CFBD[4]};
+				2'd3: CFB_BLUE = {CFBD[4:1],CFBD[5]};
+			endcase
 			AV = SCOB_FLAG.USEAV ? PPMPC.AV : 5'b00000;
 			case (PPMPC.MS)
 				2'b00: {MV_R,MV_G,MV_B} = {PPMPC.MXF,PPMPC.MXF,PPMPC.MXF};
 				2'b01: {MV_R,MV_G,MV_B} = {IPN.MR,IPN.MG,IPN.MB};
 				2'b10,
-				2'b11: {MV_R,MV_G,MV_B} = {IPN.R[4:2],IPN.G[4:2],IPN.B[4:2]};
+				2'b11: {MV_R,MV_G,MV_B} = {IPN.R[4:2],IPN.G[4:2],IPN_BLUE[4:2]};
 			endcase
+			// Game Bub port: with MS = 10 the divider code is the decoder
+			// component's two LSBs, 00 (/16) included (as DF; the Opera
+			// emulator's PPROC). The original used PIXC DF when they were 00.
 			{DV1_R,DV1_G,DV1_B} = {PPMPC.DV1,PPMPC.DV1,PPMPC.DV1};
-			if (PPMPC.MS == 2'b10 && IPN.R[1:0]) DV1_R = IPN.R[1:0];
-			if (PPMPC.MS == 2'b10 && IPN.G[1:0]) DV1_G = IPN.G[1:0];
-			if (PPMPC.MS == 2'b10 && IPN.B[1:0]) DV1_B = IPN.B[1:0];
+			if (PPMPC.MS == 2'b10) {DV1_R,DV1_G,DV1_B} = {IPN.R[1:0],IPN.G[1:0],IPN_BLUE[1:0]};
 			
 			case (PPMPC.S1)
-				1'b0: {TEMPA_R,TEMPA_G,TEMPA_B} = {IPN.R,IPN.G,IPN.B};
-				1'b1: {TEMPA_R,TEMPA_G,TEMPA_B} = {CFBD[14:10],CFBD[ 9: 5],CFBD[ 4: 0]};
+				1'b0: {TEMPA_R,TEMPA_G,TEMPA_B} = {IPN.R,IPN.G,IPN_BLUE};
+				1'b1: {TEMPA_R,TEMPA_G,TEMPA_B} = {CFBD[14:10],CFBD[ 9: 5],CFB_BLUE};
 			endcase
 			MRES_R = TEMPA_R * (MV_R + 1'd1);
 			case (DV1_R)
@@ -3082,8 +3156,8 @@ module MADAM_PPMP (
 			case (PPMPC.S2)
 				2'b00: {TEMPB_R,TEMPB_G,TEMPB_B} = '0;
 				2'b01: {TEMPB_R,TEMPB_G,TEMPB_B} = {PPMPC.AV,PPMPC.AV,PPMPC.AV};
-				2'b10: {TEMPB_R,TEMPB_G,TEMPB_B} = {CFBD[14:10],CFBD[ 9: 5],CFBD[ 4: 0]};
-				2'b11: {TEMPB_R,TEMPB_G,TEMPB_B} = {IPN.R,IPN.G,IPN.B};
+				2'b10: {TEMPB_R,TEMPB_G,TEMPB_B} = {CFBD[14:10],CFBD[ 9: 5],CFB_BLUE};
+				2'b11: {TEMPB_R,TEMPB_G,TEMPB_B} = {IPN.R,IPN.G,IPN_BLUE};
 			endcase
 			case (AV[4:3])
 				2'b00: {DIVB_R,DIVB_G,DIVB_B} = {{TEMPB_R[4:0]},{TEMPB_G[4:0]},{TEMPB_B[4:0]}};
@@ -3101,43 +3175,68 @@ module MADAM_PPMP (
 			{ADDB6_R_PIPE,ADDB6_G_PIPE,ADDB6_B_PIPE} <= {ADDB6_R,ADDB6_G,ADDB6_B};
 			NEG_PIPE <= AV[0];
 			CLIP_PIPE <= AV[2];
-			SPH_PIPE <= IPN.SPH;
-			SPV_PIPE <= IPN.SPV;
+			NOBLK_PIPE <= SCOB_FLAG.NOBLK;
+			// Game Bub port: the subposition bits H (pen bit 0) and V (bit 15)
+			// for B0POS / B15POS = 3. SWAPHV swaps the decoder's ("prior to
+			// their entry into the PPMP"), except for an unpacked cel whose
+			// PRE1 has NOSWAP (Table IX). With CFBDSUB and the frame buffer
+			// pixel a pixel processor source (1S = 1 or 2S = 2), its bits 0
+			// and 15 replace them (Table VI: "CFBDsel = (S1=1) OR (S2=2)"),
+			// already in frame buffer form, so not swapped. The original
+			// swapped at the output and ignored NOSWAP and CFBDSUB.
+			SWAP = SCOBCTL.SWAPHV && !(!SCOB_FLAG.PACKED && SCOB_PRE1.NOSWAP);
+			{SUB_H,SUB_V} = SWAP ? {IPN.SPV,IPN.SPH} : {IPN.SPH,IPN.SPV};
+			if (SCOBCTL.CFBDSUB && (PPMPC.S1 || PPMPC.S2 == 2'b10)) {SUB_H,SUB_V} = {CFBD[0],CFBD[15]};
+			SPH_PIPE <= SUB_H;
+			SPV_PIPE <= SUB_V;
 		end
 	end
 	
+	// Game Bub port: the final sum is 9 bits wide. The first source term is
+	// 0..124, the secondary one -32..31 (subtracted or sign extended), so the
+	// sum is -32..155. The original's 8 bits could not tell a sum of 128..155
+	// from a negative one, and when not subtracting it tested for overflow
+	// before testing the sign: with a sign-extended secondary source
+	// (AV[1]) a negative sum gave 31 (white) instead of 0.
 	always @(posedge CLK or posedge RST) begin
-		bit  [ 7: 0] ADD_R,ADD_G,ADD_B;
-		bit  [ 7: 0] DIVR_R,DIVR_G,DIVR_B;
+		bit  [ 8: 0] ADD_R,ADD_G,ADD_B;
+		bit  [ 8: 0] DIVR_R,DIVR_G,DIVR_B;
 		bit  [ 4: 0] PEN_R,PEN_G,PEN_B;
 		bit          PEN15;
-		
+
 		if (RST) begin
 			PEN <= '0;
 		end
 		else if (EN && CE) begin
-			ADD_R = {1'b0,ADDA_R_PIPE} + {ADDB6_R_PIPE,ADDB6_R_PIPE,ADDB6_R_PIPE,ADDB_R_PIPE} + {7'b0000000,NEG_PIPE};
-			ADD_G = {1'b0,ADDA_G_PIPE} + {ADDB6_G_PIPE,ADDB6_G_PIPE,ADDB6_G_PIPE,ADDB_G_PIPE} + {7'b0000000,NEG_PIPE};
-			ADD_B = {1'b0,ADDA_B_PIPE} + {ADDB6_B_PIPE,ADDB6_B_PIPE,ADDB6_B_PIPE,ADDB_B_PIPE} + {7'b0000000,NEG_PIPE};
+			ADD_R = {2'b00,ADDA_R_PIPE} + {{4{ADDB6_R_PIPE}},ADDB_R_PIPE} + {8'b00000000,NEG_PIPE};
+			ADD_G = {2'b00,ADDA_G_PIPE} + {{4{ADDB6_G_PIPE}},ADDB_G_PIPE} + {8'b00000000,NEG_PIPE};
+			ADD_B = {2'b00,ADDA_B_PIPE} + {{4{ADDB6_B_PIPE}},ADDB_B_PIPE} + {8'b00000000,NEG_PIPE};
 			case (DV2_PIPE)
-				1'b0: {DIVR_R,DIVR_G,DIVR_B} = {{ADD_R[7:0]},{ADD_G[7:0]},{ADD_B[7:0]}};
-				1'b1: {DIVR_R,DIVR_G,DIVR_B} = {{ADD_R[7],ADD_R[7:1]},{ADD_G[7],ADD_G[7:1]},{ADD_B[7],ADD_B[7:1]}};
+				1'b0: {DIVR_R,DIVR_G,DIVR_B} = {ADD_R,ADD_G,ADD_B};
+				1'b1: {DIVR_R,DIVR_G,DIVR_B} = {{ADD_R[8],ADD_R[8:1]},{ADD_G[8],ADD_G[8:1]},{ADD_B[8],ADD_B[8:1]}};
 			endcase
-			PEN_R = !CLIP_PIPE && ((|DIVR_R[7:5] && !NEG_PIPE) || (!DIVR_R[7] && |DIVR_R[6:5] && NEG_PIPE)) ? 5'h1F : !CLIP_PIPE && DIVR_R[7] ? 5'h00 : DIVR_R[4:0];
-			PEN_G = !CLIP_PIPE && ((|DIVR_G[7:5] && !NEG_PIPE) || (!DIVR_G[7] && |DIVR_G[6:5] && NEG_PIPE)) ? 5'h1F : !CLIP_PIPE && DIVR_G[7] ? 5'h00 : DIVR_G[4:0];
-			PEN_B = !CLIP_PIPE && ((|DIVR_B[7:5] && !NEG_PIPE) || (!DIVR_B[7] && |DIVR_B[6:5] && NEG_PIPE)) ? 5'h1F : !CLIP_PIPE && DIVR_B[7] ? 5'h00 : DIVR_B[4:0];
-			
+			// clamp to 0..31 (negative: 0), unless AV[2] lets the result wrap
+			PEN_R = CLIP_PIPE ? DIVR_R[4:0] : DIVR_R[8] ? 5'h00 : |DIVR_R[7:5] ? 5'h1F : DIVR_R[4:0];
+			PEN_G = CLIP_PIPE ? DIVR_G[4:0] : DIVR_G[8] ? 5'h00 : |DIVR_G[7:5] ? 5'h1F : DIVR_G[4:0];
+			PEN_B = CLIP_PIPE ? DIVR_B[4:0] : DIVR_B[8] ? 5'h00 : |DIVR_B[7:5] ? 5'h1F : DIVR_B[4:0];
+			// Game Bub port: NOBLK clear writes a black result as 100 (red 1),
+			// which looks black but is not taken for background (SDK "The
+			// NOBLK Flag"). The computed blue LSB takes part in the black
+			// detector only when B0POS = 2 puts it in the pen (WO 94/10642,
+			// after Table VI).
+			if (!NOBLK_PIPE && {PEN_R,PEN_G,PEN_B[4:1]} == 14'd0 && (SCOBCTL.B0POS != 2'b10 || !PEN_B[0])) PEN_R = 5'd1;
+
 			case (SCOBCTL.B0POS)
 				2'b00: PEN_B[0] = 0;
 				2'b01: PEN_B[0] = 1;
 				2'b10: ;
-				2'b11: PEN_B[0] = !SCOBCTL.SWAPHV ? SPH_PIPE : SPV_PIPE;
+				2'b11: PEN_B[0] = SPH_PIPE;
 			endcase
 			case (SCOBCTL.B15POS)
 				2'b00: PEN15 = 0;
 				2'b01: PEN15 = 1;
 				2'b10: PEN15 = 0;//?
-				2'b11: PEN15 = !SCOBCTL.SWAPHV ? SPV_PIPE : SPH_PIPE;
+				2'b11: PEN15 = SPV_PIPE;
 			endcase
 			PEN <= {PEN15,PEN_R,PEN_G,PEN_B};
 		end

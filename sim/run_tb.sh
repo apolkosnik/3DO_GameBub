@@ -14,7 +14,7 @@ python3 -I "$HERE/prep_rtl.py" "$ROOT/rtl" "$RTL"
 source "$HERE/filelist.sh"
 FILES=()
 for f in "${RTL_FILES[@]}"; do FILES+=("$RTL/$f"); done
-FILES+=("$HERE/models/xilinx_sim.sv" "$HERE/models/sdram_model.sv")
+FILES+=("$HERE/models/xilinx_sim.sv" "$HERE/models/sdram_model.sv" "$HERE/models/sram_model.sv")
 [ -f "$HERE/tb/$TB.deps" ] && while read -r d; do [ -n "$d" ] && FILES+=("$HERE/$d"); done < "$HERE/tb/$TB.deps"
 FILES+=("$HERE/tb/$TB.sv")
 verilator --binary --timing -j "$(nproc)" -Wno-fatal -Wno-lint -Wno-style -Wno-MULTIDRIVEN \

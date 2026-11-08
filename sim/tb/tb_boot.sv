@@ -16,13 +16,13 @@
 //   * every video line must have had its VRAM read transfers (both halves)
 //     before it starts shifting out (TB errors if the 3DO was paused in
 //     between; MADAM's own arbitration delays are reported separately)
-//   * random VRAM writes to the SDRAM tier (CPU, CEL engine): none may be
+//   * random VRAM writes to off-chip VRAM (CPU, CEL engine): none may be
 //     lost in ddram.sv's posted write port or completed with another
 //     address's flash-write state (counted as TB errors)
 //   * a shadow of VRAM kept by the VRAM bus semantics (random writes, flash
 //     writes, read and write transfers): every read transfer served by the
 //     external path must deliver what VRAM held when it started, and at the
-//     end the SDRAM tier must hold what the 3DO wrote (TB errors);
+//     end off-chip VRAM (SDRAM or SRAM) must hold what the 3DO wrote (TB errors);
 //     +vram_watch=<row> logs every event on one 512-word VRAM row
 //   * <out>/cpu_trace.txt: the last 32768 CPU bus cycles (or, with
 //     +trace_from_ms=<n>, all from n ms on) before the CPU first runs outside
@@ -31,7 +31,9 @@
 // Plusargs: +bios=<file> (required), +iso=<file> or +disc_bin=<file>,
 //           +disc_latency_us=<n> (default 800), +trace_from_ms=<n>, +run_ms=<n> (default 1000),
 //           +frame_every=<n> (default 10), +out=<dir> (default build/sim),
-//           +vram_watch=<row>, +sport_ms=<n>, +rt_log_ms=<n>
+//           +vram_watch=<row>, +sport_ms=<n>, +rt_log_ms=<n>, +pad_ctl=<file> (buttons
+//           pressed while it runs, see pad_btn), +frame_log, +frames_from=<n> +frames_to=<m>
+//           (per-frame brightness log, every frame saved in a window; see save_frame)
 //
 // Copyright (c) 2026 Adam Polkosnik
 // SPDX-License-Identifier: GPL-3.0-or-later
@@ -72,6 +74,64 @@ module tb_boot;
 	// +pad_walk one button is held at a time, the next every 50 ms of 3DO
 	// time (from 1 s), so that the player bus carries changing pad words.
 	reg [11:0] pad_btn = '0;
+	// +pad_ctl=<file>: buttons pressed while the simulation runs. Every 50 ms
+	// of 3DO time the file is read again and its new lines are carried out
+	// in order: "<button>[+<button>...] <hold_ms>" presses the buttons for
+	// hold_ms, then releases them for 200 ms; "wait <ms>" waits. Buttons:
+	// a b x y up down left right l r start select (core mapping, Buttons
+	// setting 0: Y B A = 3DO A B C, X = stop, start = P). Each press is
+	// logged with its time.
+	string pad_ctl_file = "";
+	initial if ($value$plusargs("pad_ctl=%s", pad_ctl_file)) begin
+		int done_lines;
+		done_lines = 0;
+		$display("tb_boot: pad control file %s", pad_ctl_file);
+		forever begin
+			int fd, n;
+			string line;
+			#50ms;
+			fd = $fopen(pad_ctl_file, "r");
+			if (fd == 0) continue;
+			n = 0;
+			while ($fgets(line, fd)) begin
+				string btns, tok;
+				int hold, sp;
+				bit [11:0] m;
+				n++;
+				if (n <= done_lines) continue;
+				done_lines = n;
+				sp = -1;
+				for (int i = 0; i < line.len(); i++) if (line[i] == " ") begin sp = i; break; end
+				if (sp < 0) continue;
+				btns = line.substr(0, sp - 1);
+				hold = line.substr(sp + 1, line.len() - 1).atoi();
+				if (btns == "wait") begin
+					$display("[%0t] pad: wait %0d ms", $realtime, hold);
+					#(hold * 1ms);
+					continue;
+				end
+				m = '0;
+				tok = "";
+				for (int i = 0; i <= btns.len(); i++) begin
+					if (i == btns.len() || btns[i] == "+") begin
+						case (tok)
+							"a": m[0] = 1;  "b": m[1] = 1;  "x": m[2] = 1;  "y": m[3] = 1;
+							"up": m[4] = 1; "down": m[5] = 1; "left": m[6] = 1; "right": m[7] = 1;
+							"l": m[8] = 1;  "r": m[9] = 1;  "start": m[10] = 1; "select": m[11] = 1;
+							default: $display("[%0t] pad: unknown button '%s'", $realtime, tok);
+						endcase
+						tok = "";
+					end else tok = {tok, btns[i]};
+				end
+				$display("[%0t] pad: %s for %0d ms", $realtime, btns, hold);
+				@(posedge clk_sys) pad_btn <= m;
+				#(hold * 1ms);
+				@(posedge clk_sys) pad_btn <= '0;
+				#200ms;
+			end
+			$fclose(fd);
+		end
+	end
 	initial if ($test$plusargs("pad_walk")) begin
 		#1s;
 		forever begin
@@ -99,7 +159,22 @@ module tb_boot;
 		.input_buttons_r(pad_btn[9]), .input_buttons_start(pad_btn[10]), .input_buttons_select(pad_btn[11]),
 		.sdram_clock(s_clk), .sdram_cke(s_cke), .sdram_cs(s_cs), .sdram_ras(s_ras), .sdram_cas(s_cas),
 		.sdram_we(s_we), .sdram_dqm(s_dqm), .sdram_bank(s_ba), .sdram_address(s_a),
-		.sdram_dataIn(s_dq_in), .sdram_dataOut(s_dq_out), .sdram_dataDir(s_oe)
+		.sdram_dataIn(s_dq_in), .sdram_dataOut(s_dq_out), .sdram_dataDir(s_oe),
+		.sram_ceN(sr_ce_n), .sram_weN(sr_we_n), .sram_oeN(sr_oe_n), .sram_writeMaskN(sr_mask_n),
+		.sram_address(sr_a), .sram_dataIn(sr_din), .sram_dataOut(sr_dout), .sram_dataDir(sr_dir)
+	);
+
+	// the SRAM ("VRAM memory" setting, +sram_mode=0 SRAM (default), 1 SRAM
+	// with three cycles per word, 2 SDRAM only)
+	wire        sr_ce_n, sr_we_n, sr_oe_n, sr_dir;
+	wire [ 1:0] sr_mask_n;
+	wire [17:0] sr_a;
+	wire [15:0] sr_din, sr_dout;
+	int         sram_mode = 0;
+	initial void'($value$plusargs("sram_mode=%d", sram_mode));
+	sram_model sram (
+		.ce_n(sr_ce_n), .we_n(sr_we_n), .oe_n(sr_oe_n), .mask_n(sr_mask_n), .a(sr_a),
+		.dq_from_fpga(sr_dout), .dq_dir(sr_dir), .dq_to_fpga(sr_din)
 	);
 
 	sdram_model sdram (
@@ -477,7 +552,7 @@ module tb_boot;
 	final $display("tb_boot: serial reads during transfers: %0d ok, %0d stale (in %0d transfers): %0d CLUT/VDL, %0d video",
 	               good_reads, stale_reads, stale_rts, stale_kind_clut, stale_kind_vid);
 
-	// Random VRAM writes to the SDRAM tier (ddram.sv's posted write port,
+	// Random VRAM writes to off-chip VRAM (ddram.sv's posted write port,
 	// one entry per half). Two hazards are counted:
 	//  * lost write: a new write is latched while the previous write of the
 	//    same half has not been issued yet (it overwrites it);
@@ -551,7 +626,7 @@ module tb_boot;
 		vw_old_rwe <= |dut.ddram.rwe;  vw_old_rras <= dut.ddram.rras;
 		vw_fw_a1 <= dut.ddram.vram_fw.ADDR1;
 	end
-	final $display("tb_boot: SDRAM-tier VRAM writes %0d (%0d latched while ddram.sv was busy), %0d lost, %0d issued with another address's flash-write lookup (%0d with a different flag)",
+	final $display("tb_boot: off-chip VRAM writes %0d (%0d latched while ddram.sv was busy), %0d lost, %0d issued with another address's flash-write lookup (%0d with a different flag)",
 	               vw_writes, vw_deferred, vw_lost, vw_fw_wrong, vw_fw_wrong_effect);
 
 	// ---------------- VRAM shadow model ----------------
@@ -560,10 +635,18 @@ module tb_boot;
 	// A[17:0], rows of 512), updated from the VRAM modules' own command
 	// decode (vram.sv):
 	//  * random writes: RAS low, WE newly low, byte lanes ~WE_N;
-	//  * flash writes: the whole row <- the side's COLOR register;
+	//  * flash writes: the whole row <- the side's COLOR register, under the
+	//    write mask;
 	//  * read transfers: shift register <- row, from the start column to
 	//    the end of the half (split) or of the row;
-	//  * write transfers: row <- shift register (vram.sv ignores the mask).
+	//  * write transfers: row <- shift register, under the write mask.
+	// The write mask is the CPU's write data to SPORT space (MADAM), on the
+	// side's data bus once CAS falls (PHASE2: the core registers the CPU's
+	// write data at PHASE1, after RAS has fallen): 1 bits are written, 0
+	// bits keep the row's.
+	// A partial mask outside the FPGA makes vram.sv read the destination row
+	// first (MRD_EXEC): its beats are checked against the shadow row, and
+	// the command's mask and source are those of the RAS fall it began at.
 	// The CPU's SPORT transfers (MADAM CPU_SPORT_SEL when RAS falls) have a
 	// shift register of their own, the others (video, CLUT/VDL) share one:
 	// a page copy stores the row its read transfer loaded, as on hardware,
@@ -573,7 +656,7 @@ module tb_boot;
 	//  * every shift-register beat a read transfer gets from the external
 	//    path (vram_rtcache.sv / ddram.sv) equals the shadow row as it was
 	//    when the transfer started;
-	//  * at the end, every SDRAM-tier word as ddram.sv returns it (lazy
+	//  * at the end, every off-chip word as ddram.sv returns it (lazy
 	//    flash fill applied) equals the shadow.
 	// +vram_watch=<row> (hex) logs every event on one VRAM row.
 	bit [15:0] shv [2][1<<18];
@@ -590,7 +673,12 @@ module tb_boot;
 	bit        sh_rt_bad_this [2];
 	realtime   sh_rt_t [2];
 	bit        sh_ras_old [2] = '{1, 1}, sh_we_old [2] = '{1, 1};
-	bit        sh_rt_d [2], sh_mwt_d [2], sh_fw_d [2];
+	bit        sh_rt_d [2], sh_mwt_d [2], sh_fw_d [2], sh_mrd_d [2];
+	bit [15:0] sh_mask [2];                // data bus at the last CAS fall
+	bit        sh_cas_m [2] = '{1, 1};
+	bit [15:0] sh_cmd_mask [2];            // mask and source of a write after its row read
+	bit        sh_cmd_cpu [2], sh_mrd_open [2];
+	int        sh_masked = 0, sh_mrds = 0, sh_mrd_beats = 0, sh_mrd_bad = 0;
 	// +vram_watch_from=<ms>: log the row's events from then on (the log
 	// stops after 100000 lines); +vram_watch_col=<col> (hex): also log every
 	// write to that column pair (one 64-bit SDRAM beat) of the row from the
@@ -671,31 +759,65 @@ module tb_boot;
 			         $realtime, s ? "R" : "L", sh_rt_row[s], wd, wa, e, ($realtime - sh_rt_t[s]) / 1000.0);
 	endtask
 
-	task automatic sh_mwt_start(input int s, input [8:0] row, input bit split);
-		if (sh_cpu[s]) begin
-			for (int i = 0; i < 512; i++) shv[s][{row, 9'(i)}] = shc[s][i];
+	// CPU write transfers whose source row (the CPU shift register) holds one
+	// value in all 512 words of that VRAM half, as a frame buffer clear's
+	// does, per half. +copy_log_ms=<n>: each CPU write transfer from n ms on
+	// for 50 ms, with the video line it starts in.
+	int        sh_copies_unif [2] = '{0, 0}, sh_copy_log_ms = -1, sh_copy_log_n = 0;
+	initial void'($value$plusargs("copy_log_ms=%d", sh_copy_log_ms));
+	task automatic sh_mwt_start(input int s, input [8:0] row, input bit split, input [15:0] mask, input bit cpu);
+		if (mask != 16'hFFFF) sh_masked++;
+		if (cpu) begin
+			bit unif;
+			unif = 1;
+			for (int i = 0; i < 512; i++) begin
+				shv[s][{row, 9'(i)}] = (shc[s][i] & mask) | (shv[s][{row, 9'(i)}] & ~mask);
+				if (shc[s][i] != shc[s][0]) unif = 0;
+			end
+			if (unif) sh_copies_unif[s]++;
+			if (sh_copy_log_ms >= 0 && $realtime >= sh_copy_log_ms * 1ms && $realtime < (sh_copy_log_ms + 50) * 1ms &&
+			    sh_copy_log_n < 20000) begin
+				sh_copy_log_n++;
+				$display("[%0t] copy: %s CPU write transfer into row %03h at video line %0d, source row %03h %s",
+				         $realtime, s ? "R" : "L", row, dut.p3do.madam.SPORT.VCOUNT, sh_rt_row[s],
+				         unif ? $sformatf("uniform %04h", shc[s][0]) : "not uniform");
+			end
 			if (s == 0) begin
 				sh_copies++;
 				if (sh_copy_hit[0]) sh_copies_crossed++;
 			end
 			sh_copy_hit[s] = 0;
 		end else begin
-			for (int i = 0; i < 512; i++) shv[s][{row, 9'(i)}] = shs[s][i];
+			for (int i = 0; i < 512; i++) shv[s][{row, 9'(i)}] = (shs[s][i] & mask) | (shv[s][{row, 9'(i)}] & ~mask);
 			sh_legacy_mwts++;
 		end
 		sh_mwts++;
 		if (split) sh_split_mwts++;
 		if (sh_watched_word(row, 9'(sh_watch_col)) || sh_watched(row))
-			$display("[%0t] VRAM row %03h: %s %s write transfer (last read transfer: row %03h), split %b (first words %04h %04h)",
-			         $realtime, row, s ? "R" : "L", sh_cpu[s] ? "CPU" : "video", sh_rt_row[s], split,
+			$display("[%0t] VRAM row %03h: %s %s write transfer (last read transfer: row %03h), split %b, mask %04h (first words %04h %04h)",
+			         $realtime, row, s ? "R" : "L", cpu ? "CPU" : "video", sh_rt_row[s], split, mask,
 			         shv[s][{row, 9'h000}], shv[s][{row, 9'h001}]);
 	endtask
 
-	task automatic sh_fw_start(input int s, input [8:0] row, input [15:0] color);
-		for (int i = 0; i < 512; i++) shv[s][{row, 9'(i)}] = color;
+	task automatic sh_fw_start(input int s, input [8:0] row, input [15:0] color, input [15:0] mask);
+		for (int i = 0; i < 512; i++) shv[s][{row, 9'(i)}] = (color & mask) | (shv[s][{row, 9'(i)}] & ~mask);
 		sh_fws++;
+		if (mask != 16'hFFFF) sh_masked++;
 		if (sh_watched_word(row, 9'(sh_watch_col)) || sh_watched(row))
-			$display("[%0t] VRAM row %03h: %s flash write %04h", $realtime, row, s ? "R" : "L", color);
+			$display("[%0t] VRAM row %03h: %s flash write %04h, mask %04h", $realtime, row, s ? "R" : "L", color, mask);
+	endtask
+
+	// a beat of the destination row's read before a masked write: the row as it is
+	task automatic sh_mrd_beat(input int s, input [8:0] row, input [8:0] wa, input [31:0] wd);
+		bit [31:0] e;
+		e = {shv[s][{row, wa}], shv[s][{row, 9'(wa + 1)}]};
+		sh_mrd_beats++;
+		if (wd == e) return;
+		sh_mrd_bad++;
+		errors++;
+		if (sh_mrd_bad <= 20)
+			$display("[%0t] TB ERROR: %s read of VRAM row %03h for a masked write delivered %08h at column %03h, VRAM holds %08h",
+			         $realtime, s ? "R" : "L", row, wd, wa, e);
 	endtask
 
 	`define SH_SIDE(S, M) \
@@ -707,14 +829,28 @@ module tb_boot;
 	end \
 	always @(posedge clk_mem) begin \
 		if (!dut.M.RAS_N && sh_ras_m[S]) sh_cpu[S] = dut.p3do.madam.CPU_SPORT_SEL; \
+		if (!dut.M.RAS_N && !dut.M.CAS_N && sh_cas_m[S]) sh_mask[S] = dut.M.D; \
 		sh_ras_m[S] <= dut.M.RAS_N; \
+		sh_cas_m[S] <= dut.M.CAS_N; \
 		if (dut.M.RT_EXEC && !sh_rt_d[S]) sh_rt_start(S, dut.M.MEM_ROW, dut.M.SREG_POS, dut.M.SPLIT); \
-		if (dut.M.MWT_EXEC && !sh_mwt_d[S]) sh_mwt_start(S, dut.M.MEM_ROW, dut.M.SPLIT); \
-		if (dut.M.FW_EXEC && !sh_fw_d[S]) sh_fw_start(S, dut.M.MEM_ROW, dut.M.COLOR); \
-		if (dut.M.SR_WE && !dut.M.ISTE_DELAYED) sh_rt_beat(S, dut.M.SR_WA, dut.M.SR_WD); \
+		if (dut.M.MRD_EXEC && !sh_mrd_d[S]) begin \
+			sh_cmd_mask[S] = sh_mask[S]; sh_cmd_cpu[S] = sh_cpu[S]; sh_mrd_open[S] = 1; sh_mrds++; \
+		end \
+		if (dut.M.MWT_EXEC && !sh_mwt_d[S]) begin \
+			if (!sh_mrd_open[S]) begin sh_cmd_mask[S] = sh_mask[S]; sh_cmd_cpu[S] = sh_cpu[S]; end \
+			sh_mrd_open[S] = 0; \
+			if (dut.M.FWM) sh_fw_start(S, dut.M.MEM_ROW, dut.M.COLOR, sh_cmd_mask[S]); \
+			else sh_mwt_start(S, dut.M.MEM_ROW, dut.M.SPLIT, sh_cmd_mask[S], sh_cmd_cpu[S]); \
+		end \
+		if (dut.M.FW_EXEC && !sh_fw_d[S]) sh_fw_start(S, dut.M.MEM_ROW, dut.M.COLOR, sh_mask[S]); \
+		if (dut.M.SR_WE && !dut.M.ISTE_DELAYED) begin \
+			if (dut.M.SR_WSCR) sh_mrd_beat(S, dut.M.MEM_ROW, dut.M.SR_WA, dut.M.SR_WD); \
+			else sh_rt_beat(S, dut.M.SR_WA, dut.M.SR_WD); \
+		end \
 		sh_rt_d[S]  <= dut.M.RT_EXEC; \
 		sh_mwt_d[S] <= dut.M.MWT_EXEC; \
 		sh_fw_d[S]  <= dut.M.FW_EXEC; \
+		sh_mrd_d[S] <= dut.M.MRD_EXEC; \
 	end
 	`SH_SIDE(0, vram_l)
 	`SH_SIDE(1, vram_r)
@@ -764,10 +900,11 @@ module tb_boot;
 		bit [15:0] v;
 		w = {9'(sh_watch), 9'(sh_watch_col & 'h1fe)};
 		for (int i = 0; i < 4; i++) begin
-			v = sdram.peek({2'd2, 22'(w * 2 + i)});
+			v = vram_hw(19'(w * 2 + i));
 			if (st_init && v != st_hw[i])
-				$display("[%0t]   SDRAM: %s(%05h) %04h -> %04h; port: req %b we %b client %0d addr %06h; bridge state %0d; ddram.sv state %0d ram_address %06h write %b burst %0d",
-				         $realtime, i[0] ? "R" : "L", w + (i >> 1), st_hw[i], v, dut.m_req, dut.m_we, dut.arb.sel, dut.m_addr,
+				$display("[%0t]   %s: %s(%05h) %04h -> %04h; SDRAM port: req %b we %b client %0d addr %06h; bridge state %0d; ddram.sv state %0d ram_address %06h write %b burst %0d",
+				         $realtime, dut.vsram_map_v[w[17:14]] ? "SRAM" : "SDRAM", i[0] ? "R" : "L", w + (i >> 1), st_hw[i], v,
+				         dut.m_req, dut.m_we, dut.arb.sel, dut.m_addr,
 				         dut.ddr_bridge.st, dut.ddram.state, {dut.ddram.ram_address[27:1], 1'b0}, dut.ddram.ram_write, dut.ddram.ram_burst);
 			st_hw[i] = v;
 		end
@@ -841,11 +978,21 @@ module tb_boot;
 		return (w >= ({b1, 16'h0000} >> 2) && w <= ({b1, 16'hBFFF} >> 2)) || w >= (20'hFC000 >> 2);
 	endfunction
 
-	// SDRAM-tier VRAM word w as ddram.sv returns it: a beat whose lazy
+	// Off-chip VRAM halfword h (VRAM byte offset 2h; ddram.sv layout: VRAM
+	// word w is L at 2w, R at 2w+1) as stored: in the SRAM if its 64 KiB
+	// block is mapped there (vram_sram.sv), else in SDRAM bank 2.
+	function automatic [15:0] vram_hw(input [18:0] h);
+		bit [3:0] b;
+		b = h[18:15];
+		if (dut.vsram_map_v[b]) return sram.mem[{dut.vsram_map_slot[b], h[14:0]}];
+		return sdram.peek({2'd2, 22'(h)});
+	endfunction
+
+	// Off-chip VRAM word w as ddram.sv returns it: a beat whose lazy
 	// flash-fill flag is set reads as its row's colour {L, R}.
 	function automatic [31:0] vram_visible(input [17:0] w);
 		if (fw_flag(w[17:1])) return dut.ddram.vram_color.mem[w[17:9]];
-		return {sdram.peek({2'd2, 22'(w * 2)}), sdram.peek({2'd2, 22'(w * 2 + 1)})};
+		return {vram_hw(19'(w * 2)), vram_hw(19'(w * 2 + 1))};
 	endfunction
 
 	task automatic sh_check_memory();
@@ -870,13 +1017,17 @@ module tb_boot;
 		end
 		if (sh_mem_bad != 0) begin
 			errors++;
-			$display("tb_boot: TB ERROR: %0d SDRAM-tier VRAM words differ from what the 3DO wrote, in %0d rows (row:words)%s",
+			$display("tb_boot: TB ERROR: %0d off-chip VRAM words differ from what the 3DO wrote, in %0d rows (row:words)%s",
 			         sh_mem_bad, nrows, r);
 		end
-		$display("tb_boot: VRAM shadow: %0d read transfers, %0d external beats checked (%0d transfers delivered wrong data, %0d beats), %0d write transfers (%0d split, %0d not the CPU's), %0d flash writes; SDRAM-tier VRAM words differing at the end: %0d of %0d",
+		$display("tb_boot: VRAM shadow: %0d read transfers, %0d external beats checked (%0d transfers delivered wrong data, %0d beats), %0d write transfers (%0d split, %0d not the CPU's), %0d flash writes; off-chip VRAM words differing at the end: %0d of %0d",
 		         sh_rts, sh_beats, sh_rt_bad, sh_beats_bad, sh_mwts, sh_split_mwts, sh_legacy_mwts, sh_fws, sh_mem_bad, sh_mem_checked);
+		$display("tb_boot: write masks: %0d write transfers and flash writes with a mask other than FFFF; %0d destination-row reads (%0d beats, %0d wrong)",
+		         sh_masked, sh_mrds, sh_mrd_beats, sh_mrd_bad);
 		$display("tb_boot: SPORT page copies (CPU write transfers) %0d, %0d of them with a video/CLUT transfer between their read and write transfer",
 		         sh_copies, sh_copies_crossed);
+		$display("tb_boot: CPU write transfers from a uniform source row: left %0d, right %0d",
+		         sh_copies_unif[0], sh_copies_unif[1]);
 	endtask
 	// where CLUT/VDL and video transfers point (64 KiB VRAM blocks)
 	int blk_clut [16], blk_vid [16];
@@ -1341,6 +1492,129 @@ module tb_boot;
 		         vw_lost, vw_fw_wrong_effect);
 	end
 
+	// ---------------- memory system hang ----------------
+	// The 3DO pause (p3do_gamebub.sv: ddram.sv's VRAM port or slow-bus port
+	// busy, a VRAM module not ready, the SDRAM secondary port's hold) lasts
+	// microseconds. A pause of HANG_US without a break is a hang: a TB error;
+	// the state of every pause source is printed and the run ends there.
+	// +hang_trace_from_us=<n> [+hang_trace_us=<n>, default 2000]: from n us on,
+	// every clk_mem cycle in which a VRAM transfer, RT cache, ddram.sv, SDRAM
+	// secondary port or MADAM bus signal changes goes to <out>/hang_trace.txt.
+	localparam int HANG_US = 500;
+	int  hang_cnt = 0;       // clk_sys cycles (20 ns) paused without a break
+	bit  hung = 0;
+	always @(posedge clk_sys) begin
+		if (dut.reset_3do || !dut.pause) hang_cnt <= 0;
+		else if (hang_cnt < HANG_US * 50) hang_cnt <= hang_cnt + 1;
+		else if (!hung) begin
+			hung = 1;
+			errors++;
+			$display("[%0t] TB ERROR: the 3DO has been paused for %0d us without a break: the memory system has hung",
+			         $realtime, HANG_US);
+			hang_state();
+			$fflush();
+		end
+	end
+
+	task automatic hang_vram_side(input string s, input bit ras_n, cas_n, oe_n, input bit [1:0] we_n, input bit dsf, sp_cpu,
+	                              rt, mwt, fw, rdy, xcpu, split, iste, input bit [8:0] row, col, pos,
+	                              input bit esrd, eswr, esfw, este, input bit [9:0] vtag, input bit vtag_v);
+		$display("tb_boot: hang:   VRAM %s: RAS_N %b CAS_N %b OE_N %b WE_N %b DSF1 %b SP_CPU %b | RT_EXEC %b MWT_EXEC %b FW_EXEC %b RDY %b XFER_CPU %b SPLIT %b ISTE %b row %03h col %03h SREG_POS %03h | ESRD %b ESWR %b ESFW %b ESTE %b | VSR_TAG %03h valid %b",
+		         s, ras_n, cas_n, oe_n, we_n, dsf, sp_cpu, rt, mwt, fw, rdy, xcpu, split, iste, row, col, pos,
+		         esrd, eswr, esfw, este, vtag, vtag_v);
+	endtask
+
+	task automatic hang_state();
+		$display("tb_boot: hang: pause %b = ddram.sv VRAM busy %b | slow-bus port busy %b | VRAM L not ready %b | VRAM R not ready %b | SDRAM secondary hold %b",
+		         dut.pause, dut.ddr_busy, dut.ddr_io_busy, !dut.VRAM_LRDY, !dut.VRAM_RRDY, dut.sec_hold_s);
+		$display("tb_boot: hang:   CPU A=%08h, MADAM bus %s, CPU SPORT select %b", dut.p3do.CPU_A,
+		         dut.p3do.madam.ARB.BUS_ST.name(), dut.p3do.madam.CPU_SPORT_SEL);
+		hang_vram_side("L", dut.vram_l.RAS_N, dut.vram_l.CAS_N, dut.vram_l.OE_N, dut.vram_l.WE_N, dut.vram_l.DSF1, dut.vram_l.SP_CPU,
+		               dut.vram_l.RT_EXEC, dut.vram_l.MWT_EXEC, dut.vram_l.FW_EXEC, dut.vram_l.RDY, dut.vram_l.XFER_CPU,
+		               dut.vram_l.SPLIT, dut.vram_l.ISTE, dut.vram_l.MEM_ROW, dut.vram_l.MEM_COL, dut.vram_l.SREG_POS,
+		               dut.vram_l.ESRD, dut.vram_l.ESWR, dut.vram_l.ESFW, dut.vram_l.ESTE, dut.vram_l.VSR_TAG, dut.vram_l.VSR_V);
+		hang_vram_side("R", dut.vram_r.RAS_N, dut.vram_r.CAS_N, dut.vram_r.OE_N, dut.vram_r.WE_N, dut.vram_r.DSF1, dut.vram_r.SP_CPU,
+		               dut.vram_r.RT_EXEC, dut.vram_r.MWT_EXEC, dut.vram_r.FW_EXEC, dut.vram_r.RDY, dut.vram_r.XFER_CPU,
+		               dut.vram_r.SPLIT, dut.vram_r.ISTE, dut.vram_r.MEM_ROW, dut.vram_r.MEM_COL, dut.vram_r.SREG_POS,
+		               dut.vram_r.ESRD, dut.vram_r.ESWR, dut.vram_r.ESFW, dut.vram_r.ESTE, dut.vram_r.VSR_TAG, dut.vram_r.VSR_V);
+		$display("tb_boot: hang:   RT cache: fill busy %b issue %b entry %0d half-row %03h | demand L %b h %03h beat %02h, R %b h %03h beat %02h, age %0d hold %b | delivery L %b entry %0d beat %02h (filled %02h), R %b entry %0d beat %02h (filled %02h) | prefetch %b %03h, %b %03h, quiet %b | victim %0d ok %b | to ddram.sv: blwr %b brwr %b bfw %b blrd %b brrd %b, bbusy %b",
+		         dut.rtcache.fill_busy, dut.rtcache.fill_issue, dut.rtcache.fill_e, dut.rtcache.fill_h,
+		         dut.rtcache.dem_pend[0], dut.rtcache.dem_h[0], dut.rtcache.dem_beat[0],
+		         dut.rtcache.dem_pend[1], dut.rtcache.dem_h[1], dut.rtcache.dem_beat[1], dut.rtcache.dem_age, dut.rtcache.dem_hold,
+		         dut.rtcache.dl_act[0], dut.rtcache.dl_e[0], dut.rtcache.dl_beat[0], dut.rtcache.fl0,
+		         dut.rtcache.dl_act[1], dut.rtcache.dl_e[1], dut.rtcache.dl_beat[1], dut.rtcache.fl1,
+		         dut.rtcache.pf_v[0], dut.rtcache.pf_h[0], dut.rtcache.pf_v[1], dut.rtcache.pf_h[1], dut.rtcache.pf_quiet,
+		         dut.rtcache.vptr, dut.rtcache.v_ok,
+		         dut.rtcache.d_blwr, dut.rtcache.d_brwr, dut.rtcache.d_bfw, dut.rtcache.d_blrd, dut.rtcache.d_brrd, dut.rtcache.d_bbusy);
+		for (int i = 0; i < 16; i++)
+			$display("tb_boot: hang:     RT cache entry %2d: valid %b tag %03h filled %02h dirty %b used %b", i,
+			         dut.rtcache.valid[i], dut.rtcache.tag[i], dut.rtcache.filled[i], dut.rtcache.dirty[i], dut.rtcache.used[i]);
+		$display("tb_boot: hang:   ddram.sv: state %0d DDRAM_BUSY %b | burst write L %b R %b (addr %05h %05h, wpos %02h), burst read L %b R %b (rpos %02h) | random write pend L %b R %b busy L %b R %b (addr %05h %05h, flag lookup at %05h) | read busy L %b R %b | slow bus read %b write %b",
+		         dut.ddram.state, dut.ddram.DDRAM_BUSY, dut.ddram.burst_write_lbusy, dut.ddram.burst_write_rbusy,
+		         dut.ddram.burst_laddr, dut.ddram.burst_raddr, dut.ddram.wpos, dut.ddram.burst_read_lbusy, dut.ddram.burst_read_rbusy,
+		         dut.ddram.rpos, dut.ddram.write_lpend, dut.ddram.write_rpend, dut.ddram.write_lbusy, dut.ddram.write_rbusy,
+		         dut.ddram.write_laddr, dut.ddram.write_raddr, {dut.ddram.vram_fw_qaddr, 1'b0},
+		         dut.ddram.read_lbusy, dut.ddram.read_rbusy, dut.ddram.io_read_busy, dut.ddram.io_write_busy);
+		$display("tb_boot: hang:   DDR bridge %s (collected %0d, read beats %0d), secondary port arbiter busy %b sel %0d, SDRAM secondary %s ref_due %b",
+		         dut.ddr_bridge.st.name(), dut.ddr_bridge.wcnt, dut.ddr_bridge.rbeats, dut.arb.busy, dut.arb.sel,
+		         dut.sdram.sst.name(), dut.sdram.ref_due);
+	endtask
+
+	int     ht_fd = 0;
+	longint ht_from_us = -1, ht_us = 2000;
+	initial begin
+		void'($value$plusargs("hang_trace_from_us=%d", ht_from_us));
+		void'($value$plusargs("hang_trace_us=%d", ht_us));
+	end
+	bit [127:0] ht_mon, ht_mon_d;
+	always @(posedge clk_mem) begin
+		if (ht_from_us >= 0 && $realtime >= ht_from_us * 1us && $realtime < (ht_from_us + ht_us) * 1us) begin
+			ht_mon = {dut.pause, dut.VRAM_LRDY, dut.VRAM_RRDY, dut.ddr_busy, dut.ddr_io_busy, dut.sec_hold_s,
+			          dut.vram_l.RAS_N, dut.vram_l.CAS_N, dut.vram_l.OE_N, dut.vram_l.WE_N, dut.vram_l.DSF1, dut.vram_l.SP_CPU,
+			          dut.vram_l.RT_EXEC, dut.vram_l.MWT_EXEC, dut.vram_l.FW_EXEC, dut.vram_l.ESRD, dut.vram_l.ESWR, dut.vram_l.ESFW,
+			          dut.vram_r.RAS_N, dut.vram_r.CAS_N, dut.vram_r.OE_N, dut.vram_r.WE_N, dut.vram_r.DSF1, dut.vram_r.SP_CPU,
+			          dut.vram_r.RT_EXEC, dut.vram_r.MWT_EXEC, dut.vram_r.FW_EXEC, dut.vram_r.ESRD, dut.vram_r.ESWR,
+			          dut.rtcache.fill_busy, dut.rtcache.fill_issue, dut.rtcache.dem_pend[0], dut.rtcache.dem_pend[1],
+			          dut.rtcache.dl_act[0], dut.rtcache.dl_act[1], dut.rtcache.d_blwr, dut.rtcache.d_brwr,
+			          dut.rtcache.d_blrd, dut.rtcache.d_brrd, dut.rtcache.d_bbusy,
+			          dut.ddram.state, dut.ddram.DDRAM_BUSY, dut.ddram.write_lpend, dut.ddram.write_rpend,
+			          dut.ddram.read_lbusy, dut.ddram.read_rbusy, dut.ddram.io_read_busy, dut.ddram.io_write_busy,
+			          3'(dut.ddr_bridge.st), dut.arb.busy, 4'(dut.sdram.sst), dut.sdram.ref_due,
+			          8'(dut.p3do.madam.ARB.BUS_ST)};
+			if (ht_fd == 0) begin
+				ht_fd = $fopen({outdir, "/hang_trace.txt"}, "w");
+				$fdisplay(ht_fd, "# time_ps | pause LRDY RRDY ddr_busy io_busy sec_hold | VRAM L/R: RAS CAS OE WE DSF SP_CPU RT MWT FW row col pos ESRD ESWR ESFW ESTE | RT cache: fill busy/issue entry h, demand L/R, delivery L/R beat, blwr brwr bfw blrd brrd bbusy | ddram.sv state DDRAM_BUSY wpend L/R rbusy L/R io r/w | bridge arb sdram ref | MADAM bus CPU_A");
+				$display("[%0t] hang trace started (%s/hang_trace.txt)", $realtime, outdir);
+				ht_mon_d = ~ht_mon;
+			end
+			if (ht_mon != ht_mon_d)
+				$fdisplay(ht_fd, "%0t | %b %b %b %b %b %b | L %b%b%b%b%b%b %b%b%b %03h %03h %03h %b%b%b%b | R %b%b%b%b%b%b %b%b%b %03h %03h %03h %b%b%b | C %b%b %0d %03h d%b%b dl%b%b %02h %02h %b%b%b%b%b %b | D %0d %b w%b%b r%b%b io%b%b | %s %b %s %b | %s %08h",
+				          $realtime, dut.pause, dut.VRAM_LRDY, dut.VRAM_RRDY, dut.ddr_busy, dut.ddr_io_busy, dut.sec_hold_s,
+				          dut.vram_l.RAS_N, dut.vram_l.CAS_N, dut.vram_l.OE_N, &dut.vram_l.WE_N, dut.vram_l.DSF1, dut.vram_l.SP_CPU,
+				          dut.vram_l.RT_EXEC, dut.vram_l.MWT_EXEC, dut.vram_l.FW_EXEC,
+				          dut.vram_l.MEM_ROW, dut.vram_l.MEM_COL, dut.vram_l.SREG_POS,
+				          dut.vram_l.ESRD, dut.vram_l.ESWR, dut.vram_l.ESFW, dut.vram_l.ESTE,
+				          dut.vram_r.RAS_N, dut.vram_r.CAS_N, dut.vram_r.OE_N, &dut.vram_r.WE_N, dut.vram_r.DSF1, dut.vram_r.SP_CPU,
+				          dut.vram_r.RT_EXEC, dut.vram_r.MWT_EXEC, dut.vram_r.FW_EXEC,
+				          dut.vram_r.MEM_ROW, dut.vram_r.MEM_COL, dut.vram_r.SREG_POS,
+				          dut.vram_r.ESRD, dut.vram_r.ESWR, dut.vram_r.ESTE,
+				          dut.rtcache.fill_busy, dut.rtcache.fill_issue, dut.rtcache.fill_e, dut.rtcache.fill_h,
+				          dut.rtcache.dem_pend[0], dut.rtcache.dem_pend[1], dut.rtcache.dl_act[0], dut.rtcache.dl_act[1],
+				          dut.rtcache.dl_beat[0], dut.rtcache.dl_beat[1],
+				          dut.rtcache.d_blwr, dut.rtcache.d_brwr, dut.rtcache.d_bfw, dut.rtcache.d_blrd, dut.rtcache.d_brrd,
+				          dut.rtcache.d_bbusy,
+				          dut.ddram.state, dut.ddram.DDRAM_BUSY, dut.ddram.write_lpend, dut.ddram.write_rpend,
+				          dut.ddram.read_lbusy, dut.ddram.read_rbusy, dut.ddram.io_read_busy, dut.ddram.io_write_busy,
+				          dut.ddr_bridge.st.name(), dut.arb.busy, dut.sdram.sst.name(), dut.sdram.ref_due,
+				          dut.p3do.madam.ARB.BUS_ST.name(), dut.p3do.CPU_A);
+			ht_mon_d = ht_mon;
+		end else if (ht_fd != 0) begin
+			$fclose(ht_fd);
+			ht_fd = 0;
+			ht_from_us = -1;
+		end
+	end
+
 	// framework video -> PPM frames
 	bit [17:0] fb [320*240];
 	int px = 0, ln = 0, frames = 0, frame_every;
@@ -1353,11 +1627,39 @@ module tb_boot;
 		end
 		if (vhbl && !vhbl_d) begin px = 0; ln++; end
 		if (vvbl && !vvbl_d) begin
-			if (frames % frame_every == 0) save_frame(frames);
+			if (flog_fd != 0) frame_log(frames);
+			if (frames % frame_every == 0 || (frames >= frames_from && frames <= frames_to)) save_frame(frames);
 			frames++;
 			px = 0; ln = 0;
 		end
 	end
+
+	// +frame_log: <out>/frame_log.txt, one line per frame: its number, the
+	// time, the mean red, green and blue (0-63) and the frame buffer the
+	// frame's first VDL entry pointed the video DMA at (VRAM byte offset), so
+	// a frame out of line in a fade shows, with whether the buffer changed.
+	// +frames_from=<n> +frames_to=<m>: every frame from n to m is saved too.
+	int flog_fd = 0, frames_from = -1, frames_to = -1;
+	bit [19:2] fl_fb = '0;
+	bit        fl_fb_seen = 0;
+	initial begin
+		void'($value$plusargs("frames_from=%d", frames_from));
+		void'($value$plusargs("frames_to=%d", frames_to));
+		if ($test$plusargs("frame_log")) flog_fd = $fopen({outdir, "/frame_log.txt"}, "w");
+	end
+	always @(posedge clk_sys) if (dut.VID_FB_HINT && dut.VID_FB_CURR_V && !fl_fb_seen) begin
+		fl_fb = dut.VID_FB_CURR;
+		fl_fb_seen = 1;
+	end
+	task automatic frame_log(input int n);
+		longint sr, sg, sb;
+		sr = 0; sg = 0; sb = 0;
+		for (int i = 0; i < 320*240; i++) begin sr += fb[i][17:12]; sg += fb[i][11:6]; sb += fb[i][5:0]; end
+		$fdisplay(flog_fd, "%0d %0.3f %0.2f %0.2f %0.2f %s", n, $realtime / 1.0e9, sr / 76800.0, sg / 76800.0, sb / 76800.0,
+		          fl_fb_seen ? $sformatf("%05h", {fl_fb, 2'b00}) : "-");
+		$fflush(flog_fd);
+		fl_fb_seen = 0;
+	endtask
 	task automatic save_frame(input int n);
 		int fd;
 		bit any;
@@ -1451,22 +1753,33 @@ module tb_boot;
 		host_cmd(16'h0301, 1, bios_len, 0, r, e);
 		host_cmd(16'h0102, 0, 0, 0, r, e);
 		do host_cmd(16'h0000, 0, 0, 0, r, e); while (r != 3);
+		host_wr(32'h0000_1010, 32'(sram_mode));   // "VRAM memory", taken while the 3DO is in reset
+		$display("tb_boot: VRAM memory setting %0d (%s)", sram_mode,
+		         sram_mode == 0 ? "SRAM, 2 cycles per word" : sram_mode == 1 ? "SRAM, 3 cycles per word" : "SDRAM only");
 		host_cmd(16'h0200, 1, 0, 0, r, e);
 		host_cmd(16'h0100, 0, 0, 0, r, e);
 		$display("[%0t] core running", $realtime);
 
-		#(run_ms * 1ms);
+		// the run ends early if the memory system hangs (nothing moves after that)
+		fork
+			#(run_ms * 1ms);
+			wait (hung);
+		join_any
+		disable fork;
+		if (hung) $display("[%0t] tb_boot: run ended early: memory system hang", $realtime);
+		if (ht_fd != 0) begin $fclose(ht_fd); ht_fd = 0; end
+		$fflush();
 		dump_vram_fb(32'h000000, 1638, {outdir, "/frames/vram_all.ppm"});
 		sh_check_memory();
-		$display("tb_boot: %0d frames, %0d CD sectors (%0d served by the firmware model), SDRAM model errors %0d, TB errors %0d",
-		         frames, sectors_sent, served, sdram.errors, errors);
+		$display("tb_boot: %0d frames, %0d CD sectors (%0d served by the firmware model), SDRAM model errors %0d, SRAM model errors %0d (%0d SRAM writes), TB errors %0d",
+		         frames, sectors_sent, served, sdram.errors, sram.errors, sram.writes, errors);
 		if (chk_fd != 0)
 			$display("tb_boot: CD data check: %0d sectors match the image, %0d differ", cd_good, cd_bad);
 		$display("tb_boot: RT cache hits %0d, misses %0d, prefetches %0d, invalidations %0d, VDL frame buffer hints %0d",
 		         dut.rtc_hits, dut.rtc_misses, dut.rtc_prefetches, dut.rtc_invalidations, dut.rtc_hints);
-		// any TB error (late video lines included) or SDRAM model error fails the
-		// run, with a non-zero exit status ($fatal) so scripts see it
-		if (errors == 0 && sdram.errors == 0) begin $display("tb_boot: PASS"); $finish; end
+		// any TB error (late video lines included) or SDRAM / SRAM model error
+		// fails the run, with a non-zero exit status ($fatal) so scripts see it
+		if (errors == 0 && sdram.errors == 0 && sram.errors == 0) begin $display("tb_boot: PASS"); $finish; end
 		else $fatal(1, "tb_boot: FAIL");
 	end
 endmodule

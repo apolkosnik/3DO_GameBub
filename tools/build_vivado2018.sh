@@ -14,17 +14,22 @@ sed -i '/\.CASCADE_HEIGHT(0),/d; /\.SIM_ASSERT_CHK(/d' "$B"/generated/XpmFifoAsy
 # mostly routing) misses timing by up to 0.08 ns, depending on what the core
 # places around it (block RAM use is ~89%). Timing-driven placement plus
 # physical optimisation after placement and after routing closes it.
+# PLACE_DIRECTIVE=<directive> tries another placer strategy when a change
+# moves the placement and timing is missed by a little (default ExtraTimingOpt).
+PLACE=${PLACE_DIRECTIVE:-ExtraTimingOpt}
 RUN_TCL="$B"/P3DOCore-gamebub_rev4_run.tcl
 if ! grep -q "STEPS.PLACE_DESIGN.ARGS.DIRECTIVE" "$RUN_TCL"; then
 	sed -i '/^  launch_runs impl_1 /i\
-  set_property STEPS.PLACE_DESIGN.ARGS.DIRECTIVE ExtraTimingOpt [get_runs impl_1]\
+  set_property STEPS.PLACE_DESIGN.ARGS.DIRECTIVE '"$PLACE"' [get_runs impl_1]\
   set_property STEPS.PHYS_OPT_DESIGN.IS_ENABLED true [get_runs impl_1]\
   set_property STEPS.PHYS_OPT_DESIGN.ARGS.DIRECTIVE AggressiveExplore [get_runs impl_1]\
   set_property STEPS.ROUTE_DESIGN.ARGS.DIRECTIVE Explore [get_runs impl_1]\
   set_property STEPS.POST_ROUTE_PHYS_OPT_DESIGN.IS_ENABLED true [get_runs impl_1]\
   set_property STEPS.POST_ROUTE_PHYS_OPT_DESIGN.ARGS.DIRECTIVE AggressiveExplore [get_runs impl_1]' "$RUN_TCL"
 fi
-grep -q "STEPS.PLACE_DESIGN.ARGS.DIRECTIVE ExtraTimingOpt" "$RUN_TCL"
+sed -i "s/STEPS.PLACE_DESIGN.ARGS.DIRECTIVE [A-Za-z_]* /STEPS.PLACE_DESIGN.ARGS.DIRECTIVE $PLACE /" "$RUN_TCL"
+grep -q "STEPS.PLACE_DESIGN.ARGS.DIRECTIVE $PLACE " "$RUN_TCL"
+echo "place_design directive: $PLACE"
 rm -rf "$B"/P3DOCore-gamebub_rev4.runs "$B"/P3DOCore-gamebub_rev4.xpr "$B"/P3DOCore-gamebub_rev4.cache
 make -C "$B"
 ls -la "$B"/P3DOCore-gamebub_rev4.bit

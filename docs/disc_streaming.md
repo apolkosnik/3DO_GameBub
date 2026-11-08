@@ -58,10 +58,32 @@ core runs.
 - **Sector reads.** `cdd_emu.sv` issues `DISC_READ` for the sector the 3DO's drive
   controller asks for. The destination is a block-RAM sector buffer mapped at host address
   `0x4000_0000`, so the transfer never touches the SDRAM and the 3DO is not paused for it.
-  The core hands bytes 16–2063 (the MODE1 user data) to the controller, as MiSTer's HPS
-  does. The request goes out when the drive's sector time starts, so the firmware's
-  latency overlaps it. A failed or unanswered request (about 5 s timeout) reads as an
-  empty sector.
+  With the default block length (2048 bytes), the core hands bytes 16–2063 (the MODE1 user
+  data) to the controller, as MiSTer's HPS does. The request goes out when the drive's
+  sector time starts, so the firmware's latency overlaps it. A failed or unanswered
+  request (about 5 s timeout) reads as an empty sector.
+- **CD-DA and raw sectors.** The 3DO has no analog CD audio path: its audio CD player
+  reads CD-DA sectors through the drive's data port and plays them on the DSP. The drive
+  commands this takes (`3DO_CDROM.sv`, as SataTo3DO's drive emulation implements them):
+  - *Set Mode* `09 00 <density> <length hi> <length lo> <flags>` sets the block length.
+    A block is taken from the raw 2352-byte sector: 2048 is the user data (bytes 16..),
+    2352 the whole sector (CD-DA: 588 stereo samples, 16-bit little-endian), a shorter
+    length the end of the sector (2340: bytes 12..). Flags bits 7–6 select 2353 (`10`,
+    CD-DA and an error-flag byte), 2448 (`01`, CD-DA and subcode) or 2449 (`11`), whose
+    extra bytes read as zeros. A drive reset restores 2048.
+  - *Set Mode* `09 03 <speed>`: bit 7 of the speed byte is double speed (status bit 1).
+  - *Read Sub-Q* `87`: `87 ctrl track index 00 absM absS absF relM relS relF status`, in
+    binary, for the last sector read (ctrl `04` data, `00` audio; index 0 in a pregap,
+    where the relative time counts down to index 1).
+  - *Abort* `08` and *Flush* `0B` (7 bytes, like the other commands) stop a read and
+    answer `08`/`0B` and the status.
+
+  Each sector's track and audio flag come from the TOC. Audio sectors arrive at the
+  drive's real rate, 75 per second (150 at double speed, exactly 50 MHz / 75 with the
+  fraction spread over three sectors). Each one is timed from the one before it, so the
+  3DO's own time to read a block does not slow playback down. Data sectors keep the CD
+  speed setting. A preloaded ISO has no audio. In a longer block it gives its 2048 bytes
+  and then zeros.
 - **Disc-info block.** Built from the TOC: tracks, audio flags, and lead-out converted
   from BCD to binary MSF, as the MiSTer core expects.
 - **Disc swap.** A TOC arriving while the core runs resends the disc-info block, which
@@ -77,6 +99,20 @@ sync, header, data, EDC, P/Q ECC) and `image.cue` for the fork's firmware.
 ## Verification
 
 - `sim/run_tb.sh tb_top +stream`: a model of the fork firmware serves `DISC_READ`
-  requests, and the test BIOS's CD test (read capacity, two-sector read) runs through it.
+  requests for a disc with a data track and an audio track. The test BIOS's CD tests run
+  through it:
+  - read capacity and a two-sector read (test 7);
+  - disc info and TOC (test 14);
+  - two 2352-byte CD-DA blocks, a raw data sector, and two 2448-byte CD-DA blocks at
+    double speed;
+  - Read Sub-Q on both tracks, then Abort and Flush.
+
+  Every byte the CPU reads and every status is checked. So is the spacing of CD-DA
+  sectors (one sector time at 1x and at 2x, to within 15 ns).
 - `tb_boot +disc_bin=<image.bin>`: boots a real BIOS while streaming a real disc image.
   The real Wolfenstein 3D image (133 MB) streams through the same path.
+  `+audio_tracks=<n> [+data_sectors=<k>]` describes the image as a data track of k sectors
+  (none with k = 0) followed by n audio tracks. The log shows every command the BIOS sends
+  to the drive controller and the status it reads back. Every block is checked against
+  the image at its block length, both as sent to the controller and as the CPU reads it.
+  The spacing of audio sectors is reported.

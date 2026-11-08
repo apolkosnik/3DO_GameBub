@@ -10,8 +10,21 @@
 //  * on disc insertion, send the 2 KiB disc-info block (CDD_DIEN): disc type,
 //    track list in binary MSF, and the first 128 bytes of sector 0;
 //  * READ (0x10) / NEXT (0x20) requests from the controller: send one sector
-//    per request (CDD_DTEN), 1024 data words + 1 checksum word, LBA = cmd-150,
-//    one sector every SECTOR_DELAY system clocks (MiSTer: one per 3 ms poll).
+//    per request (CDD_DTEN), blk_len bytes as words + 1 checksum word, LBA =
+//    cmd-150, one sector every SECTOR_DELAY system clocks (MiSTer: one per
+//    3 ms poll).
+//
+// CD-DA (streaming mode): the BIOS's audio CD player sets the block length
+// to 2352 (Set Mode, P3DO_CDROM) and reads audio sectors through the data
+// path, as from a real drive (SataTo3DO's drive emulation). A block is taken
+// from the raw 2352-byte sector: 2048 bytes are the MODE1 user data (bytes
+// 16..), a shorter raw block ends with the sector (2340: bytes 12..), 2352 is
+// the whole sector, and the 2353/2448/2449-byte formats (error flags,
+// subcode) end in zeros. Audio sectors come at the drive's real rate, 75 per
+// second (150 at double speed), timed from one sector to the next so that the
+// time the 3DO takes to read a block does not slow playback down. The track
+// table taken from the TOC gives each sector's track, index and audio flag,
+// and the Sub-Q position the controller reports (Read Sub-Q, 87).
 //
 // Clock domains: the command / ioctl side runs on clk_sys, the SDRAM fetch on
 // clk_mem. A dual-clock sector buffer and toggle handshakes connect them.
@@ -51,6 +64,9 @@ module cdd_emu (
 
 	// P3DO_CDROM side (clk_sys)
 	input      [64: 0] cd_comm,          // {toggle, HOST_COMM[7..0]}
+	input      [11: 0] blk_len,          // bytes per block (Set Mode density)
+	input              speed2x,          // double speed (Set Mode speed)
+	output reg [71: 0] subq,             // {ctrl, track, index, abs M S F, rel M S F}, binary
 	output reg [15: 0] CDD_DATA,
 	output reg         CDD_WR,
 	output reg         CDD_DTEN,
@@ -161,6 +177,7 @@ module cdd_emu (
 		C_SEC_SEND,
 		C_SEC_CRC,
 		C_SEC_END,
+		C_STR_POS,
 		C_STR_WAIT
 	} cstate_t;
 	cstate_t cst;
@@ -180,6 +197,16 @@ module cdd_emu (
 	reg        zero_sector;
 	reg        q_got;            // streaming: the requested sector has arrived
 	reg        str_cancel;       // streaming: a new command came while waiting
+	reg        sec_audio;        // the sector being read is CD-DA
+	reg [10:0] sec_words;        // words in the block being sent
+	reg [11:0] sec_off;          // raw sector byte of its first word
+	reg [11:0] sec_b;            // raw sector byte of the word being sent
+	// Audio sector pacing: clocks until the next audio sector may go, at
+	// 50 MHz / 75 (or / 150) with the fraction spread over three sectors
+	reg [19:0] apace;
+	reg [ 1:0] apace_ph;
+	wire [19:0] apace_period = speed2x ? ((apace_ph == 2'd2) ? 20'd333_334 : 20'd333_333)
+	                                   : ((apace_ph == 2'd2) ? 20'd666_666 : 20'd666_667);
 
 	// ------------------------------------------------------------------
 	// Streaming mode: table of contents, sector buffer, DISC_READ requests
@@ -212,6 +239,83 @@ module cdd_emu (
 		if (toc_we && toc_wa == 9'd2) toc_leadout_bcd <= toc_wd[23:0];
 	end
 
+	// Track table (streaming): first LBA, index 1 LBA and audio flag of each
+	// track, from TOC words 4+4n, 6+4n and 7+4n (absolute LBAs)
+	reg [23:0] trk_first [0:127];
+	reg [23:0] trk_idx1  [0:127];
+	reg        trk_audio [0:127];
+	wire [8:0] toc_wa_t = toc_wa - 9'd4;
+	always @(posedge clk_sys) begin
+		if (toc_we && toc_wa >= 9'd4)
+			case (toc_wa_t[1:0])
+				2'd0: trk_first[toc_wa_t[8:2]] <= toc_wd[23:0];
+				2'd2: trk_idx1 [toc_wa_t[8:2]] <= toc_wd[23:0];
+				2'd3: trk_audio[toc_wa_t[8:2]] <= toc_wd[31];
+				default: ;
+			endcase
+	end
+
+	// Position lookup: track, index, audio flag and Sub-Q times of absolute
+	// LBA pl_lba (pl_start: start, pl_done: subq and pl_audio valid). The
+	// tracks are scanned one per cycle, the times converted to MSF by
+	// subtraction (at most 99 + 59 steps). A preloaded ISO is one data track.
+	reg        pl_start, pl_done, pl_audio;
+	reg [23:0] pl_lba;
+	typedef enum bit [1:0] { P_IDLE, P_SCAN, P_TIME, P_MSF } pstate_t;
+	pstate_t   pst;
+	reg [ 6:0] pl_t, pl_hit;
+	reg [ 7:0] pl_idx;
+	reg [23:0] pa_v, pr_v;               // abs / rel time left to convert
+	reg [ 7:0] pa_m, pa_s, pr_m, pr_s;
+	wire [6:0] pl_ntr = disc_stream ? toc_tracks[6:0] : 7'd1;
+	wire [23:0] pl_first = disc_stream ? trk_first[pl_t] : 24'd150;
+	wire [23:0] pl_i1    = disc_stream ? trk_idx1[pl_hit] : 24'd150;
+	wire        pl_aud   = disc_stream ? trk_audio[pl_hit] : 1'b0;
+	always @(posedge clk_sys) begin
+		pl_done <= 0;
+		if (rst_sys) begin
+			pst  <= P_IDLE;
+			subq <= {8'h04, 8'd1, 8'd1, 8'd0, 8'd2, 8'd0, 24'd0};
+		end else case (pst)
+			P_IDLE: if (pl_start) begin
+				pl_t   <= 7'd0;
+				pl_hit <= 7'd0;
+				pst <= P_SCAN;
+			end
+			P_SCAN: begin
+				// the last track that starts at or before the LBA
+				if (pl_first <= pl_lba) pl_hit <= pl_t;
+				if (pl_t + 7'd1 >= pl_ntr || pl_first > pl_lba) pst <= P_TIME;
+				else pl_t <= pl_t + 7'd1;
+			end
+			P_TIME: begin
+				// relative time: from index 1, counted down in the pregap
+				// (index 0)
+				pl_idx <= (pl_lba >= pl_i1) ? 8'd1 : 8'd0;
+				pr_v   <= (pl_lba >= pl_i1) ? pl_lba - pl_i1 : pl_i1 - pl_lba;
+				pa_v   <= pl_lba;
+				{pa_m, pa_s, pr_m, pr_s} <= '0;
+				pl_audio <= pl_aud;
+				pst <= P_MSF;
+			end
+			P_MSF: begin
+				bit a_done, r_done;
+				a_done = pa_v < 24'd75;
+				r_done = pr_v < 24'd75;
+				if (pa_v >= 24'd4500) begin pa_v <= pa_v - 24'd4500; pa_m <= pa_m + 8'd1; end
+				else if (!a_done)     begin pa_v <= pa_v - 24'd75;   pa_s <= pa_s + 8'd1; end
+				if (pr_v >= 24'd4500) begin pr_v <= pr_v - 24'd4500; pr_m <= pr_m + 8'd1; end
+				else if (!r_done)     begin pr_v <= pr_v - 24'd75;   pr_s <= pr_s + 8'd1; end
+				if (a_done && r_done) begin
+					subq <= {pl_audio ? 8'h00 : 8'h04, 8'(pl_hit) + 8'd1, pl_idx,
+					         pa_m, pa_s, pa_v[7:0], pr_m, pr_s, pr_v[7:0]};
+					pl_done <= 1;
+					pst <= P_IDLE;
+				end
+			end
+		endcase
+	end
+
 	// Raw sector buffer (588 words used), written by the host
 	(* ram_style = "block" *) reg [31:0] sbr [0:1023];
 	reg [31:0] sbr_q;
@@ -227,6 +331,11 @@ module cdd_emu (
 	endfunction
 	function automatic [15:0] user_word(input [31:0] q, input bit hi);
 		user_word = hi ? q[31:16] : q[15:0];
+	endfunction
+	// Block word k is raw sector bytes sec_off + 2k, sec_off + 2k + 1 (bytes
+	// past the 2352 of the sector are zeros)
+	function automatic [11:0] raw_byte_addr(input [11:0] off, input [10:0] k);
+		raw_byte_addr = off + {k, 1'b0};
 	endfunction
 
 	// Core -> host request (the same handshake as the fork's PSX core):
@@ -350,8 +459,12 @@ module cdd_emu (
 		cmd_new <= 0;
 
 		q_start <= 0;
+		pl_start <= 0;
+		if (apace != 0) apace <= apace - 1'd1;
 		if (rst_sys) begin
 			cst          <= C_IDLE;
+			apace        <= '0;
+			apace_ph     <= '0;
 			CDD_DTEN     <= 0;
 			CDD_DIEN     <= 0;
 			read_pend    <= 0;
@@ -388,6 +501,7 @@ module cdd_emu (
 						cur_lba     <= l - 24'd150;
 						blocks_left <= {comm[5], comm[6]};
 						read_pend   <= 1;
+						apace       <= apace_period - 20'd1;   // a seek: the first sector after one sector time
 					end
 					8'h20: begin // NEXT
 						if (blocks_left != 0) read_pend <= 1;
@@ -409,17 +523,23 @@ module cdd_emu (
 						cst <= C_INFO_WAIT;
 					end else if (read_pend && info_sent) begin
 						delay_cnt <= sector_delay;
+						// block geometry (Set Mode is not sent during a read)
+						sec_words <= 11'((blk_len + 12'd1) >> 1);
+						sec_off   <= (blk_len == 12'd2048) ? 12'd16 :
+						             (blk_len >= 12'd2352) ? 12'd0  : ((12'd2352 - blk_len) & 12'hFFE);
 						if (disc_stream) begin
-							// request now, so the firmware's latency overlaps the
+							// the sector's track first (audio or data), then the
+							// request, so the firmware's latency overlaps the
 							// drive's sector time
 							bit [23:0] l;
 							l = cur_lba[23] ? 24'd0 : cur_lba;  // pregap reads sector 0 (3docdd.cpp)
 							q_lba      <= {8'd0, l} + 32'd150;   // absolute LBA
-							q_start    <= 1;
+							pl_lba     <= l + 24'd150;
+							pl_start   <= 1;
 							q_got      <= 0;
 							str_cancel <= 0;
 							read_pend  <= 0;
-							cst <= C_STR_WAIT;
+							cst <= C_STR_POS;
 						end else begin
 							cst <= C_SEC_DELAY;
 						end
@@ -465,6 +585,8 @@ module cdd_emu (
 				end
 
 				C_INFO_END: begin
+					pl_lba    <= 24'd150;              // Sub-Q before the first read: track 1
+					pl_start  <= 1;
 					CDD_DIEN  <= 0;
 					info_sent <= 1;
 					disc_info_valid <= 1;
@@ -479,6 +601,8 @@ module cdd_emu (
 						bit [23:0] l;
 						l = cur_lba[23] ? 24'd0 : cur_lba;  // pregap reads sector 0 (3docdd.cpp)
 						zero_sector   <= (l >= {9'd0, disc_sectors});
+						pl_lba        <= l + 24'd150;   // Sub-Q position
+						pl_start      <= 1;
 						fetch_lba_sys <= l[14:0];
 						fetch_tgl_sys <= ~fetch_tgl_sys;
 						read_pend     <= 0;
@@ -489,6 +613,16 @@ module cdd_emu (
 				// streaming: sector time and the firmware's answer, whichever
 				// comes last. A command in between (a new READ, a stop) drops
 				// the sector, as MiSTer's next poll would.
+				C_STR_POS: begin
+					if (delay_cnt) delay_cnt <= delay_cnt - 1'd1;
+					if (cmd_new && comm[0] != 8'h00) str_cancel <= 1;
+					if (pl_done) begin
+						sec_audio <= pl_audio;
+						q_start   <= 1;
+						cst <= C_STR_WAIT;
+					end
+				end
+
 				C_STR_WAIT: begin
 					if (delay_cnt) delay_cnt <= delay_cnt - 1'd1;
 					if (cmd_new && comm[0] != 8'h00) str_cancel <= 1;
@@ -496,9 +630,15 @@ module cdd_emu (
 						q_got       <= 1;
 						zero_sector <= q_failed;              // a failed read reads as zeros
 					end
-					if (q_got && delay_cnt == 0) begin
+					// data: the drive's sector time from the request; audio: the
+					// real-time rate from the previous audio sector
+					if (q_got && (sec_audio ? apace == 0 : delay_cnt == 0)) begin
 						if (str_cancel || disc_change) cst <= C_IDLE;
 						else begin
+							if (sec_audio) begin
+								apace    <= apace_period - 20'd1;   // zero after the period: the next sector's cycle
+								apace_ph <= (apace_ph == 2'd2) ? 2'd0 : apace_ph + 1'd1;
+							end
 							CDD_DTEN <= 1;
 							widx     <= '0;
 							crc      <= '0;
@@ -520,16 +660,23 @@ module cdd_emu (
 				C_SEC_SEND: begin
 					rd_phase <= (rd_phase == 2'd2) ? 2'd0 : rd_phase + 1'd1;
 					if (rd_phase == 2'd0) begin
+						bit [11:0] b;
+						b = raw_byte_addr(sec_off, widx);
+						sec_b   <= b;
 						sbuf_ra <= cdda(widx[9:0], host_le);
-						sbr_ra  <= user_addr(widx[9:0]);
+						sbr_ra  <= b[11:2];
 					end else if (rd_phase == 2'd2) begin
 						bit [15:0] w;
-						w = zero_sector ? 16'h0000 : disc_stream ? user_word(sbr_q, widx[0]) : cddw(sbuf_q, host_le);
+						// streaming: the raw sector; preloaded ISO: its 2048 bytes
+						// of user data, zeros after them in a longer block
+						if (zero_sector) w = 16'h0000;
+						else if (disc_stream) w = (sec_b < 12'd2352) ? user_word(sbr_q, sec_b[1]) : 16'h0000;
+						else w = widx[10] ? 16'h0000 : cddw(sbuf_q, host_le);
 						CDD_DATA <= w;                     // ioctl order: low byte first
 						CDD_WR   <= 1;
 						crc  <= crc + w[15:8] + w[7:0];
 						widx <= widx + 1'd1;
-						if (widx == 11'h3FF) cst <= C_SEC_CRC;
+						if (widx == sec_words - 11'd1) cst <= C_SEC_CRC;
 					end
 				end
 

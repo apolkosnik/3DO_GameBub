@@ -23,6 +23,11 @@ module P3DO_CDROM
 	input              CDD_DIEN,
 	
 	output     [64: 0] CDD_COMM,          // GameBub: replaces EXT_BUS/hps_ext ({toggle, HOST_COMM[7..0]})
+	// GameBub: drive settings from Set Mode (09) for the drive back end, and
+	// the position it reports for Read Sub-Q (87)
+	output reg [11: 0] CDD_BLK_LEN,       // bytes per block: 2048 (MODE1 user data), 2352 (raw/CD-DA), ...
+	output reg         CDD_SPEED2X,       // double speed
+	input      [71: 0] CDD_SUBQ,          // {ctrl, track, index, abs M, S, F, rel M, S, F}, binary
 	
 	input              TRAY_OPEN
 	
@@ -73,7 +78,10 @@ module P3DO_CDROM
 	end
 	assign cd_in = {CD_IN_MSB,HOST_COMM[7],HOST_COMM[6],HOST_COMM[5],HOST_COMM[4],HOST_COMM[3],HOST_COMM[2],HOST_COMM[1],HOST_COMM[0]};
 	
-	bit  [10: 0] CDD_DATA_ADDR;
+	// GameBub: blocks of CDD_BLK_LEN bytes (Set Mode density, 09 00), sent
+	// by the back end as BLK_WORDS words and a checksum word
+	wire [11: 0] BLK_WORDS = 12'((CDD_BLK_LEN + 12'd1) >> 1);
+	bit  [11: 0] CDD_DATA_ADDR;
 	bit          CDD_BLOCK_READY;
 	bit          CDD_IS_LOADED;
 	always @(posedge CLK) begin
@@ -89,17 +97,17 @@ module P3DO_CDROM
 		
 		CDD_BLOCK_READY <= 0;
 		if (CDD_WR) begin
-			CDD_DATA_ADDR <= CDD_DATA_ADDR + 11'd1;
-			if (CDD_DTEN && CDD_DATA_ADDR == 11'h3FF) begin
+			CDD_DATA_ADDR <= CDD_DATA_ADDR + 12'd1;
+			if (CDD_DTEN && CDD_DATA_ADDR == BLK_WORDS - 12'd1) begin
 				CDD_BLOCK_READY <= 1;
 			end
-			if (CDD_DTEN && CDD_DATA_ADDR == 11'h400) begin
+			if (CDD_DTEN && CDD_DATA_ADDR == BLK_WORDS) begin
 `ifdef DEBUG
 				DBG_CRC <= CDD_DATA;
 `endif
 				CDD_DATA_ADDR <= '0;
 			end
-			if (CDD_DIEN && CDD_DATA_ADDR == 11'h3FF) CDD_IS_LOADED <= 1;
+			if (CDD_DIEN && CDD_DATA_ADDR == 12'h3FF) CDD_IS_LOADED <= 1;
 		end
 		
 		if ((CDD_DTEN && !CDD_DTEN_OLD) || (CDD_DIEN && !CDD_DIEN_OLD)) begin
@@ -121,15 +129,17 @@ module P3DO_CDROM
 		.q_b(DISC_TOC_Q)
 	);
 	
-	bit  [10: 0] DISC_DATA_RPOS;
+	// GameBub: room for the longest block (2449 bytes, CD-DA with subcode
+	// and error flags)
+	bit  [11: 0] DISC_DATA_RPOS;
 	bit  [ 7: 0] DISC_DATA_Q;
-	dpram_dif #(10,16,11,8) disc_data 
+	dpram_dif #(11,16,12,8) disc_data 
 	(
 		.clock(CLK),
 		
-		.address_a(CDD_DATA_ADDR[9:0]),
+		.address_a(CDD_DATA_ADDR[10:0]),
 		.data_a(CDD_DATA),
-		.wren_a(CDD_DTEN & ~CDD_DATA_ADDR[10] & CDD_WR),
+		.wren_a(CDD_DTEN & (CDD_DATA_ADDR < BLK_WORDS) & CDD_WR),
 		
 		.address_b(DISC_DATA_RPOS),
 		.q_b(DISC_DATA_Q)
@@ -168,7 +178,7 @@ module P3DO_CDROM
 		bit [ 2: 0] CMD_DATA_CNT,COM_DATA_LEN;
 		bit [ 3: 0] COM_STAT_CNT,COM_STAT_LEN;
 		bit [15: 0] CMD_EXEC_WAIT;
-		bit [10: 0] DATA_CNT;
+		bit [11: 0] DATA_CNT;
 		bit [15: 0] FRAME_CNT,NEXT_FRAME_CNT;
 		bit [ 7: 0] ST_DELAY_CNT;
 		bit         CMD_REC;
@@ -187,6 +197,8 @@ module P3DO_CDROM
 			DT_EN <= 0;
 			CDMDCHG <= 0;
 			ST_DELAY_CNT <= '1;
+			CDD_BLK_LEN <= 12'd2048;
+			CDD_SPEED2X <= 0;
 			{CDD_IS_LOADED_OLD,TRAY_OPEN_OLD} <= '0;
 			
 			CMD_ST <= CMD_IDLE;
@@ -201,6 +213,9 @@ module P3DO_CDROM
 			COMMAND <= '{8{'0}};
 //			STATUS <= CDD_IS_LOADED ? 8'hC1 : 8'h81;
 			ERROR <= ERROR_NO_ERR;
+			CDD_BLK_LEN <= 12'd2048;	// GameBub: a drive reset restores the default mode
+			CDD_SPEED2X <= 0;
+			STATUS[1] <= 0;
 			
 			CMD_DATA_CNT <= '0;
 			COM_STAT_CNT <= '0;
@@ -255,10 +270,10 @@ module P3DO_CDROM
 						COMMAND[0] <= CDDI;
 						case (CDDI)
 							8'h01: COM_DATA_LEN <= 3'd7;
+							// GameBub: Abort (08) and Flush (0B) have 6 parameter
+							// bytes, as the BIOS sends them (SataTo3DO)
 							8'h04,
-							8'h05,
-							8'h08,
-							8'h0B: COM_DATA_LEN <= 3'd0;
+							8'h05: COM_DATA_LEN <= 3'd0;
 							default: COM_DATA_LEN <= 3'd6;
 						endcase
 						case (CDDI)
@@ -272,6 +287,7 @@ module P3DO_CDROM
 							8'h8B: COM_STAT_LEN <= 4'd7;
 							8'h8C: COM_STAT_LEN <= 4'd9;
 							8'h8D: COM_STAT_LEN <= 4'd7;
+							8'h87: COM_STAT_LEN <= 4'd11;
 							default: COM_STAT_LEN <= 4'd1;
 						endcase
 `ifdef DEBUG
@@ -303,7 +319,11 @@ module P3DO_CDROM
 					DISC_DATA_RPOS <= DISC_DATA_RPOS + 1'd1;
 					
 					DATA_CNT <= DATA_CNT + 1'd1;
-					if (DATA_CNT == 11'h7FF) begin
+					if (DATA_CNT == CDD_BLK_LEN - 12'd1) begin
+						// GameBub: the next block starts at byte 0 (2048-byte
+						// blocks wrapped there by themselves)
+						DATA_CNT <= '0;
+						DISC_DATA_RPOS <= '0;
 						DT_EN <= 0;
 						FRAME_CNT <= NEXT_FRAME_CNT;
 						if (NEXT_FRAME_CNT != {COMMAND[5],COMMAND[6]}) begin
@@ -336,12 +356,38 @@ module P3DO_CDROM
 						end
 						
 						8'h09: begin
-							if (COMMAND[1] == 8'h03) begin //Set speed
-//								SPEED <= COMMAND[3];
+							// Set Mode (GameBub, as SataTo3DO's drive emulation): 09 <type> ...
+							//   00 density: <code> <length hi> <length lo> <flags>; flags
+							//      bits 7-6: 10 = 2353 bytes (CD-DA + error flags), 01 = 2448
+							//      (CD-DA + subcode), 11 = 2449 (both); else the length
+							//   03 speed: <bit 7: double speed> <pitch> <pitch>
+							if (COMMAND[1] == 8'h00) begin //Density (block length)
+								case (COMMAND[5][7:6])
+									2'b10: CDD_BLK_LEN <= 12'd2353;
+									2'b01: CDD_BLK_LEN <= 12'd2448;
+									2'b11: CDD_BLK_LEN <= 12'd2449;
+									default: if ({COMMAND[3], COMMAND[4]} != 16'd0 && {COMMAND[3], COMMAND[4]} <= 16'd2352)
+										CDD_BLK_LEN <= 12'({COMMAND[3], COMMAND[4]});
+								endcase
+							end
+							else if (COMMAND[1] == 8'h03) begin //Set speed
+								CDD_SPEED2X <= COMMAND[2][7];
+								STATUS[1] <= COMMAND[2][7];
 							end
 							else if (COMMAND[1] == 8'h05) begin //Set volume
 								
 							end
+							CMD_ST <= CMD_EXEC;
+						end
+						
+						8'h08,
+						8'h0B: begin	//Abort, Flush: the back end stops reading (GameBub)
+							{HOST_COMM[0],HOST_COMM[1],HOST_COMM[2],HOST_COMM[3],HOST_COMM[4],HOST_COMM[5],HOST_COMM[6]} <= {COMMAND[0],8'h00,8'h00,8'h00,8'h00,8'h00,8'h00};
+							CDD_COMM_SEND <= 1;
+							CMD_ST <= CMD_EXEC;
+						end
+						
+						8'h87: begin	//Read Sub-Q (GameBub)
 							CMD_ST <= CMD_EXEC;
 						end
 						
@@ -386,6 +432,7 @@ module P3DO_CDROM
 						default: begin //undefined
 							{HOST_COMM[6],HOST_COMM[5],HOST_COMM[4],HOST_COMM[3],HOST_COMM[2],HOST_COMM[1],HOST_COMM[0]} <= {COMMAND[6],COMMAND[5],COMMAND[4],COMMAND[3],COMMAND[2],COMMAND[1],COMMAND[0]};
 							CDD_COMM_SEND <= 1;
+							CMD_REC <= 0;	// GameBub: forwarded once (was sent again on every CE)
 						end
 					endcase
 					STAT_FIFO_WPOS <= '0;
@@ -443,6 +490,44 @@ module P3DO_CDROM
 								CMD_REC <= 0;
 								CMD_ST <= CMD_IDLE;
 							end
+						end
+						
+						8'h08,
+						8'h0B: begin	//Abort, Flush (GameBub)
+							STAT_FIFO_WPOS <= STAT_FIFO_WPOS + 4'd1;
+							if (STAT_FIFO_WPOS == 4'd0) begin
+								STAT_DATA[0] <= COMMAND[0];
+							end else if (STAT_FIFO_WPOS == 4'd1) begin
+								STAT_DATA[1] <= STATUS;
+								ERROR <= ERROR_NO_ERR;
+								ST_EN <= 1;
+								CMD_REC <= 0;
+								CMD_ST <= CMD_IDLE;
+							end
+						end
+						
+						8'h87: begin	//Read Sub-Q (GameBub): 87 ctrl track index 00 absM absS absF relM relS relF status
+							STAT_FIFO_WPOS <= STAT_FIFO_WPOS + 4'd1;
+							case (STAT_FIFO_WPOS)
+								4'd0:  STAT_DATA[0]  <= 8'h87;
+								4'd1:  STAT_DATA[1]  <= CDD_SUBQ[71:64];
+								4'd2:  STAT_DATA[2]  <= CDD_SUBQ[63:56];
+								4'd3:  STAT_DATA[3]  <= CDD_SUBQ[55:48];
+								4'd4:  STAT_DATA[4]  <= 8'h00;
+								4'd5:  STAT_DATA[5]  <= CDD_SUBQ[47:40];
+								4'd6:  STAT_DATA[6]  <= CDD_SUBQ[39:32];
+								4'd7:  STAT_DATA[7]  <= CDD_SUBQ[31:24];
+								4'd8:  STAT_DATA[8]  <= CDD_SUBQ[23:16];
+								4'd9:  STAT_DATA[9]  <= CDD_SUBQ[15: 8];
+								4'd10: STAT_DATA[10] <= CDD_SUBQ[ 7: 0];
+								default: begin
+									STAT_DATA[11] <= STATUS;
+									ERROR <= ERROR_NO_ERR;
+									ST_EN <= 1;
+									CMD_REC <= 0;
+									CMD_ST <= CMD_IDLE;
+								end
+							endcase
 						end
 						
 						8'h80: begin	//Data path check

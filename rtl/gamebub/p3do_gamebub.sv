@@ -342,6 +342,9 @@ module p3do_gamebub #(
 	wire [64:0] cdd_comm;
 	wire [15:0] cdd_data;
 	wire        cdd_wr, cdd_dten, cdd_dien;
+	wire [11:0] cdd_blk_len;
+	wire        cdd_speed2x;
+	wire [71:0] cdd_subq;
 
 	P3DO_CDROM cdrom (
 		.RST_N(~reset_3do),
@@ -363,6 +366,9 @@ module p3do_gamebub #(
 		.CDD_DTEN(cdd_dten),
 		.CDD_DIEN(cdd_dien),
 		.CDD_COMM(cdd_comm),
+		.CDD_BLK_LEN(cdd_blk_len),
+		.CDD_SPEED2X(cdd_speed2x),
+		.CDD_SUBQ(cdd_subq),
 		.TRAY_OPEN(1'b0)
 	);
 
@@ -406,6 +412,9 @@ module p3do_gamebub #(
 		.disc_msf       (disc_msf),
 		.disc_info_valid(disc_info_valid),
 		.cd_comm        (cdd_comm),
+		.blk_len        (cdd_blk_len),
+		.speed2x        (cdd_speed2x),
+		.subq           (cdd_subq),
 		.CDD_DATA       (cdd_data),
 		.CDD_WR         (cdd_wr),
 		.CDD_DTEN       (cdd_dten),

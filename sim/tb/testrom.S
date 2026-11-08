@@ -10,7 +10,17 @@
 @   5. ROM data reads (literal table in ROM)
 @   6. NVRAM byte writes/reads (0x03140000, one byte per word, low byte)
 @   7. CD-ROM through CLIO XBUS -> OSA -> 3DO_CDROM -> cdd_emu -> SDRAM:
-@      "read capacity" (disc-info block) and a 2-sector data read (NEXT)
+@      "read capacity" (disc-info block) and a 2-sector data read (NEXT),
+@      then its status
+@  14. CD-DA and raw sectors (streamed disc with an audio track, see
+@      tb_top; skipped, and counted as one check, on a disc of one data
+@      track): disc info and the TOC entries of both tracks; Set Mode
+@      block length 2352, two audio sectors (the controller's buffer must
+@      start each block at its byte 0), Read Sub-Q at the audio track; a raw
+@      data sector (sync, header, user data); Read Sub-Q at the data track;
+@      double speed (status bit 1) and 2448-byte blocks (CD-DA and a zero
+@      subcode); 2048 bytes and single speed again, a data sector; Abort and
+@      Flush. Every status is compared byte for byte.
 @   9. SPORT copies (the CPU's read transfer of a row, then its write
 @      transfer into another) and flash writes with write masks (the data the
 @      CPU writes to SPORT space is the mask: 1 bits are written, 0 bits keep
@@ -66,6 +76,15 @@
 	.equ SRST_STUB,  0x00001200	@ DRAM: code that triggers the software reset
 	.equ SPORT_CODE, 0x00010000	@ DRAM: test 9's code, copied there
 	.equ SPORT_REF,  0x00012000	@ DRAM: test 9's expected destination row
+	.equ CD_BUF,     0x00016000	@ DRAM: CD status bytes (test 14)
+	.equ CD_CODE,    0x00018000	@ DRAM: test 14's block check code, copied there
+	.equ CD_DATA,    0x0001A000	@ DRAM: the CD block being checked (test 14)
+
+@ call the block check code in DRAM (cdblk_code)
+	.macro CDBLK
+	mov	lr, pc
+	ldr	pc, =CD_CODE
+	.endm
 
 _start:
 	@ At reset the ROM is also visible at 0; jump to its real address (the
@@ -191,7 +210,8 @@ entry:
 	mov	r1, #0
 	str	r1, [r0]
 	@ Read capacity (0x85): status 85 00 mm ss ff stat; lead-out of a
-	@ 4-sector disc is LBA 154 = 00:02:04
+	@ 4-sector disc is LBA 154 = 00:02:04, with the 6 sectors of the
+	@ streamed disc's audio track 160 = 00:02:10 (test 14 tells them apart)
 	mov	r1, #0x85
 	bl	cd_cmd
 	mov	r1, #0
@@ -214,6 +234,8 @@ entry:
 	mov	r2, r9
 	ldr	r5, =0x00000204
 	cmp	r9, r5
+	ldrne	r5, =0x0000020A
+	cmpne	r9, r5
 	bne	fail
 	add	r11, r11, #1
 
@@ -253,6 +275,134 @@ entry:
 	add	r8, r8, #1
 	cmp	r8, #3
 	bne	9b
+	ldr	r4, =ROM_BASE + st_read		@ the read's status: 10 C1
+	mov	r3, #2
+	bl	cd_check_stat
+
+	@ ---- 14. CD-DA and raw sectors (streamed disc with an audio track) ----
+	@ Disc (tb_top +stream): track 1 data, abs LBA 150-153; track 2 audio,
+	@ 154-159; lead-out 160 = 00:02:10. Byte i of the audio sector at abs
+	@ LBA L is (3i + L + (i >> 8)) & 0xFF.
+	mov	r12, #14
+	ldr	r3, =CD_CODE
+	ldr	r4, =ROM_BASE + cdblk_code
+	ldr	r5, =ROM_BASE + cdblk_code_end
+25:	ldr	r6, [r4], #4
+	str	r6, [r3], #4
+	cmp	r4, r5
+	bcc	25b
+	ldr	r4, =ROM_BASE + cmd_info
+	bl	cd_send7
+	ldr	r4, =CD_BUF
+	mov	r3, #8
+	bl	cd_get_stat
+	ldr	r4, =CD_BUF
+	ldrb	r0, [r4, #3]		@ last track
+	cmp	r0, #1
+	bne	14f
+	ldr	r5, =ROM_BASE + st_info_iso	@ one data track (preloaded ISO): no CD-DA
+	mov	r3, #8
+	bl	cd_cmp_buf
+	b	15f
+14:	ldr	r5, =ROM_BASE + st_info
+	mov	r3, #8
+	bl	cd_cmp_buf
+	ldr	r4, =ROM_BASE + cmd_toc1	@ TOC: track 1 data at 00:02:00
+	bl	cd_send7
+	ldr	r4, =ROM_BASE + st_toc1
+	mov	r3, #10
+	bl	cd_check_stat
+	ldr	r4, =ROM_BASE + cmd_toc2	@ track 2 audio at 00:02:04
+	bl	cd_send7
+	ldr	r4, =ROM_BASE + st_toc2
+	mov	r3, #10
+	bl	cd_check_stat
+	ldr	r4, =ROM_BASE + cmd_mode2352
+	bl	cd_send7
+	ldr	r4, =ROM_BASE + st_mode
+	mov	r3, #2
+	bl	cd_check_stat
+	ldr	r4, =ROM_BASE + cmd_read_a	@ MSF 00:02:05 (abs 155), 2 blocks
+	bl	cd_send7
+	mov	r9, #0
+	ldr	r3, =2352
+	mov	r8, #155
+	CDBLK
+	mov	r8, #156
+	CDBLK
+	ldr	r4, =ROM_BASE + st_read
+	mov	r3, #2
+	bl	cd_check_stat
+	ldr	r4, =ROM_BASE + cmd_subq
+	bl	cd_send7
+	ldr	r4, =ROM_BASE + st_subq_a	@ track 2 index 1, 00:02:06, 00:00:02
+	mov	r3, #12
+	bl	cd_check_stat
+	ldr	r4, =ROM_BASE + cmd_read_d	@ LBA 151, 1 block: the raw data sector
+	bl	cd_send7
+	mov	r9, #1
+	ldr	r3, =2352
+	mov	r8, #151
+	CDBLK
+	ldr	r4, =ROM_BASE + st_read
+	mov	r3, #2
+	bl	cd_check_stat
+	ldr	r4, =ROM_BASE + cmd_subq
+	bl	cd_send7
+	ldr	r4, =ROM_BASE + st_subq_d	@ track 1 index 1, 00:02:01, 00:00:01
+	mov	r3, #12
+	bl	cd_check_stat
+	ldr	r4, =ROM_BASE + cmd_speed2x
+	bl	cd_send7
+	ldr	r4, =ROM_BASE + st_mode2x	@ status bit 1: double speed
+	mov	r3, #2
+	bl	cd_check_stat
+	ldr	r4, =ROM_BASE + cmd_mode2448
+	bl	cd_send7
+	ldr	r4, =ROM_BASE + st_mode2x
+	mov	r3, #2
+	bl	cd_check_stat
+	ldr	r4, =ROM_BASE + cmd_read_a2	@ MSF 00:02:07 (abs 157), 2 blocks
+	bl	cd_send7
+	mov	r9, #0
+	ldr	r3, =2448
+	mov	r8, #157
+	CDBLK
+	mov	r8, #158
+	CDBLK
+	ldr	r4, =ROM_BASE + st_read2x
+	mov	r3, #2
+	bl	cd_check_stat
+	ldr	r4, =ROM_BASE + cmd_mode2048
+	bl	cd_send7
+	ldr	r4, =ROM_BASE + st_mode2x
+	mov	r3, #2
+	bl	cd_check_stat
+	ldr	r4, =ROM_BASE + cmd_speed1x
+	bl	cd_send7
+	ldr	r4, =ROM_BASE + st_mode
+	mov	r3, #2
+	bl	cd_check_stat
+	ldr	r4, =ROM_BASE + cmd_read_d2	@ LBA 152, 1 block of 2048 bytes
+	bl	cd_send7
+	mov	r9, #2
+	mov	r3, #2048
+	mov	r8, #152
+	CDBLK
+	ldr	r4, =ROM_BASE + st_read
+	mov	r3, #2
+	bl	cd_check_stat
+	ldr	r4, =ROM_BASE + cmd_abort
+	bl	cd_send7
+	ldr	r4, =ROM_BASE + st_abort
+	mov	r3, #2
+	bl	cd_check_stat
+	ldr	r4, =ROM_BASE + cmd_flush
+	bl	cd_send7
+	ldr	r4, =ROM_BASE + st_flush
+	mov	r3, #2
+	bl	cd_check_stat
+15:
 
 	@ ---- 9. SPORT copies and flash writes with write masks ----
 	@ (before test 8, which ends with the reset; from DRAM: fetches from
@@ -690,6 +840,57 @@ cd_stat:
 	and	r6, r6, #0xFF
 	mov	pc, lr
 
+@ the 7 command bytes at r4 -> XBUS command register (uses r1, r3, r10)
+cd_send7:
+	mov	r3, #7
+	ldr	r10, =0x03400580
+16:	ldrb	r1, [r4], #1
+	str	r1, [r10]
+	subs	r3, r3, #1
+	bne	16b
+	mov	pc, lr
+
+@ wait for status, then its r3 bytes -> [r4] (uses r0, r6, r10)
+cd_get_stat:
+	ldr	r10, =0x03400540
+17:	ldr	r6, [r10]
+	tst	r6, #0x10
+	beq	17b
+	ldr	r10, =0x03400580
+	mov	r0, #0
+18:	ldr	r6, [r10]
+	strb	r6, [r4, r0]
+	add	r0, r0, #1
+	cmp	r0, r3
+	bne	18b
+	mov	pc, lr
+
+@ compare r3 bytes at r4 with the expected ones at r5; r11++ (one check).
+@ A mismatch fails with r2 = expected << 16 | got << 8 | byte index.
+cd_cmp_buf:
+	mov	r0, #0
+19:	ldrb	r6, [r4, r0]
+	ldrb	r1, [r5, r0]
+	cmp	r1, r6
+	orrne	r2, r0, r6, lsl #8
+	orrne	r2, r2, r1, lsl #16
+	bne	fail
+	add	r0, r0, #1
+	cmp	r0, r3
+	bne	19b
+	add	r11, r11, #1
+	mov	pc, lr
+
+@ wait for status and compare its r3 bytes with the ones at r4; r11++
+@ (uses r0, r1, r5, r6, r7, r10)
+cd_check_stat:
+	mov	r7, lr
+	mov	r5, r4
+	ldr	r4, =CD_BUF
+	bl	cd_get_stat
+	bl	cd_cmp_buf
+	mov	pc, r7
+
 @ store r8 as 4 NVRAM bytes (big-endian) at r0, r0 += 16
 put_word:
 	mov	r9, r8, lsr #24
@@ -729,6 +930,104 @@ vram_check:
 romdata:
 	.word	0xCAFEF00D
 	.word	0x0BADBEEF
+
+@ CD commands (7 bytes) and the status they must give (test 14; C1: door
+@ closed, disc in, ready; C3: and double speed)
+cmd_info:	.byte	0x8B, 0, 0, 0, 0, 0, 0
+cmd_toc1:	.byte	0x8C, 0, 1, 0, 0, 0, 0
+cmd_toc2:	.byte	0x8C, 0, 2, 0, 0, 0, 0
+cmd_mode2352:	.byte	0x09, 0x00, 0x00, 0x09, 0x30, 0x00, 0	@ density: 2352 bytes
+cmd_mode2448:	.byte	0x09, 0x00, 0x00, 0x09, 0x30, 0x40, 0	@ flags 0x40: 2448 (subcode)
+cmd_mode2048:	.byte	0x09, 0x00, 0x00, 0x08, 0x00, 0x00, 0
+cmd_speed2x:	.byte	0x09, 0x03, 0x80, 0, 0, 0, 0
+cmd_speed1x:	.byte	0x09, 0x03, 0x00, 0, 0, 0, 0
+cmd_read_a:	.byte	0x10, 0, 2, 5, 0, 0, 2		@ MSF 00:02:05, 2 blocks
+cmd_read_a2:	.byte	0x10, 0, 2, 7, 0, 0, 2		@ MSF 00:02:07, 2 blocks
+cmd_read_d:	.byte	0x10, 0, 0, 151, 1, 0, 1	@ LBA 151, 1 block
+cmd_read_d2:	.byte	0x10, 0, 0, 152, 1, 0, 1	@ LBA 152, 1 block
+cmd_subq:	.byte	0x87, 0, 0, 0, 0, 0, 0
+cmd_abort:	.byte	0x08, 0, 0, 0, 0, 0, 0
+cmd_flush:	.byte	0x0B, 0, 0, 0, 0, 0, 0
+st_info:	.byte	0x8B, 0x00, 1, 2, 0, 2, 10, 0xC1	@ DA/CD-ROM, tracks 1-2, lead-out 00:02:10
+st_info_iso:	.byte	0x8B, 0x00, 1, 1, 0, 2, 4, 0xC1		@ one track, lead-out 00:02:04
+st_toc1:	.byte	0x8C, 0, 0x04, 1, 0, 0, 2, 0, 0, 0xC1
+st_toc2:	.byte	0x8C, 0, 0x00, 2, 0, 0, 2, 4, 0, 0xC1
+st_mode:	.byte	0x09, 0xC1
+st_mode2x:	.byte	0x09, 0xC3
+st_read:	.byte	0x10, 0xC1
+st_read2x:	.byte	0x10, 0xC3
+st_abort:	.byte	0x08, 0xC1
+st_flush:	.byte	0x0B, 0xC1
+@ Read Sub-Q: ctrl, track, index, 0, abs M S F, rel M S F (binary)
+st_subq_a:	.byte	0x87, 0x00, 2, 1, 0, 0, 2, 6, 0, 0, 2, 0xC1
+st_subq_d:	.byte	0x87, 0x04, 1, 1, 0, 0, 2, 1, 0, 0, 1, 0xC1
+@ raw MODE1 sector header at 00:02:01: sync, BCD MSF, mode
+raw_hdr151:	.byte	0x00, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x00, 0x00, 0x02, 0x01, 0x01
+	.align 4
+
+@ read an r3-byte block from the CD data port and check it; r8 = abs LBA,
+@ r9 = 0: CD-DA ((3i + L + (i >> 8)) & 0xFF), 1: the raw data sector
+@ (sync, header, user data (7(i-16) + L - 150) & 0xFF, EDC/ECC as zeros
+@ in the testbench's model), 2: user data (7i + L - 150) & 0xFF; zeros
+@ after byte 2351 of the sector. r11++. A mismatch fails with
+@ r2 = L << 16 | i. (uses r0, r1, r5, r6, r7, r10)
+@ Copied to CD_CODE and run there (position independent, its own literal
+@ pool; called with CDBLK): from the ROM, the CPU would take longer than a
+@ sector time for a block, and the drive's CD-DA rate would not be seen.
+	.align 4
+cdblk_code:
+	ldr	r10, =0x03400540
+20:	ldr	r6, [r10]
+	tst	r6, #0x20
+	beq	20b
+	ldr	r10, =0x034005C0
+	ldr	r1, =CD_DATA		@ the block into DRAM first, then the check:
+	mov	r0, r3			@ the CPU must read a block in less than a
+26:	ldr	r6, [r10]		@ sector time at double speed
+	strb	r6, [r1], #1
+	subs	r0, r0, #1
+	bne	26b
+	ldr	r10, =CD_DATA
+	sub	r7, r8, #150		@ sector of the data track
+	mov	r0, #0
+21:	ldrb	r6, [r10, r0]
+	cmp	r9, #2
+	beq	24f
+	cmp	r0, #2352
+	movhs	r5, #0
+	bhs	23f
+	cmp	r9, #0
+	bne	22f
+	add	r5, r0, r0, lsl #1	@ CD-DA: 3i + L + (i >> 8)
+	add	r5, r5, r8
+	add	r5, r5, r0, lsr #8
+	b	23f
+22:	cmp	r0, #16			@ raw data sector
+	ldrlo	r1, =ROM_BASE + raw_hdr151
+	ldrlob	r5, [r1, r0]
+	blo	23f
+	ldr	r1, =2064
+	cmp	r0, r1
+	movhs	r5, #0
+	bhs	23f
+	sub	r1, r0, #16
+	rsb	r5, r1, r1, lsl #3	@ 7 (i - 16)
+	add	r5, r5, r7
+	b	23f
+24:	rsb	r5, r0, r0, lsl #3	@ user data: 7i + sector
+	add	r5, r5, r7
+23:	and	r5, r5, #0xFF
+	cmp	r5, r6
+	orrne	r2, r0, r8, lsl #16
+	ldrne	pc, =ROM_BASE + fail
+	add	r0, r0, #1
+	cmp	r0, r3
+	bne	21b
+	add	r11, r11, #1
+	mov	pc, lr
+
+	.ltorg
+cdblk_code_end:
 
 @ ---- test 9, copied to SPORT_CODE and run there (position independent,
 @ its own literal pool). r11 = checks; a mismatch goes to fail with its

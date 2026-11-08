@@ -199,9 +199,17 @@ module tb_top;
 		return {8'h00, bcd(lba / 75 / 60), bcd((lba / 75) % 60), bcd(lba % 75)};
 	endfunction
 
+	// The streamed disc: track 1 data (the ISO, abs LBA 150-153), track 2
+	// CD-DA (AUDIO_SECTORS sectors from 154; byte i of the sector at abs LBA
+	// L is (3i + L + (i >> 8)) & 0xFF, as test 14 of the test ROM expects).
+	localparam int AUDIO_SECTORS = 6;
+	function automatic bit is_audio(input int lba);
+		return lba >= 150 + iso_len / 2048 && lba < 150 + iso_len / 2048 + AUDIO_SECTORS;
+	endfunction
 	// raw sector at absolute LBA: sync, header (BCD MSF, mode 1), user data
 	function automatic [7:0] raw_byte(input int lba, input int i);
 		int l;
+		if (is_audio(lba)) return 8'((3 * i + lba + (i >> 8)) & 8'hFF);
 		l = lba - 150;
 		if (l < 0 || l * 2048 >= iso_len) return 8'h00;
 		if (i == 0 || i == 11) return 8'h00;
@@ -215,19 +223,99 @@ module tb_top;
 	endfunction
 
 	task automatic send_toc();
-		bit [31:0] r, toc [8];
+		bit [31:0] r, toc [12];
 		bit e;
-		int sectors;
+		int sectors, a0;
 		sectors = iso_len / 2048;
-		toc[0] = {16'h0, bcd(1), 8'd1};
-		toc[1] = 150 + sectors;
-		toc[2] = msf_bcd(150 + sectors);
+		a0 = 150 + sectors;                  // track 2 (audio)
+		toc[0] = {16'h0, bcd(2), 8'd2};
+		toc[1] = a0 + AUDIO_SECTORS;
+		toc[2] = msf_bcd(a0 + AUDIO_SECTORS);
 		toc[3] = 0;
-		toc[4] = 150; toc[5] = 150 + sectors - 1; toc[6] = 150; toc[7] = msf_bcd(150);
+		toc[4] = 150; toc[5] = a0 - 1; toc[6] = 150; toc[7] = msf_bcd(150);
+		toc[8] = a0; toc[9] = a0 + AUDIO_SECTORS - 1; toc[10] = a0; toc[11] = msf_bcd(a0) | 32'h8000_0000;
 		host_cmd(16'h0300, 0, 0, 0, r, e);
-		for (int i = 0; i < 8; i++) host_wr(32'h1000_0000 + 4 * i, toc[i]);
-		host_cmd(16'h0301, 0, 32, 0, r, e);
+		for (int i = 0; i < 12; i++) host_wr(32'h1000_0000 + 4 * i, toc[i]);
+		host_cmd(16'h0301, 0, 48, 0, r, e);
 	endtask
+
+	// Every command the test ROM writes to the CD controller and the status
+	// bytes it reads back, as seen on the controller's port.
+	bit [7:0] ctl_cmd [8];
+	int       ctl_cmd_n = 0, ctl_cmd_len = 7;
+	bit [7:0] ctl_st [16];
+	int       ctl_st_n = 0;
+	reg       ctl_sten_d = 0;
+	always @(posedge clk_sys) begin
+		ctl_sten_d <= dut.cdrom.ST_EN;
+		if (dut.cdrom.IO_ST == dut.cdrom.IO_CMD_WRITE) begin
+			if (ctl_cmd_n == 0) ctl_cmd_len = (dut.cdrom.CDDI == 8'h04 || dut.cdrom.CDDI == 8'h05) ? 1 : 7;
+			ctl_cmd[ctl_cmd_n] = dut.cdrom.CDDI;
+			ctl_cmd_n++;
+			if (ctl_cmd_n == ctl_cmd_len) begin
+				string t;
+				t = "";
+				for (int i = 0; i < ctl_cmd_len; i++) t = {t, $sformatf(" %02h", ctl_cmd[i])};
+				$display("[%0t] CD ctl cmd%s", $realtime, t);
+				ctl_cmd_n = 0;
+			end
+		end
+		if (dut.cdrom.IO_ST == dut.cdrom.IO_CMD_READ && ctl_st_n < 16) begin
+			ctl_st[ctl_st_n] = dut.cdrom.STAT_DATA[dut.cdrom.STAT_FIFO_RPOS];
+			ctl_st_n++;
+		end
+		if (!dut.cdrom.ST_EN && ctl_sten_d) begin
+			string t;
+			t = "";
+			for (int i = 0; i < ctl_st_n; i++) t = {t, $sformatf(" %02h", ctl_st[i])};
+			$display("[%0t] CD ctl status%s", $realtime, t);
+			ctl_st_n = 0;
+		end
+	end
+
+	// CD-DA pacing: audio sectors must reach the controller at the drive's
+	// rate, 75 per second at single speed and 150 at double speed, timed
+	// from one to the next (test 14 reads two pairs: 1x, then 2x). The
+	// first sector after a READ comes one sector time after it.
+	// The sector after a NEXT that came within one sector time of the
+	// previous one must come exactly one sector time after it; after a later
+	// NEXT (the CPU took longer to read the block), as soon as the firmware
+	// has answered.
+	realtime audio_last = -1s, read_cmd_t = -1s, next_cmd_t = -1s;
+	int      audio_secs = 0, audio_gaps_1x = 0, audio_gaps_2x = 0;
+	reg      dten_d = 0;
+	always @(posedge clk_sys) begin
+		dten_d <= dut.cdd_dten;
+		if (dut.cdd.cmd_new && dut.cdd.comm[0] == 8'h10) begin read_cmd_t = $realtime; audio_last = -1s; end
+		if (dut.cdd.cmd_new && dut.cdd.comm[0] == 8'h20) next_cmd_t = $realtime;
+		if (dut.cdd_dten && !dten_d && dut.cdd.disc_stream && is_audio(int'(dut.cdd.q_lba))) begin
+			realtime g, per;
+			per = dut.cdrom.CDD_SPEED2X ? 1s / 150 : 1s / 75;
+			audio_secs++;
+			if (audio_last >= 0) begin
+				realtime nx;
+				g = $realtime - audio_last;
+				nx = next_cmd_t - audio_last;
+				$display("[%0t] CD-DA sector abs LBA %0d (%0d bytes): %0.4f ms after the previous one (%0dx), NEXT after %0.4f ms", $realtime,
+				         dut.cdd.q_lba, dut.cdrom.CDD_BLK_LEN, g / 1ms, dut.cdrom.CDD_SPEED2X ? 2 : 1, nx / 1ms);
+				if (nx + disc_latency_us * 1us + 100us < per) begin
+					// one sector time to the clock (50 MHz: the fraction is spread over three sectors)
+					if (g < per - 15ns || g > per + 15ns) fail($sformatf("CD-DA sector %0.4f ms after the previous one, expected %0.4f", g / 1ms, per / 1ms));
+					if (dut.cdrom.CDD_SPEED2X) audio_gaps_2x++; else audio_gaps_1x++;
+				end else begin
+					if (g < per - 30ns) fail($sformatf("CD-DA sector %0.4f ms after the previous one, sooner than %0.4f", g / 1ms, per / 1ms));
+					if (g > nx + disc_latency_us * 1us + 1ms) fail($sformatf("CD-DA sector %0.4f ms after its NEXT", (g - nx) / 1ms));
+					$display("tb_top: the CPU read the block in more than a sector time: exact pacing not checked for this sector");
+				end
+			end else begin
+				g = $realtime - read_cmd_t;
+				$display("[%0t] CD-DA sector abs LBA %0d (%0d bytes): %0.4f ms after the READ", $realtime,
+				         dut.cdd.q_lba, dut.cdrom.CDD_BLK_LEN, g / 1ms);
+				if (g < per - 30ns) fail($sformatf("first CD-DA sector %0.4f ms after the READ, expected at least %0.4f", g / 1ms, per / 1ms));
+			end
+			audio_last = $realtime;
+		end
+	end
 
 	initial forever begin
 		bit [31:0] w [4];
@@ -449,7 +537,8 @@ module tb_top;
 		// Poll the verdict in NVRAM bytes 0x100..0x10F
 		done = 0;
 		nvram_changed = 0;
-		for (int t = 0; t < 1200 && !done; t++) begin
+		// (about 250 ms: test 14 reads CD-DA sectors in real time)
+		for (int t = 0; t < 2500 && !done; t++) begin
 			#100us;
 			read_nvram(16'h110);
 			if (nvram_size != 0) nvram_changed = 1;
@@ -469,7 +558,10 @@ module tb_top;
 			// tests 1-8, test 9 (SPORT write masks): 3 regions x (13 checks of a
 			// row), test 10 (CLIO timers and interrupt summary): 10, test 11
 			// (matrix engine): 3
-			if (checks != 64*4 + 1 + 64*5 + 2 + 16 + 1 + 2 + 4 + 3 * 13 * 512 + 10 + 3 + 64 + 16) fail($sformatf("unexpected number of checks %0d", checks));
+			// test 7's final status: 1; test 14: 22 checks with the streamed
+			// disc (audio track), 1 with a preloaded ISO (disc info only)
+			if (checks != 64*4 + 1 + 64*5 + 2 + 16 + 1 + 2 + 4 + 1 + (stream_mode ? 22 : 1) + 3 * 13 * 512 + 10 + 3 + 64 + 16)
+				fail($sformatf("unexpected number of checks %0d", checks));
 			for (int i = 0; i < 16; i++)
 				if (nvram[8'h80 + i] != 8'(8'hA5 + 8'h13 * i)) fail($sformatf("NVRAM byte %02h = %02h", 8'h80 + i, nvram[8'h80 + i]));
 		end
@@ -485,6 +577,8 @@ module tb_top;
 		if (stream_mode) begin
 			$display("tb_top: %0d disc sectors served by the firmware model", sectors_served);
 			if (sectors_served < 3) fail("streaming mode: the core did not request the sectors");
+			$display("tb_top: %0d CD-DA sectors, %0d gaps checked at 1x, %0d at 2x", audio_secs, audio_gaps_1x, audio_gaps_2x);
+			if (audio_secs != 4 || audio_gaps_1x != 1 || audio_gaps_2x != 1) fail("CD-DA: expected 4 audio sectors in two pairs (1x, 2x)");
 		end
 		// test ROM test 4 writes VRAM 0x200000 (block 0: in the SRAM unless it is off)
 		if (sram_mode != 2 && sram.writes == 0) fail("no VRAM write reached the SRAM");

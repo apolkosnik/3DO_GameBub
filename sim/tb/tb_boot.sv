@@ -34,6 +34,7 @@
 //           +vram_watch=<row>, +sport_ms=<n>, +rt_log_ms=<n>, +pad_ctl=<file> (buttons
 //           pressed while it runs, see pad_btn), +frame_log, +frames_from=<n> +frames_to=<m>
 //           (per-frame brightness log, every frame saved in a window; see save_frame)
+//           <out>/audio.raw: the audio output (s16le stereo, 44.1 kHz)
 //
 // Copyright (c) 2026 Adam Polkosnik
 // SPDX-License-Identifier: GPL-3.0-or-later
@@ -64,6 +65,26 @@ module tb_boot;
 	wire [5:0]  vr, vg, vb;
 	wire        vde, vvbl, vhbl;
 	wire [15:0] al, ar;
+
+	// <out>/audio.raw: the core's audio output, sampled at 44.1 kHz (16-bit
+	// little-endian stereo, left first), for listening to or measuring it
+	// (CD-DA the BIOS plays from the disc, for instance)
+	int      au_fd = 0;
+	longint  au_n = 0, au_nz = 0;
+	int      au_peak = 0;
+	initial begin
+		au_fd = $fopen({outdir, "/audio.raw"}, "wb");
+		forever begin
+			#(1s / 44100.0);
+			if (au_fd != 0) $fwrite(au_fd, "%c%c%c%c", al[7:0], al[15:8], ar[7:0], ar[15:8]);
+			au_n++;
+			if (al != 0 || ar != 0) au_nz++;
+			if ($signed(al) > au_peak) au_peak = $signed(al);
+			if (-$signed(al) > au_peak) au_peak = -$signed(al);
+			if ($signed(ar) > au_peak) au_peak = $signed(ar);
+			if (-$signed(ar) > au_peak) au_peak = -$signed(ar);
+		end
+	end
 
 	wire        s_clk, s_cke, s_cs, s_ras, s_cas, s_we, s_oe;
 	wire [ 1:0] s_dqm, s_ba;
@@ -311,6 +332,51 @@ module tb_boot;
 			         dut.cdd.comm[0], dut.cdd.comm[1], dut.cdd.comm[2], dut.cdd.comm[3],
 			         dut.cdd.comm[4], dut.cdd.comm[5], dut.cdd.comm[6], dut.cdd.comm[7]);
 	end
+	// Every command the BIOS writes to the CD controller (also those the
+	// controller answers itself: 09, 8x), and the status bytes it reads back,
+	// as seen on the controller's port (P3DO_CDROM IO_CMD_WRITE / IO_CMD_READ).
+	bit [7:0] ctl_cmd [8];
+	int       ctl_cmd_n = 0, ctl_cmd_len = 7;
+	bit [7:0] ctl_st [16];
+	int       ctl_st_n = 0;
+	int       ctl_cmds = 0;
+	reg       ctl_sten_d = 0;
+	always @(posedge clk_sys) begin
+		ctl_sten_d <= dut.cdrom.ST_EN;
+		if (dut.cdrom.IO_ST == dut.cdrom.IO_CMD_WRITE) begin
+			if (ctl_cmd_n == 0)
+				case (dut.cdrom.CDDI)
+					8'h01:                      ctl_cmd_len = 8;
+					8'h04, 8'h05:               ctl_cmd_len = 1;
+					default:                    ctl_cmd_len = 7;
+				endcase
+			ctl_cmd[ctl_cmd_n] = dut.cdrom.CDDI;
+			ctl_cmd_n++;
+			if (ctl_cmd_n == ctl_cmd_len) begin
+				string s;
+				s = "";
+				for (int i = 0; i < ctl_cmd_len; i++) s = {s, $sformatf(" %02h", ctl_cmd[i])};
+				ctl_cmds++;
+				if (ctl_cmd[0] != 8'h20 || ctl_cmds < 200)
+					$display("[%0t] CD ctl cmd%s", $realtime, s);
+				ctl_cmd_n = 0;
+			end
+		end
+		if (dut.cdrom.IO_ST == dut.cdrom.IO_CMD_READ && ctl_st_n < 16) begin
+			// IO_CMD_READ loads DOUT from the status FIFO at the end of this cycle
+			ctl_st[ctl_st_n] = dut.cdrom.STAT_DATA[dut.cdrom.STAT_FIFO_RPOS];
+			ctl_st_n++;
+		end
+		if (!dut.cdrom.ST_EN && ctl_sten_d) begin
+			string s;
+			s = "";
+			for (int i = 0; i < ctl_st_n; i++) s = {s, $sformatf(" %02h", ctl_st[i])};
+			if (ctl_st_n && (ctl_st[0] != 8'h20 || ctl_cmds < 200))
+				$display("[%0t] CD ctl status%s", $realtime, s);
+			ctl_st_n = 0;
+		end
+	end
+
 	reg cdd_dten_d = 0, cdd_dien_d = 0;
 	int sectors_sent = 0;
 	always @(posedge clk_sys) begin
@@ -326,21 +392,34 @@ module tb_boot;
 	end
 	// ---------------- CD data check (streamed and preloaded discs) ----------
 	// Every sector the drive back end sends to the CD controller is compared
-	// with the image's user data (raw .bin: bytes 16..2063 of each 2352-byte
-	// sector; ISO: the 2048-byte sector) at the LBA the BIOS asked for. The
-	// expected LBA is computed here from the READ commands (one sector per
-	// READ or NEXT), not taken from the core.
+	// with the image at the LBA the BIOS asked for. A block of the length the
+	// BIOS set (Set Mode, the controller's CDD_BLK_LEN) is, for a raw .bin,
+	// 2048: bytes 16..2063 of the 2352-byte sector; 2352: the whole sector;
+	// shorter: the end of the sector (2340: bytes 12..); longer: the sector
+	// and zeros. For an ISO: its 2048 bytes, zeros after them. The expected
+	// LBA is computed here from the READ commands (one sector per READ or
+	// NEXT), not taken from the core. The bytes the CPU then reads from the
+	// controller's data port are checked against the same block.
 	int       chk_fd = 0;
 	int       chk_sec_bytes = 2352; // sector size in the image file
-	int       chk_off = 16;         // offset of the user data in a sector
 	int       chk_sectors = 0;      // sectors in the image
 	int       cd_exp_lba = 150;     // absolute LBA of the next sector to arrive
 	int       cd_ref_lba = 0;       // LBA of the sector being received
 	int       cd_widx = 0;
+	int       cd_blk_len = 2048;    // block length of the sector being received
 	int       cd_sec_errs = 0;
 	int       cd_good = 0, cd_bad = 0;
-	bit [7:0] cd_ref [2352];
+	int       cd_len_count [int];   // sectors received per block length
+	bit [7:0] cd_raw [2352];
+	bit [7:0] cd_ref [2449];        // the expected block
 	bit [15:0] cd_ref_sum;
+	int       cd_rd_idx = 0, cd_rd_errs = 0, cd_rd_bytes = 0;
+	reg       cd_dt_en_d = 0;
+	// audio sector timing (abs LBAs in audio tracks per the TOC sent)
+	realtime  cd_last_audio = -1s;
+	realtime  cd_audio_min = 1s, cd_audio_max = 0, cd_audio_sum = 0;
+	int       cd_audio_gaps = 0, cd_audio_secs = 0;
+	int       trk_audio_from = 1 << 30;   // first audio LBA (all audio after it)
 	always @(posedge clk_sys) begin
 		if (chk_fd != 0) begin
 			if (dut.cdd.cmd_new && dut.cdd.comm[0] == 8'h10) begin
@@ -348,32 +427,55 @@ module tb_boot;
 				l = (dut.cdd.comm[4] != 0) ? int'({dut.cdd.comm[1], dut.cdd.comm[2], dut.cdd.comm[3]})
 				                           : int'(dut.cdd.comm[1]) * 4500 + int'(dut.cdd.comm[2]) * 75 + int'(dut.cdd.comm[3]);
 				cd_exp_lba = (l < 150) ? 150 : l;
+				cd_last_audio = -1s;      // a seek: no gap to measure
 			end
 			if (dut.cdd_dten && !cdd_dten_d) begin
+				int off;
 				cd_ref_lba = cd_exp_lba;
 				cd_exp_lba++;
-				foreach (cd_ref[i]) cd_ref[i] = 8'h00;
+				cd_blk_len = int'(dut.cdrom.CDD_BLK_LEN);
+				if (cd_len_count.exists(cd_blk_len)) cd_len_count[cd_blk_len]++;
+				else cd_len_count[cd_blk_len] = 1;
+				foreach (cd_raw[i]) cd_raw[i] = 8'h00;
 				if (cd_ref_lba < 150 + chk_sectors) begin
 					int n;
 					void'($fseek(chk_fd, longint'(cd_ref_lba - 150) * chk_sec_bytes, 0));
-					n = $fread(cd_ref, chk_fd);
+					n = $fread(cd_raw, chk_fd, 0, chk_sec_bytes);
 				end
+				if (chk_sec_bytes == 2048) off = 0;
+				else if (cd_blk_len == 2048) off = 16;
+				else if (cd_blk_len >= 2352) off = 0;
+				else off = (2352 - cd_blk_len) & ~1;
+				foreach (cd_ref[i])
+					cd_ref[i] = (i < cd_blk_len && off + i < chk_sec_bytes) ? cd_raw[off + i] : 8'h00;
 				cd_widx = 0;
 				cd_sec_errs = 0;
 				cd_ref_sum = 16'h0000;
+				if (cd_ref_lba >= trk_audio_from) begin
+					cd_audio_secs++;
+					if (cd_last_audio >= 0) begin
+						realtime g;
+						g = $realtime - cd_last_audio;
+						cd_audio_gaps++;
+						cd_audio_sum += g;
+						if (g < cd_audio_min) cd_audio_min = g;
+						if (g > cd_audio_max) cd_audio_max = g;
+					end
+					cd_last_audio = $realtime;
+				end
 			end
 			if (dut.cdd_dten && dut.cdd.CDD_WR) begin
-				if (cd_widx < 1024) begin
+				if (cd_widx < (cd_blk_len + 1) / 2) begin
 					bit [15:0] e;
-					e = {cd_ref[chk_off + 2 * cd_widx + 1], cd_ref[chk_off + 2 * cd_widx]};
+					e = {(2 * cd_widx + 1 < 2449) ? cd_ref[2 * cd_widx + 1] : 8'h00, cd_ref[2 * cd_widx]};
 					cd_ref_sum = cd_ref_sum + e[15:8] + e[7:0];
 					if (dut.cdd.CDD_DATA !== e) begin
 						if (cd_sec_errs < 4)
-							$display("[%0t] CD DATA MISMATCH abs lba %0d word %0d: got %04h, expected %04h",
-							         $realtime, cd_ref_lba, cd_widx, dut.cdd.CDD_DATA, e);
+							$display("[%0t] CD DATA MISMATCH abs lba %0d word %0d (block %0d bytes): got %04h, expected %04h",
+							         $realtime, cd_ref_lba, cd_widx, cd_blk_len, dut.cdd.CDD_DATA, e);
 						cd_sec_errs++;
 					end
-				end else if (cd_widx == 1024) begin
+				end else if (cd_widx == (cd_blk_len + 1) / 2) begin
 					if (dut.cdd.CDD_DATA !== cd_ref_sum) begin
 						$display("[%0t] CD CHECKSUM MISMATCH abs lba %0d: got %04h, expected %04h",
 						         $realtime, cd_ref_lba, dut.cdd.CDD_DATA, cd_ref_sum);
@@ -383,12 +485,28 @@ module tb_boot;
 				cd_widx++;
 			end
 			if (!dut.cdd_dten && cdd_dten_d) begin
-				if (cd_widx != 1025) begin
-					$display("[%0t] CD sector abs lba %0d: %0d words sent, expected 1025", $realtime, cd_ref_lba, cd_widx);
+				if (cd_widx != (cd_blk_len + 1) / 2 + 1) begin
+					$display("[%0t] CD sector abs lba %0d: %0d words sent, expected %0d", $realtime, cd_ref_lba, cd_widx, (cd_blk_len + 1) / 2 + 1);
 					cd_sec_errs++;
 				end
 				if (cd_sec_errs) begin cd_bad++; errors++; end
 				else cd_good++;
+			end
+			// the CPU's reads of the block from the controller's data port
+			cd_dt_en_d <= dut.cdrom.DT_EN;
+			if (dut.cdrom.DT_EN && !cd_dt_en_d) cd_rd_idx = 0;
+			if (dut.cdrom.IO_ST == dut.cdrom.IO_DAT_READ) begin
+				// DISC_DATA_Q is the byte at DISC_DATA_RPOS, which counts the
+				// bytes read since the block arrived
+				if (cd_rd_idx < cd_blk_len && dut.cdrom.DISC_DATA_Q !== cd_ref[cd_rd_idx]) begin
+					if (cd_rd_errs < 8)
+						$display("[%0t] CD PORT MISMATCH abs lba %0d byte %0d: CPU reads %02h, expected %02h",
+						         $realtime, cd_ref_lba, cd_rd_idx, dut.cdrom.DISC_DATA_Q, cd_ref[cd_rd_idx]);
+					cd_rd_errs++;
+					errors++;
+				end
+				cd_rd_idx++;
+				cd_rd_bytes++;
 			end
 		end
 	end
@@ -1097,6 +1215,7 @@ module tb_boot;
 	bit lt_req_d = 0, lt_exec_d = 0, lt_rtl_d = 0, lt_rtr_d = 0, lt_l = 0, lt_r = 0, lt_armed = 0, lt_paused = 0;
 	int late_lines = 0, late_arb = 0, video_lines = 0;
 	int late_per_s [64];   // late lines with the 3DO paused, per second of 3DO time
+	bit draining = 0;      // the run is over: the TB holds the pause itself
 	always @(posedge clk_mem) begin
 		if (dut.reset_3do) lt_armed = 0;
 		else begin
@@ -1108,7 +1227,8 @@ module tb_boot;
 			if (dut.vram_r.RT_REQ && !lt_rtr_d && !dut.vram_r.XFER_CPU) lt_r = 1;
 			if (dut.p3do.madam.SPORT.VIDEO_TRANS_EXEC && !lt_exec_d && lt_armed) begin
 				video_lines++;
-				if ((!lt_l || !lt_r) && lt_paused) begin
+				if (draining) ;
+				else if ((!lt_l || !lt_r) && lt_paused) begin
 					late_lines++;
 					errors++;
 					// int'() of a real rounds: truncate to the second the line is in
@@ -1504,7 +1624,7 @@ module tb_boot;
 	int  hang_cnt = 0;       // clk_sys cycles (20 ns) paused without a break
 	bit  hung = 0;
 	always @(posedge clk_sys) begin
-		if (dut.reset_3do || !dut.pause) hang_cnt <= 0;
+		if (dut.reset_3do || !dut.pause || draining) hang_cnt <= 0;
 		else if (hang_cnt < HANG_US * 50) hang_cnt <= hang_cnt + 1;
 		else if (!hung) begin
 			hung = 1;
@@ -1729,7 +1849,6 @@ module tb_boot;
 			$display("tb_boot: ISO %s (%0d bytes, %0d sectors) placed", iso, iso_len, iso_len / 2048);
 			chk_fd = $fopen(iso, "rb");
 			chk_sec_bytes = 2048;
-			chk_off = 0;
 			chk_sectors = iso_len / 2048;
 		end
 
@@ -1741,13 +1860,40 @@ module tb_boot;
 			host_cmd(16'h0301, 0, iso_len, 0, r, e);
 		end
 		if (bin_fd != 0) begin
-			bit [31:0] toc [8];
-			toc[0] = {16'h0, bcd(1), 8'd1};
+			// Table of contents (fork firmware DiscImage::toc). Default: one
+			// MODE1 track. +audio_tracks=<n> [+data_sectors=<k>]: the first k
+			// sectors are a data track (none with k = 0), the rest of the image
+			// is n audio tracks of equal length (the last one takes the rest).
+			int ntr, data_secs, atr, first, len;
+			bit [31:0] toc [];
+			data_secs = bin_sectors;
+			atr = 0;
+			if ($value$plusargs("audio_tracks=%d", atr)) begin
+				data_secs = 0;
+				void'($value$plusargs("data_sectors=%d", data_secs));
+			end
+			ntr = (data_secs > 0) + atr;
+			toc = new [4 + 4 * ntr];
+			toc[0] = {16'h0, bcd(ntr), 8'(ntr)};
 			toc[1] = 150 + bin_sectors; toc[2] = msf_bcd(150 + bin_sectors); toc[3] = 0;
-			toc[4] = 150; toc[5] = 150 + bin_sectors - 1; toc[6] = 150; toc[7] = msf_bcd(150);
+			first = 0;
+			for (int t = 0; t < ntr; t++) begin
+				bit audio;
+				audio = !(t == 0 && data_secs > 0);
+				if (!audio) len = data_secs;
+				else if (t == ntr - 1) len = bin_sectors - first;
+				else len = (bin_sectors - data_secs) / atr;
+				toc[4 + 4 * t] = 150 + first;
+				toc[5 + 4 * t] = 150 + first + len - 1;
+				toc[6 + 4 * t] = 150 + first;
+				toc[7 + 4 * t] = msf_bcd(150 + first) | {audio, 31'd0};
+				if (audio && 150 + first < trk_audio_from) trk_audio_from = 150 + first;
+				$display("tb_boot: track %0d %s, abs LBA %0d..%0d", t + 1, audio ? "audio" : "data", 150 + first, 150 + first + len - 1);
+				first += len;
+			end
 			host_cmd(16'h0300, 0, 0, 0, r, e);
-			for (int i = 0; i < 8; i++) host_wr(32'h1000_0000 + 4 * i, toc[i]);
-			host_cmd(16'h0301, 0, 32, 0, r, e);
+			for (int i = 0; i < 4 + 4 * ntr; i++) host_wr(32'h1000_0000 + 4 * i, toc[i]);
+			host_cmd(16'h0301, 0, 16 + 16 * ntr, 0, r, e);
 		end
 		host_cmd(16'h0300, 1, 0, 0, r, e);
 		host_cmd(16'h0301, 1, bios_len, 0, r, e);
@@ -1769,12 +1915,41 @@ module tb_boot;
 		if (hung) $display("[%0t] tb_boot: run ended early: memory system hang", $realtime);
 		if (ht_fd != 0) begin $fclose(ht_fd); ht_fd = 0; end
 		$fflush();
+		// The shadow takes each write at the VRAM port; ddram.sv stores it in
+		// the SRAM or SDRAM some cycles later. Stop the 3DO (its own pause
+		// input, as slow memory does) and let the memory system go idle first,
+		// so that a write still on its way is not counted as lost.
+		if (!hung) begin
+			bit idle = 0;
+			draining = 1;
+			force dut.pause = 1'b1;
+			for (int i = 0; i < 2000 && !idle; i++) begin
+				repeat (50) @(posedge clk_sys);
+				idle = !dut.ddr_busy && !dut.ddr_io_busy && dut.VRAM_LRDY && dut.VRAM_RRDY;
+			end
+			if (idle) repeat (500) @(posedge clk_sys);
+			else begin
+				errors++;
+				$display("[%0t] TB ERROR: the memory system did not go idle within 2 ms of stopping the 3DO", $realtime);
+			end
+		end
 		dump_vram_fb(32'h000000, 1638, {outdir, "/frames/vram_all.ppm"});
 		sh_check_memory();
+		if (!hung) release dut.pause;
 		$display("tb_boot: %0d frames, %0d CD sectors (%0d served by the firmware model), SDRAM model errors %0d, SRAM model errors %0d (%0d SRAM writes), TB errors %0d",
 		         frames, sectors_sent, served, sdram.errors, sram.errors, sram.writes, errors);
-		if (chk_fd != 0)
-			$display("tb_boot: CD data check: %0d sectors match the image, %0d differ", cd_good, cd_bad);
+		if (au_fd != 0) $fclose(au_fd);
+		au_fd = 0;
+		$display("tb_boot: audio output: %0d samples at 44.1 kHz in %s/audio.raw, %0d not silent, peak %0d",
+		         au_n, outdir, au_nz, au_peak);
+		if (chk_fd != 0) begin
+			$display("tb_boot: CD data check: %0d sectors match the image, %0d differ; CPU read %0d bytes from the data port, %0d differ",
+			         cd_good, cd_bad, cd_rd_bytes, cd_rd_errs);
+			foreach (cd_len_count[l]) $display("tb_boot: CD blocks of %0d bytes: %0d", l, cd_len_count[l]);
+			if (cd_audio_secs)
+				$display("tb_boot: CD audio sectors %0d; between consecutive ones min %0.3f ms, max %0.3f ms, mean %0.3f ms (%0d gaps)",
+				         cd_audio_secs, cd_audio_min / 1ms, cd_audio_max / 1ms, cd_audio_gaps ? cd_audio_sum / cd_audio_gaps / 1ms : 0.0, cd_audio_gaps);
+		end
 		$display("tb_boot: RT cache hits %0d, misses %0d, prefetches %0d, invalidations %0d, VDL frame buffer hints %0d",
 		         dut.rtc_hits, dut.rtc_misses, dut.rtc_prefetches, dut.rtc_invalidations, dut.rtc_hints);
 		// any TB error (late video lines included) or SDRAM / SRAM model error

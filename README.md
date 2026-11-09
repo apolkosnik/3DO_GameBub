@@ -105,6 +105,10 @@ firmware also when you pause.
 * Movies and other heavy scenes still show broken lines (Microcosm's intro, a line or two
   in Cannon Fodder's title), with the VRAM in the SRAM or in the SDRAM: being
   investigated. The SRAM removed the pauses between Microcosm's animated sequences.
+* A band of wrong lines at the top of the screen, late in the BIOS boot, was seen on
+  hardware with a build that had only the first video-cache fix (no prefetch after CPU copy
+  reads). The v0.3 build adds the second (writes update cached rows); whether the band is
+  gone with it has not been checked on hardware yet.
 * CLIO's horizontal and vertical interpolation are off: the picture is captured at
   320 x 240, which keeps neither the interpolated dots nor the interpolated lines.
 * Video lines that start before their VRAM transfer (see *Video lines that started late*)

@@ -763,6 +763,7 @@ module p3do_gamebub #(
 		.d_braddr(ddr_braddr), .d_brrd(ddr_brrd), .d_brwr(ddr_brwr),
 		.d_blte(ddr_blte), .d_brte(ddr_brte), .d_bout(ddr_bout), .d_ba(ddr_ba), .d_bbusy(ddr_bbusy),
 		.ddr_we(DDRAM_WE && !DDRAM_BUSY), .ddr_addr(DDRAM_ADDR),
+		.ddr_din(DDRAM_DIN), .ddr_be(DDRAM_BE), .ddr_burstcnt(DDRAM_BURSTCNT),
 		.frame(VID_FRAME),
 		.vid_dma(VID_DMA),
 		.hint(VID_FB_HINT), .hint_curr(VID_FB_CURR), .hint_curr_v(VID_FB_CURR_V),

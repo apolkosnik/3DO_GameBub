@@ -25,6 +25,13 @@
 //   * write masks on copies and flash writes in on-chip, SRAM and SDRAM
 //     rows, and split transfers after writes into the half-row the video
 //     shift register holds (phase 13)
+//   * the CPU's SPORT read transfers (page-copy sources) start no prefetch
+//     fill, which would hold the memory path (and pause the 3DO) when the
+//     next video transfer comes (phase 14)
+//   * single-beat CPU/CEL writes into cached half-rows update them (all
+//     eight byte lanes), so a line's transfers of two just-written rows hit;
+//     a write during an entry's delivery leaves the read-out as it began
+//     (phase 15)
 // and checks every word shifted out against a reference model of VRAM. The
 // important cases write to rows that are already in the cache.
 //
@@ -122,6 +129,7 @@ module tb_rtcache;
 		.d_braddr(ddr_braddr), .d_brrd(ddr_brrd), .d_brwr(ddr_brwr),
 		.d_blte(ddr_blte), .d_brte(ddr_brte), .d_bout(ddr_bout), .d_ba(ddr_ba), .d_bbusy(ddr_bbusy),
 		.ddr_we(DDRAM_WE && !DDRAM_BUSY), .ddr_addr(DDRAM_ADDR),
+		.ddr_din(DDRAM_DIN), .ddr_be(DDRAM_BE), .ddr_burstcnt(DDRAM_BURSTCNT),
 		.frame(frame), .vid_dma(vid_dma), .hint(hint), .hint_curr(hint_curr), .hint_curr_v(hint_curr_v), .hint_prev(hint_prev), .hint_prev_v(hint_prev_v),
 		.stat_hits(st_hits), .stat_misses(st_misses), .stat_prefetches(st_pf), .stat_invalidations(st_inv),
 		.stat_hints(st_hints)
@@ -343,6 +351,22 @@ module tb_rtcache;
 		w_lwe <= 0; w_rwe <= 0; w_ras <= 0;
 		mem_cycles(3);
 		ref_l[a] = dl; ref_r[a] = dr;
+	endtask
+	// CPU write with byte enables per half ({upper, lower} byte), as the
+	// 3DO's byte and halfword stores reach ddram.sv (phase 15)
+	task automatic cpu_write_be(input [17:0] a, input [15:0] dl, input [15:0] dr, input [1:0] lm, input [1:0] rm);
+		while (ddram.busy) @(posedge clk_mem);
+		@(posedge clk_mem);
+		w_addr <= a; w_ldata <= dl; w_rdata <= dr; w_ras <= 1;
+		mem_cycles(2);
+		w_lwe <= lm; w_rwe <= rm;
+		mem_cycles(3);
+		w_lwe <= 0; w_rwe <= 0; w_ras <= 0;
+		mem_cycles(3);
+		if (lm[0]) ref_l[a][7:0] = dl[7:0];
+		if (lm[1]) ref_l[a][15:8] = dl[15:8];
+		if (rm[0]) ref_r[a][7:0] = dr[7:0];
+		if (rm[1]) ref_r[a][15:8] = dr[15:8];
 	endtask
 
 	// Write masks: the CPU's write data to MADAM's SPORT space is the write
@@ -606,6 +630,11 @@ module tb_rtcache;
 		rq_age_d <= rq_age;
 		rq_age = (v_lrd || v_rrd || cache.req_v[0] || cache.req_v[1]) ? 0 : rq_age + 1;
 	end
+
+	// invariant: a committed write's snoop never meets a fill beat (they
+	// share the cache's write port; ddram.sv runs one at a time)
+	always @(posedge clk_mem) if (!rst && cache.sn_we && cache.fill_busy && cache.d_blte)
+		fail($sformatf("write snoop h=%03h in the same cycle as a fill beat of h=%03h", cache.sn_h, cache.fill_h));
 
 	// invariant: no two valid entries hold the same half-row
 	always @(posedge clk_mem) if (!rst) begin
@@ -1004,6 +1033,9 @@ module tb_rtcache;
 			realtime t_l, t_r, t_fill;
 			errors0 = errors;
 			rx = '{9'h0D0, 9'h0D2, 9'h0D4};
+			// This phase needs cold misses. Ordinary writes now update idle
+			// entries, so evict these rows through normal reads first.
+			for (int e = 0; e < 8; e++) rt_read({9'(9'h100 + 4 * e), 9'h0}, 0, 0);
 			foreach (rx[i]) begin
 				for (int w = 0; w < 512; w += 7) cpu_write({rx[i], 9'(w)}, $urandom(), $urandom());
 				wait_idle();
@@ -1223,6 +1255,148 @@ module tb_rtcache;
 				$display("[%0t] phase 13 (%s): split transfers after writes, errors=%0d", $realtime, mem, errors - e0);
 			end
 			$display("[%0t] phase 13: write masks, split transfers after writes, errors=%0d", $realtime, errors - errors0);
+		end
+
+		// 14) The CPU's SPORT read transfer (the source of a page copy) is
+		//     not a display read: the half-rows after its row are not the
+		//     next lines of a picture (a screen clear copies one row into
+		//     many). It must not queue prefetch fills. The core pauses the
+		//     3DO while a fill holds the memory path, so a prefetch fill
+		//     there held up MADAM's next video transfer, which has ~4 us
+		//     until its serial read-out (5-15 us late: the line showed the
+		//     old row). The transfer's own second half-row is fetched on
+		//     its own request, as for any full-row transfer.
+		begin
+			int errors0, pf0, m1, busy;
+			bit [8:0] s, v;
+			errors0 = errors;
+			for (int k = 0; k < 4; k++) begin
+				s = 9'(200 + 4 * k);
+				v = rows[k];                                // video row, cached below
+				for (int h = 0; h < 4; h++)
+					if (cache.is_internal(10'({s, 1'b0} + h))) fail($sformatf("phase 14: half-row %03h is on chip, the test cannot work", {s, 1'b0} + h));
+				rt_read({v, 9'h0}, 0, 0);
+				wait_idle(); mem_cycles(400); wait_idle();
+				for (int h = 0; h < 4; h++)
+					if (cache.find(10'({s, 1'b0} + h))[4]) fail($sformatf("phase 14: half-row %03h cached before the test", {s, 1'b0} + h));
+				if (!cache.find({v, 1'b0})[4] || !cache.find({v, 1'b1})[4]) fail("phase 14: video row not cached before the test");
+				pf0 = st_pf;
+				// the copy's read transfer, then 1.5 us (past the prefetch
+				// hold-off of 1.28 us) until the next video transfer: no fill
+				// may hold the memory path in that time
+				@(posedge clk_mem); SP_CPU <= 1;
+				ras_cycle({s, 9'h0}, 0, 2'b11, 0);
+				ras_end();
+				SP_CPU <= 0;
+				begin
+					int to;
+					to = 0;
+					while ((vram_l.XBUSY || vram_r.XBUSY) && to < 200000) begin @(posedge clk_mem); to++; end
+					if (to >= 200000) fail("phase 14: the CPU's read transfer did not finish");
+				end
+				for (int i = 0; i < 512; i++) begin sc_l[i] = rl({s, 9'(i)}); sc_r[i] = rr({s, 9'(i)}); end
+				if (cache.pf_v[0] || cache.pf_v[1]) fail($sformatf("phase 14: the CPU's read transfer of row %03h queued prefetches", s));
+				busy = 0;
+				for (int c = 0; c < 150; c++) begin @(posedge clk_mem); if (cache.fill_busy || cache.fill_issue) busy++; end
+				if (busy != 0) fail($sformatf("phase 14: a fill held the memory path %0.2f us of the 1.5 us after the CPU's read transfer of row %03h", busy / 100.0, s));
+				if (st_pf != pf0) fail($sformatf("phase 14: the CPU's read transfer of row %03h started %0d prefetches", s, st_pf - pf0));
+				if (cache.find({9'(s + 1), 1'b0})[4] || cache.find({9'(s + 1), 1'b1})[4])
+					fail($sformatf("phase 14: row %03h fetched after the CPU's read transfer of row %03h", 9'(s + 1), s));
+				m1 = st_misses;
+				rt_read({v, 9'h0}, 0, 64);                  // the video transfer: cached
+				if (st_misses != m1) fail("phase 14: the video transfer of a cached row missed");
+				cpu_mwt(9'(rows[k] + 1));                   // the copy completes
+				rt_read({9'(rows[k] + 1), 9'h0}, 0, 512);
+			end
+			$display("[%0t] phase 14: CPU read transfers start no prefetch, errors=%0d", $realtime, errors - errors0);
+		end
+
+		// 15) CPU and CEL-engine writes (single beats through ddram.sv) into
+		//     cached half-rows update the entry instead of dropping it. A
+		//     line's transfers often need two rows the renderer has just
+		//     written (the frame buffer being shown and the one drawn), and
+		//     two misses run their fills one after the other: the second
+		//     came after the line's read-out had begun (stale pixels).
+		//     Write bursts and flash writes still drop entries (phases 5,
+		//     6), and so does a write into an entry being shifted out, whose
+		//     serial read-out keeps the data it started with.
+		begin
+			int errors0, m0;
+			bit [8:0] ra, rb, rc;
+			errors0 = errors;
+			ra = 9'h0E0; rb = 9'h0E4; rc = 9'h0E8;
+			for (int h = 0; h < 2; h++)
+				if (cache.is_internal({ra, 1'(h)}) || cache.is_internal({rb, 1'(h)}) || cache.is_internal({rc, 1'(h)}))
+					fail("phase 15: a test row is on chip, the test cannot work");
+			for (int w = 0; w < 512; w++) begin
+				cpu_write({ra, 9'(w)}, 16'h1000 | 16'(w), 16'h2000 | 16'(w));
+				cpu_write({rb, 9'(w)}, 16'h3000 | 16'(w), 16'h4000 | 16'(w));
+				cpu_write({rc, 9'(w)}, 16'h5000 | 16'(w), 16'h6000 | 16'(w));
+			end
+			wait_idle();
+			// a) the line case: both rows cached, then written (single words
+			//    in both halves of each), then a line's transfers of both
+			for (int n = 0; n < 4; n++) begin
+				rt_read({ra, 9'h0}, 0, 0); rt_read({rb, 9'h0}, 0, 0);
+				wait_idle(); mem_cycles(400); wait_idle();
+				for (int h = 0; h < 2; h++)
+					if (!cache.find({ra, 1'(h)})[4] || !cache.find({rb, 1'(h)})[4]) fail("phase 15: rows not cached before the writes");
+				for (int k = 0; k < 6; k++) begin
+					cpu_write({ra, 9'($urandom_range(511))}, 16'($urandom()), 16'($urandom()));
+					cpu_write({rb, 9'($urandom_range(511))}, 16'($urandom()), 16'($urandom()));
+				end
+				wait_idle();
+				for (int h = 0; h < 2; h++) begin
+					if (!cache.find({ra, 1'(h)})[4]) fail($sformatf("phase 15: single-word writes dropped half-row %03h", {ra, 1'(h)}));
+					if (!cache.find({rb, 1'(h)})[4]) fail($sformatf("phase 15: single-word writes dropped half-row %03h", {rb, 1'(h)}));
+				end
+				m0 = st_misses;
+				rt_read({ra, 9'h0}, 0, 512);
+				rt_read({rb, 9'h0}, 0, 512);
+				if (st_misses != m0) fail($sformatf("phase 15: the line's transfers of the two written rows missed %0d times", st_misses - m0));
+			end
+			// b) all eight byte lanes of a cache beat (two columns, left and
+			//    right half, lower and upper byte): each byte write keeps the
+			//    other bytes and the entry
+			rt_read({rc, 9'h0}, 0, 0);
+			wait_idle();
+			for (int lane = 0; lane < 8; lane++) begin
+				bit [17:0] wa;
+				bit [1:0] lm, rm;
+				wa = {rc, 9'(16 + lane / 4)};
+				lm = ((lane / 2) % 2 == 0) ? (2'b01 << (lane % 2)) : 2'b00;
+				rm = ((lane / 2) % 2 == 1) ? (2'b01 << (lane % 2)) : 2'b00;
+				cpu_write_be(wa, 16'hA0B0 + 16'(lane), 16'hC0D0 + 16'(lane), lm, rm);
+				wait_idle();
+				if (!cache.find({rc, 1'b0})[4]) fail($sformatf("phase 15: byte write (lane %0d) dropped the cached half-row", lane));
+				m0 = st_misses;
+				rt_read({rc, 9'h0}, 0, 32);
+				if (st_misses != m0) fail($sformatf("phase 15: transfer after the byte write (lane %0d) missed", lane));
+			end
+			// c) a write into the half-row being shifted out of the cache: the
+			//    read-out keeps the data it started with, the next transfer
+			//    has the write
+			begin
+				bit [15:0] old_l [512], old_r [512];
+				bit overlapped;
+				for (int i = 0; i < 512; i++) begin old_l[i] = rl({rc, 9'(i)}); old_r[i] = rr({rc, 9'(i)}); end
+				overlapped = 0;
+				fork
+					begin ras_cycle({rc, 9'h0}, 0, 2'b11, 0); ras_end(); end
+					begin
+						wait (cache.dl_act[0]); mem_cycles(8);
+						overlapped = cache.dl_act[0];
+						cpu_write({rc, 9'd20}, 16'hABCD, 16'hEF01);
+					end
+				join
+				wait_idle();
+				if (!overlapped) fail("phase 15: the write did not overlap the delivery, the test cannot work");
+				for (int i = 0; i < 512; i++) begin sr_l[i] = old_l[i]; sr_r[i] = old_r[i]; end
+				sq_pos = 0;
+				sq_read(512, "phase 15 read-out with a write during its delivery");
+				rt_read({rc, 9'h0}, 0, 512);
+			end
+			$display("[%0t] phase 15: single-beat writes update cached half-rows, errors=%0d", $realtime, errors - errors0);
 		end
 
 		$display("tb_rtcache: %0d words checked, hits %0d misses %0d prefetches %0d invalidations %0d",

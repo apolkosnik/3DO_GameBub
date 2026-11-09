@@ -51,11 +51,15 @@
 // being filled (same half-row), or misses and is served by the same fill.
 //
 // Coherence: writes are snooped where they become visible to later reads,
-// i.e. at ddram.sv's DDRAM write commands for the VRAM area (random writes,
-// MWT write bursts) and at flash-writes (bfw, which ddram.sv applies through
-// its lazy-fill bitmap). Matching entries are invalidated; a write during a
-// fill marks the entry dirty so it is dropped after the fill. This keeps
-// ddram.sv's own read/write ordering.
+// at ddram.sv's committed DDRAM write commands. A single-beat write updates
+// the enabled bytes of an idle cached half-row instead of evicting it: a
+// CEL write after prefetch otherwise caused a cold video read, and fills
+// for different previous/current rows ran in sequence past scanout.
+// Write bursts and flash writes still invalidate matching entries. A
+// delivery or fill in progress also retains the original invalidation
+// behavior, keeping the serial snapshot intact and dropping dirty fills.
+// The stat_invalidations counter continues to count matched write snoops,
+// including the single-beat updates.
 //
 // ddram.sv's burst interface is shared: fills use both sides' read inputs
 // (same address, so ddram.sv runs one combined burst), MWT write bursts and
@@ -105,6 +109,9 @@ module vram_rtcache #(
 	// snoop: ddram.sv DDRAM write commands
 	input              ddr_we,
 	input      [28: 0] ddr_addr,
+	input      [63: 0] ddr_din,
+	input      [ 7: 0] ddr_be,
+	input      [ 7: 0] ddr_burstcnt,
 
 	// start of a frame (MADAM SPORT LINE0, in vertical blanking; clk_sys
 	// pulse, taken on its rising edge)
@@ -232,6 +239,10 @@ module vram_rtcache #(
 	// registered snoops
 	reg         sn_we;
 	reg  [ 9:0] sn_h;
+	reg  [ 6:0] sn_beat;
+	reg  [63:0] sn_data;
+	reg  [ 7:0] sn_be;
+	reg         sn_single;
 	reg         sn_fw;
 	reg  [ 8:0] sn_row;
 
@@ -277,9 +288,22 @@ module vram_rtcache #(
 
 	always @(posedge clk) rd_q <= data[rd_addr];
 
-	// fill write port
+	// Update enabled bytes of idle cached rows on committed single-beat writes.
+	// Bursts retain their base address; they and active deliveries still invalidate.
+	// One byte-enabled write port, shared by fills and committed writes.
+	// Keeping its address/data mux outside the RAM write process preserves
+	// block-RAM inference on the Game Bub FPGA. ddram.sv takes no write
+	// command while a fill's read burst runs, so the two never meet; should
+	// they, the fill writes and the snooped entry is invalidated instead.
+	wire fill_write = fill_busy && d_blte;
+	wire [EW:0] fsn = find(sn_h);
+	wire sn_merge = sn_we && sn_single && fsn[EW] && !entry_busy(fsn[EW-1:0]) && !fill_write;
+	wire [EW+6:0] data_wa = fill_write ? {fill_e, d_ba[8:2]} : {fsn[EW-1:0], sn_beat};
+	wire [63:0] data_wd = fill_write ? d_bout : sn_data;
+	wire [7:0] data_wbe = fill_write ? 8'hFF : sn_merge ? sn_be : 8'h00;
 	always @(posedge clk) begin
-		if (fill_busy && d_blte) data[{fill_e, d_ba[8:2]}] <= d_bout;
+		for (int b = 0; b < 8; b++)
+			if (data_wbe[b]) data[data_wa][b*8 +: 8] <= data_wd[b*8 +: 8];
 	end
 
 	wire [EW:0] fdem0 = find(dem_h[0]);
@@ -321,6 +345,10 @@ module vram_rtcache #(
 		req_v[1] <= r_esrd; req_a[1] <= r_esaddr; req_np[1] <= r_esnp;
 		sn_we  <= ddr_we && ddr_addr[24:17] == '0;
 		sn_h   <= ddr_addr[16:7];
+		sn_beat <= ddr_addr[6:0];
+		sn_data <= ddr_din;
+		sn_be <= ddr_be;
+		sn_single <= ddr_burstcnt == 8'd1;
 		sn_fw  <= l_esfw;
 		sn_row <= l_esaddr[17:9];
 		hit_d[0] <= fdem0[EW];
@@ -509,7 +537,7 @@ module vram_rtcache #(
 			for (int i = 0; i < ENTRIES; i++) begin
 				if (snoop_hit[i]) begin
 					if (fill_busy && fill_e == EW'(i)) dirty[i] <= 1;
-					else valid[i] <= 0;
+					else if (sn_fw || !sn_merge) valid[i] <= 0;
 				end
 			end
 			if (|snoop_hit) stat_invalidations <= stat_invalidations + 1'd1;

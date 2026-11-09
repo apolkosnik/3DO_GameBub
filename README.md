@@ -74,8 +74,9 @@ firmware also when you pause.
 
 * **Commercial discs need the disc-streaming firmware.** Stock firmware only runs `.iso`
   images of up to 22 MiB (see *Discs* above).
-* CD audio tracks are listed in the disc's table of contents, but not played (as in the
-  MiSTer core).
+* CD audio tracks (from a `.cue` with its `.bin` files; an `.iso` has none) are read
+  through the drive's data port and played on the DSP, as on the 3DO, which has no analog
+  CD audio path. This is tested in simulation only, not yet on hardware.
 * PAL games run at 50 Hz, but the handheld's LCD refreshes at 60 Hz, so every fifth frame
   is shown twice.
 * In PAL mode the 3DO puts out about 288 picture lines, and only 240 of them are captured,
@@ -210,6 +211,22 @@ strip at the top of the picture in Wolfenstein 3D):
   CPU's CLIO accesses come first), its addresses come too close to the line. The cache
   also fetches the first half-rows of the last two frame buffers at the start of every
   frame (MADAM's `LINE0`, in vertical blanking).
+* The CPU's SPORT read transfer (the source of a VRAM page copy) prefetched like a video
+  transfer, though the half-rows after a copy's source are not the next lines of a
+  picture (a screen clear copies one row into many). Those fills paused the 3DO when
+  MADAM's next video transfer came, which then started 5–15 µs late: the line showed the
+  old row until the transfer moved the serial tap mid-line, and the rest of the line
+  shifted. The copy's read transfer now marks itself as not for the display (`ESNP`, as
+  a masked write's destination-row read already did), and prefetches nothing.
+  `tb_rtcache` phase 14 checks it: the old RTL held the memory path the whole 1.5 µs after
+  each copy's read transfer and fetched the next row.
+* A CPU or CEL-engine write into a cached half-row dropped the whole entry. The renderer
+  writes into the rows the video is about to show (the frame drawn and the one shown), so a
+  line's two transfers could both miss, and their fills ran one after the other: the second
+  ended after the line's read-out had begun. A single-beat write now updates the bytes it
+  enables in an idle entry. Write bursts (SPORT copies) and flash writes still drop entries,
+  and so does a write into an entry being shifted out, whose read-out keeps the data it
+  started with. `tb_rtcache` phase 15: the old RTL dropped both rows and missed on the line.
 
 `tb_boot` checks that every video line has had its transfers before it starts: a late line
 while the 3DO was paused (the port's memory system) is an error; one delayed by MADAM's

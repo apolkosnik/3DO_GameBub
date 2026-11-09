@@ -23,7 +23,7 @@ module P3DO_VRAM #(parameter USE_BRAM = 0) (
 	output [31: 0] ESDATA,
 	output         ESWR,
 	output         ESRD,
-	output         ESNP,        // Game Bub port: the read (ESRD) is not for the display (masked write)
+	output         ESNP,        // Game Bub port: the read (ESRD) is not for the display (CPU copy source, masked write)
 	output         ESFW,
 	input  [31: 0] ESQ,
 	input          ESTE,
@@ -507,7 +507,13 @@ module P3DO_VRAM #(parameter USE_BRAM = 0) (
 	assign ESDATA = MASKED && MWT_EXEC ? (ES_NEW & {2{MASK}}) | (SCR_DATA & ~{2{MASK}}) : ES_NEW;
 	assign ESWR = MWT_EXEC & ~ISTE;
 	assign ESRD = RT_REQ & ~ISTE;
-	assign ESNP = MRD_EXEC;
+	// Not a display read, so no prefetch of the next half-rows: a masked
+	// write's destination row, and the CPU's read transfer (a page copy's
+	// source; a screen clear copies one row into many). Their prefetch fills
+	// held the memory path when MADAM's next video transfer came (~4 us
+	// until its read-out), which then took 5-15 us: the line showed the old
+	// row until the transfer moved the serial tap mid-line.
+	assign ESNP = MRD_EXEC | XFER_CPU;
 	assign ESFW = FW_EXEC & ~ISTE;
 	
 	assign QSF = SR_RA[8];

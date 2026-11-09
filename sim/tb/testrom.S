@@ -16,7 +16,10 @@
 @      tb_top; skipped, and counted as one check, on a disc of one data
 @      track): disc info and the TOC entries of both tracks; Set Mode
 @      block length 2352, two audio sectors (the controller's buffer must
-@      start each block at its byte 0), Read Sub-Q at the audio track; a raw
+@      start each block at its byte 0), Read Sub-Q at the audio track,
+@      then a READ of the next audio sector (it continues the stream: tb_top
+@      checks that it comes one sector time after the previous) and Read
+@      Sub-Q there; a raw
 @      data sector (sync, header, user data); Read Sub-Q at the data track;
 @      double speed (status bit 1) and 2448-byte blocks (CD-DA and a zero
 @      subcode); 2048 bytes and single speed again, a data sector; Abort and
@@ -336,6 +339,20 @@ entry:
 	ldr	r4, =ROM_BASE + cmd_subq
 	bl	cd_send7
 	ldr	r4, =ROM_BASE + st_subq_a	@ track 2 index 1, 00:02:06, 00:00:02
+	mov	r3, #12
+	bl	cd_check_stat
+	ldr	r4, =ROM_BASE + cmd_read_a3	@ MSF 00:02:07 (abs 157), 1 block: continues the stream
+	bl	cd_send7
+	mov	r9, #0
+	ldr	r3, =2352
+	mov	r8, #157
+	CDBLK
+	ldr	r4, =ROM_BASE + st_read
+	mov	r3, #2
+	bl	cd_check_stat
+	ldr	r4, =ROM_BASE + cmd_subq
+	bl	cd_send7
+	ldr	r4, =ROM_BASE + st_subq_a3	@ track 2 index 1, 00:02:07, 00:00:03
 	mov	r3, #12
 	bl	cd_check_stat
 	ldr	r4, =ROM_BASE + cmd_read_d	@ LBA 151, 1 block: the raw data sector
@@ -943,6 +960,7 @@ cmd_speed2x:	.byte	0x09, 0x03, 0x80, 0, 0, 0, 0
 cmd_speed1x:	.byte	0x09, 0x03, 0x00, 0, 0, 0, 0
 cmd_read_a:	.byte	0x10, 0, 2, 5, 0, 0, 2		@ MSF 00:02:05, 2 blocks
 cmd_read_a2:	.byte	0x10, 0, 2, 7, 0, 0, 2		@ MSF 00:02:07, 2 blocks
+cmd_read_a3:	.byte	0x10, 0, 2, 7, 0, 0, 1		@ MSF 00:02:07, 1 block
 cmd_read_d:	.byte	0x10, 0, 0, 151, 1, 0, 1	@ LBA 151, 1 block
 cmd_read_d2:	.byte	0x10, 0, 0, 152, 1, 0, 1	@ LBA 152, 1 block
 cmd_subq:	.byte	0x87, 0, 0, 0, 0, 0, 0
@@ -960,6 +978,7 @@ st_abort:	.byte	0x08, 0xC1
 st_flush:	.byte	0x0B, 0xC1
 @ Read Sub-Q: ctrl, track, index, 0, abs M S F, rel M S F (binary)
 st_subq_a:	.byte	0x87, 0x00, 2, 1, 0, 0, 2, 6, 0, 0, 2, 0xC1
+st_subq_a3:	.byte	0x87, 0x00, 2, 1, 0, 0, 2, 7, 0, 0, 3, 0xC1
 st_subq_d:	.byte	0x87, 0x04, 1, 1, 0, 0, 2, 1, 0, 0, 1, 0xC1
 @ raw MODE1 sector header at 00:02:01: sync, BCD MSF, mode
 raw_hdr151:	.byte	0x00, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x00, 0x00, 0x02, 0x01, 0x01

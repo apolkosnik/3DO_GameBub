@@ -59,8 +59,8 @@ module gb_host (
 	output             toc_we,           // host writes to the first 2 KiB of the disc file
 	output     [ 8: 0] toc_wa,
 	output     [31: 0] toc_wd,
-	output             sb_we,            // host writes to the sector buffer (0x4000_0000)
-	output     [ 9: 0] sb_wa,
+	output             sb_we,            // host writes to the sector ring (0x4000_0000..0x4000_7FFF)
+	output     [12: 0] sb_wa,
 	output     [31: 0] sb_wd,
 	input      [31: 0] core_cmd_words [4],  // core -> host request words (0xF000_1000)
 
@@ -249,8 +249,8 @@ module gb_host (
 	assign toc_we = host_wr_now && mem_address[31:28] == 4'h1 && mem_address[27:11] == '0 && (fst == F_IDLE);
 	assign toc_wa = mem_address[10:2];
 	assign toc_wd = mem_dataWrite;
-	assign sb_we  = host_wr_now && mem_address[31:12] == 20'h40000;
-	assign sb_wa  = mem_address[11:2];
+	assign sb_we  = host_wr_now && mem_address[31:15] == 17'h08000;   // 0x4000_0000..0x4000_7FFF
+	assign sb_wa  = mem_address[14:2];
 	assign sb_wd  = mem_dataWrite;
 
 	always @(posedge clk) begin
@@ -310,8 +310,8 @@ module gb_host (
 						mem_dataRead <= 32'h0;
 					end
 					mem_done <= 1;
-				end else if (mem_address[31:12] == 20'h40000) begin
-					// disc sector buffer (written by the firmware's DISC_READ;
+				end else if (mem_address[31:15] == 17'h08000) begin
+					// disc sector ring (written by the firmware's DISC_READ;
 					// the data goes to cdd_emu through sb_we)
 					mem_dataRead <= 32'h0;
 					mem_done <= 1;

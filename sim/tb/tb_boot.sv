@@ -385,7 +385,7 @@ module tb_boot;
 		if (dut.cdd_dten && !cdd_dten_d) begin
 			sectors_sent++;
 			if (sectors_sent <= 40 || sectors_sent % 100 == 0)
-				$display("[%0t] CD sector %0d (%s %0d)", $realtime, sectors_sent, dut.cdd.disc_stream ? "abs lba" : "lba", dut.cdd.disc_stream ? dut.cdd.q_lba : 32'(dut.cdd.fetch_lba_sys));
+				$display("[%0t] CD sector %0d (%s %0d)", $realtime, sectors_sent, dut.cdd.disc_stream ? "abs lba" : "lba", dut.cdd.disc_stream ? dut.cdd.snd_lba : 32'(dut.cdd.fetch_lba_sys));
 		end
 		if (!dut.cdd_dien && cdd_dien_d)
 			$display("[%0t] CD disc-info block sent (id %08h, lead-out MSF %06h)", $realtime, dut.cdd.disc_id, dut.cdd.disc_msf[31:8]);

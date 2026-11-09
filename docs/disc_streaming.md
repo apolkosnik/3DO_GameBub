@@ -55,13 +55,18 @@ core runs.
   a TOC (streaming); anything else is an ISO image loaded into SDRAM (stock firmware, at
   most 22 MiB). A TOC is only used if its track count is 1–99 and matches its BCD copy,
   because stock firmware would deliver a `.cue` as plain text.
-- **Sector reads.** `cdd_emu.sv` issues `DISC_READ` for the sector the 3DO's drive
-  controller asks for. The destination is a block-RAM sector buffer mapped at host address
-  `0x4000_0000`, so the transfer never touches the SDRAM and the 3DO is not paused for it.
-  With the default block length (2048 bytes), the core hands bytes 16–2063 (the MODE1 user
-  data) to the controller, as MiSTer's HPS does. The request goes out when the drive's
-  sector time starts, so the firmware's latency overlaps it. A failed or unanswered
-  request (about 5 s timeout) reads as an empty sector.
+- **Sector reads.** `cdd_emu.sv` issues `DISC_READ` requests into a read-ahead ring of
+  13 raw sectors in block RAM, mapped at host addresses `0x4000_0000`–`0x4000_7FFF`
+  (slot s at `0x4000_0000 + 2352 s`). The transfer never touches the SDRAM, and the 3DO
+  is not paused for it. The requests go one at a time, back to back: up to the end of
+  the READ the drive controller sent, and while audio plays, as far ahead as the ring
+  has room (13 sectors, 173 ms at 1x). A slow answer (an SD read, a file opened at a
+  track boundary) then overlaps playback instead of delaying a sector. A READ of a sector
+  that is not next in the ring (a seek) restarts the ring there; its first request goes
+  out at once, so the firmware's latency overlaps the drive's seek time. With the
+  default block length (2048 bytes), the core hands bytes 16–2063 (the MODE1 user data)
+  to the controller, as MiSTer's HPS does. A failed or unanswered request (about 5 s
+  timeout) reads as an empty sector.
 - **CD-DA and raw sectors.** The 3DO has no analog CD audio path: its audio CD player
   reads CD-DA sectors through the drive's data port and plays them on the DSP. The drive
   commands this takes (`3DO_CDROM.sv`, as SataTo3DO's drive emulation implements them):
@@ -80,10 +85,15 @@ core runs.
 
   Each sector's track and audio flag come from the TOC. Audio sectors arrive at the
   drive's real rate, 75 per second (150 at double speed, exactly 50 MHz / 75 with the
-  fraction spread over three sectors). Each one is timed from the one before it, so the
-  3DO's own time to read a block does not slow playback down. Data sectors keep the CD
-  speed setting. A preloaded ISO has no audio. In a longer block it gives its 2048 bytes
-  and then zeros.
+  fraction spread over three sectors), as a real drive streams them: a sector clock
+  runs at that rate and each audio sector takes one of its ticks. The player reads 8
+  blocks per READ. A READ of the sector after the last one keeps the clock, so neither
+  the time between two READs nor the 3DO's time to read a block slows playback down.
+  Up to 8 ticks are kept, like a drive's read-ahead, so a sector the firmware sends late
+  is made up by the next ones. A READ elsewhere (a seek) restarts the clock: its first
+  sector comes one sector time later, or, if later, when it has arrived: the clock
+  waits for it. Data sectors keep the CD speed setting. A preloaded ISO has no audio.
+  In a longer block it gives its 2048 bytes and then zeros.
 - **Disc-info block.** Built from the TOC: tracks, audio flags, and lead-out converted
   from BCD to binary MSF, as the MiSTer core expects.
 - **Disc swap.** A TOC arriving while the core runs resends the disc-info block, which
@@ -103,12 +113,15 @@ sync, header, data, EDC, P/Q ECC) and `image.cue` for the fork's firmware.
   through it:
   - read capacity and a two-sector read (test 7);
   - disc info and TOC (test 14);
-  - two 2352-byte CD-DA blocks, a raw data sector, and two 2448-byte CD-DA blocks at
-    double speed;
+  - two 2352-byte CD-DA blocks, then a third through a new READ that continues the
+    stream, a raw data sector, and two 2448-byte CD-DA blocks at double speed;
   - Read Sub-Q on both tracks, then Abort and Flush.
 
   Every byte the CPU reads and every status is checked. So is the spacing of CD-DA
-  sectors (one sector time at 1x and at 2x, to within 15 ns).
+  sectors: one sector time at 1x and at 2x, to within 15 ns, also across the READ
+  that continues the stream. The firmware model answers the request for that READ's
+  sector 20 ms late (`+disc_spike_us`), and the sector still comes on time from the
+  read-ahead. Every request must go to a slot of the ring.
 - `tb_boot +disc_bin=<image.bin>`: boots a real BIOS while streaming a real disc image.
   The real Wolfenstein 3D image (133 MB) streams through the same path.
   `+audio_tracks=<n> [+data_sectors=<k>]` describes the image as a data track of k sectors

@@ -193,6 +193,15 @@ module tb_top;
 	bit stream_mode;
 	int sectors_served = 0;
 	int disc_latency_us = 300;
+	// A firmware hiccup (a slow SD read, a file opened at a track boundary):
+	// the requests for the 4th audio sector (abs LBA 157) are answered
+	// disc_spike_us late. The first is the core's read-ahead for the READ
+	// that continues the stream: the sector must still come exactly one
+	// sector time after the previous one. The second is for the READ at 2x,
+	// a seek: its sector comes late, and the next one exactly one sector
+	// time after it (the clock waits; no burst).
+	int disc_spike_us = 20000;
+	int disc_spikes = 0;
 
 	function automatic [7:0] bcd(input int x); return 8'(((x / 10) << 4) | (x % 10)); endfunction
 	function automatic [31:0] msf_bcd(input int lba);
@@ -275,20 +284,33 @@ module tb_top;
 
 	// CD-DA pacing: audio sectors must reach the controller at the drive's
 	// rate, 75 per second at single speed and 150 at double speed, timed
-	// from one to the next (test 14 reads two pairs: 1x, then 2x). The
-	// first sector after a READ comes one sector time after it.
-	// The sector after a NEXT that came within one sector time of the
-	// previous one must come exactly one sector time after it; after a later
-	// NEXT (the CPU took longer to read the block), as soon as the firmware
-	// has answered.
+	// from one to the next (test 14 reads at 1x a pair and then, with a new
+	// READ that continues the stream, one more; then a pair at 2x). The
+	// first sector after a READ elsewhere (a seek) comes one sector time
+	// after it. A READ of the sector after the last audio one continues the
+	// stream, as a NEXT does: the sector asked for (by a NEXT or such a
+	// READ) within one sector time of the previous one must come exactly
+	// one sector time after it, so the time between two READs does not slow
+	// playback down; asked for later (the CPU took longer to read the
+	// block), as soon as the firmware has answered.
 	realtime audio_last = -1s, read_cmd_t = -1s, next_cmd_t = -1s;
+	int      audio_last_lba = -1;
 	int      audio_secs = 0, audio_gaps_1x = 0, audio_gaps_2x = 0;
 	reg      dten_d = 0;
 	always @(posedge clk_sys) begin
 		dten_d <= dut.cdd_dten;
-		if (dut.cdd.cmd_new && dut.cdd.comm[0] == 8'h10) begin read_cmd_t = $realtime; audio_last = -1s; end
+		if (dut.cdd.cmd_new && dut.cdd.comm[0] == 8'h10) begin
+			int l;   // absolute LBA, as cdd_emu.sv decodes the READ
+			l = dut.cdd.comm[4] != 0 ? {dut.cdd.comm[1], dut.cdd.comm[2], dut.cdd.comm[3]}
+			                         : dut.cdd.comm[1] * 4500 + dut.cdd.comm[2] * 75 + dut.cdd.comm[3];
+			read_cmd_t = $realtime;
+			if (audio_last >= 0 && l == audio_last_lba + 1) begin
+				next_cmd_t = $realtime;
+				$display("[%0t] CD-DA: READ of abs LBA %0d continues the stream", $realtime, l);
+			end else audio_last = -1s;
+		end
 		if (dut.cdd.cmd_new && dut.cdd.comm[0] == 8'h20) next_cmd_t = $realtime;
-		if (dut.cdd_dten && !dten_d && dut.cdd.disc_stream && is_audio(int'(dut.cdd.q_lba))) begin
+		if (dut.cdd_dten && !dten_d && dut.cdd.disc_stream && is_audio(int'(dut.cdd.snd_lba))) begin
 			realtime g, per;
 			per = dut.cdrom.CDD_SPEED2X ? 1s / 150 : 1s / 75;
 			audio_secs++;
@@ -296,24 +318,25 @@ module tb_top;
 				realtime nx;
 				g = $realtime - audio_last;
 				nx = next_cmd_t - audio_last;
-				$display("[%0t] CD-DA sector abs LBA %0d (%0d bytes): %0.4f ms after the previous one (%0dx), NEXT after %0.4f ms", $realtime,
-				         dut.cdd.q_lba, dut.cdrom.CDD_BLK_LEN, g / 1ms, dut.cdrom.CDD_SPEED2X ? 2 : 1, nx / 1ms);
+				$display("[%0t] CD-DA sector abs LBA %0d (%0d bytes): %0.4f ms after the previous one (%0dx), asked for (NEXT or READ) after %0.4f ms", $realtime,
+				         dut.cdd.snd_lba, dut.cdrom.CDD_BLK_LEN, g / 1ms, dut.cdrom.CDD_SPEED2X ? 2 : 1, nx / 1ms);
 				if (nx + disc_latency_us * 1us + 100us < per) begin
 					// one sector time to the clock (50 MHz: the fraction is spread over three sectors)
 					if (g < per - 15ns || g > per + 15ns) fail($sformatf("CD-DA sector %0.4f ms after the previous one, expected %0.4f", g / 1ms, per / 1ms));
 					if (dut.cdrom.CDD_SPEED2X) audio_gaps_2x++; else audio_gaps_1x++;
 				end else begin
 					if (g < per - 30ns) fail($sformatf("CD-DA sector %0.4f ms after the previous one, sooner than %0.4f", g / 1ms, per / 1ms));
-					if (g > nx + disc_latency_us * 1us + 1ms) fail($sformatf("CD-DA sector %0.4f ms after its NEXT", (g - nx) / 1ms));
+					if (g > nx + disc_latency_us * 1us + 1ms) fail($sformatf("CD-DA sector %0.4f ms after its NEXT or READ", (g - nx) / 1ms));
 					$display("tb_top: the CPU read the block in more than a sector time: exact pacing not checked for this sector");
 				end
 			end else begin
 				g = $realtime - read_cmd_t;
 				$display("[%0t] CD-DA sector abs LBA %0d (%0d bytes): %0.4f ms after the READ", $realtime,
-				         dut.cdd.q_lba, dut.cdrom.CDD_BLK_LEN, g / 1ms);
+				         dut.cdd.snd_lba, dut.cdrom.CDD_BLK_LEN, g / 1ms);
 				if (g < per - 30ns) fail($sformatf("first CD-DA sector %0.4f ms after the READ, expected at least %0.4f", g / 1ms, per / 1ms));
 			end
 			audio_last = $realtime;
+			audio_last_lba = int'(dut.cdd.snd_lba);
 		end
 	end
 
@@ -323,6 +346,13 @@ module tb_top;
 		if (stream_mode && c_req && !c_done && !c_err) begin
 			for (int i = 0; i < 4; i++) host_rd(32'hF000_1000 + 4 * i, w[i]);
 			#(disc_latency_us * 1us);
+			if (disc_spikes < 2 && int'(w[2]) == 150 + iso_len / 2048 + 3) begin
+				disc_spikes++;
+				$display("[%0t] firmware model: abs LBA %0d answered %0d us late", $realtime, w[2], disc_spike_us);
+				#(disc_spike_us * 1us);
+			end
+			if (w[3] < 32'h4000_0000 || w[3] > 32'h4000_7FFF - 2352 + 1 || (w[3] - 32'h4000_0000) % 2352 != 0)
+				fail($sformatf("core request: destination %08h is not a sector slot", w[3]));
 			if (w[0] != 32'h0400 || w[1] != 0) begin
 				fail($sformatf("unexpected core request %08h %08h", w[0], w[1]));
 				c_err <= 1;
@@ -468,6 +498,7 @@ module tb_top;
 		host_be = $test$plusargs("be");
 		stream_mode = $test$plusargs("stream");
 		void'($value$plusargs("disc_latency_us=%d", disc_latency_us));
+		void'($value$plusargs("disc_spike_us=%d", disc_spike_us));
 		if (stream_mode && host_be) $fatal(1, "tb_top: +stream uses little-endian host words");
 
 		fd = $fopen(romfile, "rb");
@@ -558,9 +589,9 @@ module tb_top;
 			// tests 1-8, test 9 (SPORT write masks): 3 regions x (13 checks of a
 			// row), test 10 (CLIO timers and interrupt summary): 10, test 11
 			// (matrix engine): 3
-			// test 7's final status: 1; test 14: 22 checks with the streamed
+			// test 7's final status: 1; test 14: 25 checks with the streamed
 			// disc (audio track), 1 with a preloaded ISO (disc info only)
-			if (checks != 64*4 + 1 + 64*5 + 2 + 16 + 1 + 2 + 4 + 1 + (stream_mode ? 22 : 1) + 3 * 13 * 512 + 10 + 3 + 64 + 16)
+			if (checks != 64*4 + 1 + 64*5 + 2 + 16 + 1 + 2 + 4 + 1 + (stream_mode ? 25 : 1) + 3 * 13 * 512 + 10 + 3 + 64 + 16)
 				fail($sformatf("unexpected number of checks %0d", checks));
 			for (int i = 0; i < 16; i++)
 				if (nvram[8'h80 + i] != 8'(8'hA5 + 8'h13 * i)) fail($sformatf("NVRAM byte %02h = %02h", 8'h80 + i, nvram[8'h80 + i]));
@@ -577,8 +608,10 @@ module tb_top;
 		if (stream_mode) begin
 			$display("tb_top: %0d disc sectors served by the firmware model", sectors_served);
 			if (sectors_served < 3) fail("streaming mode: the core did not request the sectors");
+			if (disc_spikes != 2) fail($sformatf("streaming mode: %0d requests for the 4th audio sector answered late, expected 2", disc_spikes));
 			$display("tb_top: %0d CD-DA sectors, %0d gaps checked at 1x, %0d at 2x", audio_secs, audio_gaps_1x, audio_gaps_2x);
-			if (audio_secs != 4 || audio_gaps_1x != 1 || audio_gaps_2x != 1) fail("CD-DA: expected 4 audio sectors in two pairs (1x, 2x)");
+			if (audio_secs != 5 || audio_gaps_1x != 2 || audio_gaps_2x != 1)
+				fail("CD-DA: expected 5 audio sectors, 2 gaps at 1x (the second across a READ that continues the stream), 1 at 2x");
 		end
 		// test ROM test 4 writes VRAM 0x2A0400 (block A: in the SRAM unless it is off)
 		if (sram_mode != 2 && sram.writes == 0) fail("no VRAM write reached the SRAM");

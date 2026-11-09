@@ -21,8 +21,22 @@
 // 16..), a shorter raw block ends with the sector (2340: bytes 12..), 2352 is
 // the whole sector, and the 2353/2448/2449-byte formats (error flags,
 // subcode) end in zeros. Audio sectors come at the drive's real rate, 75 per
-// second (150 at double speed), timed from one sector to the next so that the
-// time the 3DO takes to read a block does not slow playback down. The track
+// second (150 at double speed), as a real drive streams them: a sector clock
+// runs at that rate and each audio sector takes one of its ticks. A READ that
+// continues the stream (the player reads 8 blocks at a time) keeps the clock,
+// so neither the time between two READs nor the 3DO's time to read a block
+// slows playback down, and up to 8 ticks are kept, so a sector the firmware
+// sends late is made up by the next ones. A READ elsewhere (a seek) restarts
+// the clock: its first sector comes one sector time later (or, if later, when
+// it has arrived: the clock waits for it).
+//
+// Read-ahead (streaming): sectors come from a ring of 13 raw sectors in block
+// RAM, which DISC_READ requests fill one at a time, back to back: to the end
+// of the READ, and while audio streams, as far ahead as the ring has room
+// (173 ms at 1x). The firmware's latency (an SD read, a file opened at a
+// track boundary) then overlaps playback instead of delaying a sector. A READ
+// of a sector that is not next in the ring (a seek) restarts it there. The
+// track
 // table taken from the TOC gives each sector's track, index and audio flag,
 // and the Sub-Q position the controller reports (Read Sub-Q, 87).
 //
@@ -52,7 +66,7 @@ module cdd_emu (
 	input      [ 8: 0] toc_wa,
 	input      [31: 0] toc_wd,
 	input              sb_we,
-	input      [ 9: 0] sb_wa,
+	input      [12: 0] sb_wa,            // word in the sector ring (0x4000_0000..0x4000_7FFF)
 	input      [31: 0] sb_wd,
 	output     [31: 0] core_cmd_words [4],
 	output reg         core_req,         // HostV0 commandCore
@@ -195,16 +209,36 @@ module cdd_emu (
 	reg [14:0] disc_sectors;
 	reg [ 1:0] rd_phase;         // 3-cycle cadence: set address, BRAM latency, use data
 	reg        zero_sector;
-	reg        q_got;            // streaming: the requested sector has arrived
 	reg        str_cancel;       // streaming: a new command came while waiting
 	reg        sec_audio;        // the sector being read is CD-DA
 	reg [10:0] sec_words;        // words in the block being sent
 	reg [11:0] sec_off;          // raw sector byte of its first word
 	reg [11:0] sec_b;            // raw sector byte of the word being sent
-	// Audio sector pacing: clocks until the next audio sector may go, at
-	// 50 MHz / 75 (or / 150) with the fraction spread over three sectors
+	// Audio sector clock: clocks until its next tick, at 50 MHz / 75 (or /
+	// 150) with the fraction spread over three ticks; acredit counts the
+	// ticks not yet taken by a sector (at most ACREDIT_MAX); astream: the
+	// last sector sent was audio, so a READ of the next sector continues
+	// the stream
+	localparam bit [3:0] ACREDIT_MAX = 4'd8;
 	reg [19:0] apace;
 	reg [ 1:0] apace_ph;
+	reg [ 3:0] acredit;
+	reg        astream;
+	// Read-ahead ring (streaming): rb_cnt sectors from absolute LBA rb_lba,
+	// in slots rb_head, rb_head + 1, ... (mod RB_SLOTS). One DISC_READ at a
+	// time (pf_busy) fills the next slot (pf_slot); pf_discard: a flush made
+	// the one in flight stale. Sectors are fetched up to pf_end (the end of
+	// the READ), and, while audio streams, as far ahead as the ring has room.
+	reg        rb_on;
+	reg [23:0] rb_lba;
+	reg [ 3:0] rb_head, rb_cnt;
+	reg [15:0] rb_fail;          // slot s: its DISC_READ failed (reads as zeros)
+	reg        pf_busy, pf_discard;
+	reg [ 3:0] pf_slot;
+	reg [23:0] pf_end;
+	reg [12:0] rd_base;          // first word of the slot being sent
+	reg [23:0] snd_lba;          // absolute LBA of the sector being sent
+	wire        a_tick_ok = astream || rb_cnt != 0;
 	wire [19:0] apace_period = speed2x ? ((apace_ph == 2'd2) ? 20'd333_334 : 20'd333_333)
 	                                   : ((apace_ph == 2'd2) ? 20'd666_666 : 20'd666_667);
 
@@ -212,7 +246,11 @@ module cdd_emu (
 	// Streaming mode: table of contents, sector buffer, DISC_READ requests
 	// ------------------------------------------------------------------
 	localparam [31:0] CMD_DISC_READ   = 32'h0000_0400;
-	localparam [31:0] SECTOR_BUF_ADDR = 32'h4000_0000;   // host address of sbr
+	localparam [31:0] SECTOR_BUF_ADDR = 32'h4000_0000;   // host address of sbr, slot 0
+	// Read-ahead: RB_SLOTS raw sectors, slot s at word 588 s of sbr (host
+	// address SECTOR_BUF_ADDR + 2352 s)
+	localparam int    RB_SLOTS = 13;
+	localparam [9:0]  SLOT_WORDS = 10'd588;
 
 	// Table of contents (fork firmware DiscImage::toc, little-endian words):
 	//   0: track count (7:0); 1: lead-out LBA; 2: lead-out position BCD 00MMSSFF
@@ -316,10 +354,10 @@ module cdd_emu (
 		endcase
 	end
 
-	// Raw sector buffer (588 words used), written by the host
-	(* ram_style = "block" *) reg [31:0] sbr [0:1023];
+	// Raw sector ring (RB_SLOTS x 588 words), written by the host
+	(* ram_style = "block" *) reg [31:0] sbr [0:8191];
 	reg [31:0] sbr_q;
-	reg [ 9:0] sbr_ra;
+	reg [12:0] sbr_ra;
 	always @(posedge clk_sys) begin
 		if (sb_we) sbr[sb_wa] <= sb_wd;
 		sbr_q <= sbr[sbr_ra];
@@ -328,6 +366,10 @@ module cdd_emu (
 	// (raw bytes 16.., little-endian host words as the fork firmware sends)
 	function automatic [9:0] user_addr(input [9:0] k);
 		user_addr = 10'd4 + {1'b0, k[9:1]};
+	endfunction
+	// first word of a ring slot
+	function automatic [12:0] slot_base(input [3:0] slot);
+		slot_base = 13'(slot) * 13'(SLOT_WORDS);
 	endfunction
 	function automatic [15:0] user_word(input [31:0] q, input bit hi);
 		user_word = hi ? q[31:16] : q[15:0];
@@ -349,10 +391,11 @@ module cdd_emu (
 	reg        q_finished;       // pulse: answered (q_failed says how)
 	reg        q_failed;
 	reg [27:0] q_timer;
+	reg [31:0] q_addr;           // host address of the slot it fills
 	assign core_cmd_words[0] = CMD_DISC_READ;
 	assign core_cmd_words[1] = 32'd0;            // disc file id
 	assign core_cmd_words[2] = q_lba;            // absolute LBA (track 1 at 150)
-	assign core_cmd_words[3] = SECTOR_BUF_ADDR;
+	assign core_cmd_words[3] = q_addr;
 
 	always @(posedge clk_sys) begin
 		q_finished <= 0;
@@ -454,17 +497,37 @@ module cdd_emu (
 	endfunction
 
 	always @(posedge clk_sys) begin
+		bit a_send, a_seek, r_flush, r_pop;
+		bit [23:0] r_flush_lba;
+		a_send = 0;
+		a_seek = 0;
+		r_flush = 0;
+		r_pop = 0;
+		r_flush_lba = '0;
 		dtgl_s <= {dtgl_s[1:0], done_tgl_mem};
 		CDD_WR <= 0;
 		cmd_new <= 0;
 
 		q_start <= 0;
 		pl_start <= 0;
+		// the sector clock ticks at apace == 0; the first tick after a seek
+		// waits for the sector to be in the ring
 		if (apace != 0) apace <= apace - 1'd1;
+		else if (a_tick_ok) begin
+			apace    <= apace_period - 20'd1;
+			apace_ph <= (apace_ph == 2'd2) ? 2'd0 : apace_ph + 1'd1;
+		end
 		if (rst_sys) begin
 			cst          <= C_IDLE;
 			apace        <= '0;
 			apace_ph     <= '0;
+			acredit      <= '0;
+			astream      <= 0;
+			rb_on        <= 0;
+			rb_head      <= '0;
+			rb_cnt       <= '0;
+			pf_busy      <= 0;
+			pf_discard   <= 0;
 			CDD_DTEN     <= 0;
 			CDD_DIEN     <= 0;
 			read_pend    <= 0;
@@ -501,7 +564,8 @@ module cdd_emu (
 						cur_lba     <= l - 24'd150;
 						blocks_left <= {comm[5], comm[6]};
 						read_pend   <= 1;
-						apace       <= apace_period - 20'd1;   // a seek: the first sector after one sector time
+						// a seek: the first sector after one sector time
+						if (!astream || l - 24'd150 != cur_lba) a_seek = 1;
 					end
 					8'h20: begin // NEXT
 						if (blocks_left != 0) read_pend <= 1;
@@ -514,8 +578,9 @@ module cdd_emu (
 				C_IDLE: begin
 					if (disc_present && !info_sent && (!disc_stream || toc_valid)) begin
 						if (disc_stream) begin
-							q_lba   <= 32'd150;          // sector 0 of track 1
-							q_start <= 1;
+							r_flush     = 1;              // sector 0 of track 1
+							r_flush_lba = 24'd150;
+							pf_end     <= 24'd151;
 						end else begin
 							fetch_lba_sys <= '0;
 							fetch_tgl_sys <= ~fetch_tgl_sys;
@@ -528,15 +593,19 @@ module cdd_emu (
 						sec_off   <= (blk_len == 12'd2048) ? 12'd16 :
 						             (blk_len >= 12'd2352) ? 12'd0  : ((12'd2352 - blk_len) & 12'hFFE);
 						if (disc_stream) begin
-							// the sector's track first (audio or data), then the
-							// request, so the firmware's latency overlaps the
-							// drive's sector time
+							// the sector's track (audio or data); the sector comes
+							// from the ring. Not there (a seek): the ring restarts
+							// at it, so the firmware's latency overlaps the drive's
+							// seek time. The ring reads ahead to the end of the READ.
 							bit [23:0] l;
-							l = cur_lba[23] ? 24'd0 : cur_lba;  // pregap reads sector 0 (3docdd.cpp)
-							q_lba      <= {8'd0, l} + 32'd150;   // absolute LBA
-							pl_lba     <= l + 24'd150;
+							l = (cur_lba[23] ? 24'd0 : cur_lba) + 24'd150;  // pregap reads sector 0 (3docdd.cpp)
+							if (!rb_on || rb_lba != l) begin
+								r_flush     = 1;
+								r_flush_lba = l;
+							end
+							pf_end     <= l + ((blocks_left == 0) ? 24'd1 : 24'(blocks_left));
+							pl_lba     <= l;
 							pl_start   <= 1;
-							q_got      <= 0;
 							str_cancel <= 0;
 							read_pend  <= 0;
 							cst <= C_STR_POS;
@@ -547,11 +616,12 @@ module cdd_emu (
 				end
 
 				// ---- disc-info block ----
-				C_INFO_WAIT: if (disc_stream ? q_finished : fetch_done) begin
+				C_INFO_WAIT: if (disc_stream ? rb_cnt != 0 : fetch_done) begin
 					// MiSTer hack-table key and MSF, as 3DO.sv extracts them
 					disc_msf <= disc_stream ? {bcd2bin(toc_leadout_bcd[23:16]), bcd2bin(toc_leadout_bcd[15:8]),
 					                           bcd2bin(toc_leadout_bcd[7:0]), 8'h00} : {leadout_msf, 8'h00};
-					zero_sector <= disc_stream && q_failed;
+					zero_sector <= disc_stream && rb_fail[rb_head];
+					rd_base  <= slot_base(rb_head);
 					CDD_DIEN <= 1;
 					widx     <= '0;
 					sbuf_ra  <= 10'd0;
@@ -564,7 +634,7 @@ module cdd_emu (
 					rd_phase <= (rd_phase == 2'd2) ? 2'd0 : rd_phase + 1'd1;
 					if (rd_phase == 2'd0) begin
 						sbuf_ra <= (widx >= 11'h200 && widx < 11'h240) ? cdda(10'(widx - 11'h200), host_le) : 10'd0;
-						sbr_ra  <= user_addr(10'(widx - 11'h200));
+						sbr_ra  <= rd_base + 13'(user_addr(10'(widx - 11'h200)));
 						// TOC word of the track entry this info word belongs to
 						toc_ra  <= (8'(widx[9:3]) - 8'd1 >= toc_tracks) ? 9'd2 : 9'(7 + 4 * (widx[9:3] - 1));
 					end else if (rd_phase == 2'd2) begin
@@ -610,15 +680,15 @@ module cdd_emu (
 					end
 				end
 
-				// streaming: sector time and the firmware's answer, whichever
+				// streaming: sector time and the sector in the ring, whichever
 				// comes last. A command in between (a new READ, a stop) drops
-				// the sector, as MiSTer's next poll would.
+				// the send, as MiSTer's next poll would (the sector stays in
+				// the ring).
 				C_STR_POS: begin
 					if (delay_cnt) delay_cnt <= delay_cnt - 1'd1;
 					if (cmd_new && comm[0] != 8'h00) str_cancel <= 1;
 					if (pl_done) begin
 						sec_audio <= pl_audio;
-						q_start   <= 1;
 						cst <= C_STR_WAIT;
 					end
 				end
@@ -626,19 +696,16 @@ module cdd_emu (
 				C_STR_WAIT: begin
 					if (delay_cnt) delay_cnt <= delay_cnt - 1'd1;
 					if (cmd_new && comm[0] != 8'h00) str_cancel <= 1;
-					if (q_finished) begin
-						q_got       <= 1;
-						zero_sector <= q_failed;              // a failed read reads as zeros
-					end
-					// data: the drive's sector time from the request; audio: the
-					// real-time rate from the previous audio sector
-					if (q_got && (sec_audio ? apace == 0 : delay_cnt == 0)) begin
+					// data: the drive's sector time from the NEXT or READ; audio:
+					// a tick of the sector clock
+					if (rb_cnt != 0 && (sec_audio ? acredit != 0 : delay_cnt == 0)) begin
 						if (str_cancel || disc_change) cst <= C_IDLE;
 						else begin
-							if (sec_audio) begin
-								apace    <= apace_period - 20'd1;   // zero after the period: the next sector's cycle
-								apace_ph <= (apace_ph == 2'd2) ? 2'd0 : apace_ph + 1'd1;
-							end
+							a_send = sec_audio;
+							astream  <= sec_audio;
+							zero_sector <= rb_fail[rb_head];      // a failed read reads as zeros
+							rd_base  <= slot_base(rb_head);
+							snd_lba  <= rb_lba;
 							CDD_DTEN <= 1;
 							widx     <= '0;
 							crc      <= '0;
@@ -664,7 +731,7 @@ module cdd_emu (
 						b = raw_byte_addr(sec_off, widx);
 						sec_b   <= b;
 						sbuf_ra <= cdda(widx[9:0], host_le);
-						sbr_ra  <= b[11:2];
+						sbr_ra  <= rd_base + 13'(b[11:2]);
 					end else if (rd_phase == 2'd2) begin
 						bit [15:0] w;
 						// streaming: the raw sector; preloaded ISO: its 2048 bytes
@@ -690,6 +757,7 @@ module cdd_emu (
 				end
 
 				C_SEC_END: begin
+					if (disc_stream) r_pop = 1;           // the sector leaves the ring
 					CDD_DTEN    <= 0;
 					cur_lba     <= cur_lba + 1'd1;
 					blocks_left <= blocks_left - 1'd1;
@@ -698,6 +766,55 @@ module cdd_emu (
 
 				default: cst <= C_IDLE;
 			endcase
+
+			// the audio sector clock: a tick adds a credit, a sector takes one.
+			// After a seek it waits at its first tick until the sector is in
+			// the ring, so a sector the seek delayed does not let the next
+			// ones through at once.
+			if (a_seek) begin
+				apace    <= apace_period - 20'd1;
+				apace_ph <= '0;
+				acredit  <= '0;
+				astream  <= 0;
+			end else
+				acredit <= acredit + 4'(apace == 0 && a_tick_ok && acredit != ACREDIT_MAX) - 4'(a_send);
+
+			// the read-ahead ring: a flush restarts it at r_flush_lba (a
+			// DISC_READ in flight is then dropped when it is answered); an
+			// answer fills a slot, a sent sector frees one; the next sector is
+			// requested when the last request was answered
+			begin
+				bit fill;
+				fill = q_finished && pf_busy && !pf_discard;
+				if (q_finished) begin
+					pf_busy    <= 0;
+					pf_discard <= 0;
+				end
+				if (fill) rb_fail[pf_slot] <= q_failed;
+				if (r_flush || disc_change) begin
+					rb_on  <= r_flush;           // a disc change alone stops it
+					rb_lba <= r_flush_lba;
+					rb_cnt <= '0;
+					if (pf_busy && !q_finished) pf_discard <= 1;
+				end else begin
+					if (r_pop) begin
+						rb_head <= (rb_head == 4'(RB_SLOTS - 1)) ? 4'd0 : rb_head + 4'd1;
+						rb_lba  <= rb_lba + 24'd1;
+					end
+					rb_cnt <= rb_cnt + 4'(fill) - 4'(r_pop);
+					if (disc_stream && rb_on && !pf_busy && !r_pop && rb_cnt < 4'(RB_SLOTS) &&
+					    (rb_lba + 24'(rb_cnt) < pf_end || astream)) begin
+						bit [4:0] sl;
+						sl = 5'(rb_head) + 5'(rb_cnt);
+						if (sl >= 5'(RB_SLOTS)) sl = sl - 5'(RB_SLOTS);
+						pf_slot <= sl[3:0];
+						q_lba   <= {8'd0, rb_lba + 24'(rb_cnt)};
+						q_addr  <= SECTOR_BUF_ADDR + 32'(sl) * 32'd2352;
+						q_start <= 1;
+						pf_busy <= 1;
+					end
+				end
+			end
 		end
 	end
 endmodule

@@ -126,7 +126,7 @@ module p3do_gamebub #(
 	wire        disc_stream, disc_change;
 	wire        toc_we, sb_we;
 	wire [ 8:0] toc_wa;
-	wire [ 9:0] sb_wa;
+	wire [12:0] sb_wa;
 	wire [31:0] toc_wd, sb_wd;
 	wire [31:0] core_cmd_words [4];
 	wire        nvram_wr;

@@ -27,6 +27,12 @@ package gb3do_pkg;
 	localparam int ISO_MAX_BYTES   = ISO_MAX_ROWS * 1024;     // 23,068,672
 	localparam int ISO_MAX_SECTORS = ISO_MAX_ROWS / 2;        // 11,264
 
+	// The 512 KiB arcade boot ROM occupies the same 1 MiB CPU window as
+	// console ROMs. Kanji ROM bank selection keeps its full address range.
+	function automatic [19:2] boot_rom_addr(input [19:2] a, input short_bios, input kanji);
+		boot_rom_addr = {a[19] & ~(short_bios & ~kanji), a[18:2]};
+	endfunction
+
 	// SDRAM word address {bank, row, col} of a bank-2 DDR byte offset.
 	function automatic [23:0] ddr_word_addr(input [22:0] byte_off);
 		ddr_word_addr = {2'd2, byte_off[22:1]};

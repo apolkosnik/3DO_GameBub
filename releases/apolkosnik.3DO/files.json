@@ -23,7 +23,7 @@
 			"optional": false,
 			"read_only": true,
 			"address": "0x20000000",
-			"exact_size": "0x100000"
+			"max_size": "0x100000"
 		},
 		{
 			"id": 2,

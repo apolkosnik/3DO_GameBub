@@ -46,6 +46,7 @@ module gb_host (
 	output reg         disc_present,
 	output reg [24: 0] disc_bytes,
 	output reg         bios_loaded,
+	output reg         bios_512k,         // 512 KiB boot ROM: mirror in its 1 MiB window
 	output reg         kanji_loaded,
 	output reg [ 1: 0] cd_speed,
 	output reg [ 1: 0] region_sel,       // 0 by BIOS, 1 NTSC, 2 PAL
@@ -208,10 +209,13 @@ module gb_host (
 	reg         nvram_dirty;
 	reg  [31:0] bios_sum_le, bios_sum_be;
 
-	// MiSTer's 3DO.sv recognises PAL BIOSes by the sum of the file's 16-bit
-	// little-endian words: Panasonic FZ-1 (E) and its unencrypted dump.
+	// European BIOSes in metadata/bios_catalog.json, identified by the sum
+	// of their 16-bit little-endian words. Other BIOSes retain the NTSC default.
 	function automatic bit pal_sum(input [31:0] cs);
-		pal_sum = (cs == 32'hD63EC5E9) || (cs == 32'hD5CFD1C5);
+		pal_sum = (cs == 32'hD63EC5E9) || // panafz1e.bin
+		          (cs == 32'hD5CFD1C5) || // panafz1e-unencrypted.bin
+		          (cs == 32'hD439B8FE) || // panafz10e-anvil.bin
+		          (cs == 32'hD439B6FE);   // panafz10e-anvil-norsa.bin
 	endfunction
 	assign bios_pal = bios_loaded && pal_sum(HOST_LE ? bios_sum_le : bios_sum_be);
 
@@ -270,6 +274,7 @@ module gb_host (
 			disc_present  <= 0;
 			disc_bytes    <= '0;
 			bios_loaded   <= 0;
+			bios_512k     <= 0;
 			kanji_loaded  <= 0;
 			nvram_written <= 0;
 			iso_first_seen<= 0;
@@ -425,7 +430,10 @@ module gb_host (
 						CMD_NOTIFY_FOCUS: focus <= cmd_reg[1][0];
 						CMD_FILE_WRITE_START: begin
 							cur_file <= cmd_reg[1];
-							if (cmd_reg[1] == FILE_BIOS) begin bios_sum_le <= '0; bios_sum_be <= '0; end
+							if (cmd_reg[1] == FILE_BIOS) begin
+								bios_sum_le <= '0; bios_sum_be <= '0;
+								bios_loaded <= 0; bios_512k <= 0;
+							end
 						end
 						CMD_FILE_WRITE_END: begin
 							case (cmd_reg[1])
@@ -439,7 +447,10 @@ module gb_host (
 									disc_change  <= 1;
 									disc_bytes   <= (cmd_reg[2] > ISO_MAX_BYTES) ? 25'(ISO_MAX_BYTES) : cmd_reg[2][24:0];
 								end
-								FILE_BIOS:  bios_loaded  <= 1;
+								FILE_BIOS: begin
+									bios_loaded <= 1;
+									bios_512k <= (cmd_reg[2] == 32'h80000);
+								end
 								FILE_KANJI: kanji_loaded <= 1;
 								FILE_NVRAM: begin nvram_written <= 1; nvram_dirty <= 0; end
 								default: ;

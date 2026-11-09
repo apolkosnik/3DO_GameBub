@@ -1,0 +1,30 @@
+{
+  "source": "https://3dodev.com/software/roms",
+  "region_reference": "https://github.com/libretro/opera-libretro/blob/master/libopera/opera_bios.c",
+  "notes": "Catalog identification and loading support do not imply that every BIOS has been boot-tested. Null regions use the core's NTSC default unless overridden. M2 firmware belongs to different hardware.",
+  "roms": [
+    {"filename": "panafz1.bin", "kind": "bios", "region": "NTSC", "size": 1048576, "crc32": "c8c8ff89", "md5": "f47264dd47fe30f73ab3c010015c155b"},
+    {"filename": "panafz1_dev_0.9.bin", "kind": "bios", "region": "NTSC", "size": 1048576, "crc32": "b5a5d0a8", "md5": "05435442e0b7a91a121eef6e91b112de"},
+    {"filename": "panafz1e.bin", "kind": "bios", "region": "PAL", "size": 1048576, "crc32": "a191e1aa", "md5": "ba3eda87fde9bd7f09c2b9db3dbb9887", "sum_le": "d63ec5e9"},
+    {"filename": "panafz1e-unencrypted.bin", "kind": "bios", "region": "PAL", "size": 1048576, "crc32": "d3d345df", "md5": "7d5f8489f70455e5439eb7c4d5bbf609", "sum_le": "d5cfd1c5"},
+    {"filename": "panafz1j.bin", "kind": "bios", "region": "NTSC", "size": 1048576, "crc32": "d9493adc", "md5": "a496cfdded3da562759be3561317b605"},
+    {"filename": "panafz1j-norsa.bin", "kind": "bios", "region": "NTSC", "size": 1048576, "crc32": "82ce67c6", "md5": "f6c71de7470d16abe4f71b1444883dc8"},
+    {"filename": "panafz1_dev.bin", "kind": "bios", "region": "NTSC", "size": 1048576, "crc32": "e8eba9dd", "md5": "5fa312e8b1315e840221c658dd71f7a5"},
+    {"filename": "panafz10.bin", "kind": "bios", "region": "NTSC", "size": 1048576, "crc32": "58242cee", "md5": "51f2f43ae2f3508a14d9f56597e2d3ce"},
+    {"filename": "panafz10-norsa.bin", "kind": "bios", "region": "NTSC", "size": 1048576, "crc32": "230e6feb", "md5": "1477bda80dc33731a65468c1f5bcbee9"},
+    {"filename": "panafz10j.bin", "kind": "bios", "region": "NTSC", "size": 1048576, "crc32": "07b50015", "md5": "20706f726c22d79d3c385e215d7428e2"},
+    {"filename": "panafz10e-anvil.bin", "kind": "bios", "region": "PAL", "size": 1048576, "crc32": "2495c500", "md5": "a48e6746bd7edec0f40cff078f0bb19f", "sum_le": "d439b8fe"},
+    {"filename": "panafz10e-anvil-norsa.bin", "kind": "bios", "region": "PAL", "size": 1048576, "crc32": "9a186221", "md5": "cf11bbb5a16d7af9875cca9de9a15e09", "sum_le": "d439b6fe"},
+    {"filename": "goldstar.bin", "kind": "bios", "region": "NTSC", "size": 1048576, "crc32": "b6f5028b", "md5": "8639fd5e549bd6238cfee79e3e749114"},
+    {"filename": "goldstar_fc1_enc.bin", "kind": "bios", "region": "NTSC", "size": 1048576, "crc32": "5c5b4f98", "md5": "b42a2207226a669415886007a9dbcad5"},
+    {"filename": "sanyotry.bin", "kind": "bios", "region": "NTSC", "size": 1048576, "crc32": "d5cbc509", "md5": "35fa1a1ebaaeea286dc5cd15487c13ea"},
+    {"filename": "sanyo_hc21_alpha.bin", "kind": "bios", "region": null, "size": 1048576, "crc32": "a9f2f749", "md5": "99ba550f1a284da0bea7f380b6e4b436"},
+    {"filename": "sanyo_hc21_b3_unenc.bin", "kind": "bios", "region": null, "size": 1048576, "crc32": "c4c3db01", "md5": "4ca4a976237b6c8fd3abfb393d072469"},
+    {"filename": "3do_arcade_saot.bin", "kind": "bios", "region": "NTSC", "size": 524288, "crc32": "b832da9a", "md5": "8970fc987ab89a7f64da9f8a8c4333ff"},
+    {"filename": "3do_devkit_1.0fc2.bin", "kind": "bios", "region": "NTSC", "size": 1048576, "crc32": "cdb23167", "md5": "45a010f04b1df9c072983378c318b259"},
+    {"filename": "panafz1j-kanji.bin", "kind": "kanji", "region": null, "size": 1048576, "crc32": "45f478b1", "md5": "c23fb5d5e6bb1c240d02cf968972be37"},
+    {"filename": "panafz10ja-anvil-kanji.bin", "kind": "kanji", "region": null, "size": 1048576, "crc32": "ff7393de", "md5": "428577250f43edc902ea239c50d2240d"},
+    {"filename": "fz35s.bin", "kind": "m2", "region": null, "size": 1048576, "crc32": "82a1ad83", "md5": "26a3dd1823242386691dce290b39c0aa"},
+    {"filename": "fz21s.bin", "kind": "m2", "region": null, "size": 2097152, "crc32": "64adb8a9", "md5": "2fd9333ea8254d28a7222ad5f0987f9e"}
+  ]
+}

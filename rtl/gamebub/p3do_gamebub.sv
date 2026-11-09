@@ -20,6 +20,8 @@
 // (c) srg320, GPL-3.0.
 // SPDX-License-Identifier: GPL-3.0-or-later
 
+`include "gb3do_pkg.svh"
+
 module p3do_gamebub #(
 	parameter int DISPLAY_DIVIDER = 31
 )(
@@ -85,6 +87,7 @@ module p3do_gamebub #(
 	output logic [15:0] sram_dataOut,
 	output logic        sram_dataDir
 );
+	import gb3do_pkg::boot_rom_addr;
 	/////////////////////////  CLOCKS / RESET  ///////////////////////////////
 	wire clk_mem, clk_sdram, clk_vid, clk_sys_gen;
 
@@ -116,7 +119,7 @@ module p3do_gamebub #(
 
 	/////////////////////////  HOST INTERFACE  ///////////////////////////////
 	wire        core_halt, core_reset_pulse, focus, HOST_LE;
-	wire        disc_present, bios_loaded, kanji_loaded;
+	wire        disc_present, bios_loaded, bios_512k, kanji_loaded;
 	wire [24:0] disc_bytes;
 	wire [ 1:0] cd_speed;
 	wire [ 1:0] region_sel;
@@ -158,6 +161,7 @@ module p3do_gamebub #(
 		.disc_present    (disc_present),
 		.disc_bytes      (disc_bytes),
 		.bios_loaded     (bios_loaded),
+		.bios_512k       (bios_512k),
 		.kanji_loaded    (kanji_loaded),
 		.cd_speed        (cd_speed),
 		.region_sel      (region_sel),
@@ -709,7 +713,7 @@ module p3do_gamebub #(
 		.clk(clk_mem),
 		.rst(rst_mem | reset_3do),
 		// ROM (BIOS/kanji) and NVRAM accesses from the 3DO slow bus
-		.io_addr(!SRAMW_N || !SRAMR_N ? {1'b1,6'b000000,PA[16:4]} : {1'b0,ROM_SEL,PA[19:2]}),
+		.io_addr(!SRAMW_N || !SRAMR_N ? {1'b1,6'b000000,PA[16:4]} : {1'b0,ROM_SEL,boot_rom_addr(PA[19:2],bios_512k,ROM_SEL)}),
 		.io_din ({4{PDO}}),
 		.io_we  (!SRAMW_N ? (4'h8>>PA[3:2])&{4{MCLK_CE}} : 4'b0000),
 		.io_rd  ((~ROMCS_N|~SRAMR_N)&MCLK_CE),

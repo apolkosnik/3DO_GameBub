@@ -42,11 +42,25 @@ Copy to the microSD card:
 /cores/apolkosnik.3DO/files.json
 /cores/apolkosnik.3DO/settings.json
 /cores/apolkosnik.3DO/P3DOCore-gamebub_rev4.bit
-/cores/apolkosnik.3DO/bios.bin      <- 3DO BIOS (1 MiB, e.g. panafz10.bin), required
+/cores/apolkosnik.3DO/bios.bin      <- 3DO BIOS (512 KiB or 1 MiB), required
 /cores/apolkosnik.3DO/kanji.rom     <- optional (Japanese BIOS font ROM)
 ```
 
 The JSON files are in `metadata/`.
+
+**BIOS images.** [metadata/bios_catalog.json](metadata/bios_catalog.json) lists every
+boot ROM and Kanji ROM from the [3DO Development Repo](https://3dodev.com/software/roms),
+including console, developer, prototype and arcade variants. Identify a file by its
+size, CRC32 and MD5 with `python3 tools/bios.py /path/to/rom.bin`; `--list` shows the
+catalog. The four European FZ-1/FZ-10E variants select PAL with **Region: By BIOS**.
+Other images use NTSC by default; the two Sanyo HC-21 prototype regions are unverified,
+so select their timing manually if needed. Region changes take effect after **Reset**.
+
+The 512 KiB arcade BIOS mirrors across the core's 1 MiB ROM window. For firmware that
+requires a 1 MiB file, `python3 tools/bios.py /path/to/3do_arcade_saot.bin --output bios.bin`
+prepares the mirrored image. Kanji images belong in `kanji.rom`. M2 entries are identified
+as unsupported: they require a different machine. Catalog recognition and loading do
+not mean every developer, prototype or arcade BIOS has been boot-tested on this core.
 
 **Discs.** Use the disc-streaming firmware from the
 [neutralinsomniac/gamebub](https://github.com/neutralinsomniac/gamebub/blob/psx/docs/psx.md)

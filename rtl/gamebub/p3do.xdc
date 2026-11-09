@@ -74,3 +74,22 @@ set_input_delay -clock $sram_clk_mem -max 16.0 [get_ports sram_io[*]]
 set_input_delay -clock $sram_clk_mem -min  4.0 [get_ports sram_io[*]]
 set_multicycle_path -setup 2 -from [get_ports sram_io[*]]
 set_multicycle_path -hold 1 -from [get_ports sram_io[*]]
+
+########################################
+# 3DO DRAM command, odd MCLK slots (sdram_3do.sv)
+########################################
+# The 3DO's DRAM signals (MADAM's RAS/CAS codes and addresses, write data)
+# come from clk_sys registers through up to ~16 levels of CPU and MADAM
+# logic. sdram_3do decides the commands of MCLK slots 1, 3, 5 and 7 into
+# tdm_slow (and the left page's row into lpage_row, at slot 5), which load
+# only at clk_mem edges that are clk_sys rising edges: a slot sequence starts
+# one clk_mem cycle after a sync (MADAM PH1) edge, and sync only changes at
+# clk_sys edges. The clk_sys data they take was launched one clk_sys cycle
+# (two clk_mem cycles) earlier. sim/tb/sdram_tdm_check.sv checks in tb_top and
+# tb_boot that they load at no other edge and that the commands equal the
+# single-register decision. Slots 0, 2, 4, 6 and the parked state keep one
+# clk_mem cycle (tdm_fast).
+set tdm_clk_sys [get_clocks -of_objects [get_pins -hier -filter {NAME =~ */clocks/mmcm0/CLKOUT0}]]
+set tdm_slow_cells [get_cells -hier -filter {(NAME =~ */sdram/tdm_slow_reg* || NAME =~ */sdram/lpage_row_reg*) && IS_SEQUENTIAL}]
+set_multicycle_path -setup 2 -from $tdm_clk_sys -to $tdm_slow_cells
+set_multicycle_path -hold 1 -from $tdm_clk_sys -to $tdm_slow_cells

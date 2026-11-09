@@ -243,6 +243,8 @@ module vram_rtcache #(
 	reg  [63:0] sn_data;
 	reg  [ 7:0] sn_be;
 	reg         sn_single;
+	reg  [EW-1:0] sn_e;         // entry holding sn_h when the write was issued
+	reg         sn_hit;
 	reg         sn_fw;
 	reg  [ 8:0] sn_row;
 
@@ -295,10 +297,18 @@ module vram_rtcache #(
 	// block-RAM inference on the Game Bub FPGA. ddram.sv takes no write
 	// command while a fill's read burst runs, so the two never meet; should
 	// they, the fill writes and the snooped entry is invalidated instead.
+	// The entry is looked up a cycle early, on the write command's address
+	// (sn_e/sn_hit, registered with the other snoop inputs), so the block
+	// RAM's write address does not wait for the 16-way tag compare. In the
+	// merge cycle one compare checks that entry still holds the half-row: a
+	// fill issued in between sets the tag, valid and fill_busy together, so a
+	// re-used entry is busy and not merged; an entry that became valid in
+	// between is not merged either. Either way the snoop invalidates it
+	// (snoop_hit, compared afresh), as for any write it does not merge.
 	wire fill_write = fill_busy && d_blte;
-	wire [EW:0] fsn = find(sn_h);
-	wire sn_merge = sn_we && sn_single && fsn[EW] && !entry_busy(fsn[EW-1:0]) && !fill_write;
-	wire [EW+6:0] data_wa = fill_write ? {fill_e, d_ba[8:2]} : {fsn[EW-1:0], sn_beat};
+	wire sn_merge = sn_we && sn_single && sn_hit && valid[sn_e] && tag[sn_e] == sn_h &&
+	                !entry_busy(sn_e) && !fill_write;
+	wire [EW+6:0] data_wa = fill_write ? {fill_e, d_ba[8:2]} : {sn_e, sn_beat};
 	wire [63:0] data_wd = fill_write ? d_bout : sn_data;
 	wire [7:0] data_wbe = fill_write ? 8'hFF : sn_merge ? sn_be : 8'h00;
 	always @(posedge clk) begin
@@ -349,6 +359,7 @@ module vram_rtcache #(
 		sn_data <= ddr_din;
 		sn_be <= ddr_be;
 		sn_single <= ddr_burstcnt == 8'd1;
+		{sn_hit, sn_e} <= find(ddr_addr[16:7]);
 		sn_fw  <= l_esfw;
 		sn_row <= l_esaddr[17:9];
 		hit_d[0] <= fdem0[EW];

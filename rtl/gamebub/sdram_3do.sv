@@ -225,27 +225,61 @@ module sdram_3do #(
 	// now is issued act_cnt + 2 cycles after that ACTIVE.
 	reg  [3:0] act_cnt [2];
 
+	// The 3DO's DRAM signals come from clk_sys registers and MADAM/CPU logic
+	// (up to ~16 levels). They change only at clk_sys edges, so at the clk_mem
+	// edges that end slots 1, 3, 5 and 7 (which fall on clk_sys edges: a slot
+	// sequence starts one clk_mem cycle after a sync edge, and sync changes
+	// only at clk_sys edges) they were launched 20 ns earlier; at the edges
+	// ending slots 0, 2, 4, 6 and while parked, only 10 ns. The odd slots'
+	// commands are therefore decided into tdm_slow, loaded only at those
+	// edges, which p3do.xdc gives two clk_mem cycles from clk_sys (as
+	// lpage_row, set at slot 5). Everything else (and reset/init) goes through
+	// tdm_fast. tdm_s0 selects the one loaded at the last edge. The commands
+	// are the same as deciding all slots in one register (MiSTer's order of
+	// precedence within a slot is kept; no slot has rules in both parts).
+	wire       slot_odd = init_done && !sec_active && !sync_rise && !sync_fall &&
+	                      (slot_cnt == 4'd1 || slot_cnt == 4'd3 || slot_cnt == 4'd5 || slot_cnt == 4'd7);
+	state_t    tdm_fast, tdm_slow;
+	reg        tdm_slow_sel;
+	always_comb tdm_s0 = tdm_slow_sel ? tdm_slow : tdm_fast;
+
 	always @(posedge clk) begin
-		state_t t;
-		t = '0;
+		state_t tf, ts;
+		tf = '0;
+		ts = '0;
 		tdm_refresh_seen <= 0;
 		if (!init_done) begin
-			t.CMD = init_state == STATE_START ? CTRL_RAS :
-			        init_state == STATE_CONT  ? CTRL_CAS :
-			                                    CTRL_IDLE;
-			t.RFS = 1;
+			tf.CMD = init_state == STATE_START ? CTRL_RAS :
+			         init_state == STATE_CONT  ? CTRL_CAS :
+			                                     CTRL_IDLE;
+			tf.RFS = 1;
 		end else if (!sec_active) begin
+			// ---- odd slots (tdm_slow) ----
 			if (lras && lcode == 4'h8 && slot == 4'd5) begin
-				t.CMD  = CTRL_RAS;
-				t.ROW  = laddr[22:11];
-				t.BANK = 2'd0;
+				ts.CMD  = CTRL_RAS;
+				ts.ROW  = laddr[22:11];
+				ts.BANK = 2'd0;
 				lpage_opened <= 1;
-				lpage_row    <= laddr[22:11];
 			end
+			if (rras && rcode == 4'h1 && slot == 4'd1 && rpage_opened) begin
+				ts.CMD  = CTRL_CAS;
+				ts.COL  = raddr[10:2];
+				ts.RD   = 1;
+				ts.BANK = 2'd1;
+			end
+			if (rras && rcode == 4'h2 && (slot == 4'd3 || slot == 4'd7) && rpage_opened) begin
+				ts.CMD  = CTRL_CAS;
+				ts.COL  = raddr[10:2];
+				ts.WE   = 1;
+				ts.BE   = rwe;
+				ts.DATA = din[15:0];
+				ts.BANK = 2'd1;
+			end
+			// ---- even slots and parked (tdm_fast) ----
 			if (rras && rcode == 4'h8 && slot == 4'd6) begin
-				t.CMD  = CTRL_RAS;
-				t.ROW  = raddr[22:11];
-				t.BANK = 2'd1;
+				tf.CMD  = CTRL_RAS;
+				tf.ROW  = raddr[22:11];
+				tf.BANK = 2'd1;
 				rpage_opened <= 1;
 				rpage_row    <= raddr[22:11];
 			end
@@ -254,45 +288,31 @@ module sdram_3do #(
 			// with PHASE1 high, overwriting the right half of `dout` with left
 			// data before MADAM samples it; here it is issued once.
 			if (lras && lcode == 4'h1 && slot == 4'd0 && lpage_opened) begin
-				t.CMD  = CTRL_CAS;
-				t.COL  = laddr[10:2];
-				t.RD   = 1;
-				t.BANK = 2'd0;
-			end
-			if (rras && rcode == 4'h1 && slot == 4'd1 && rpage_opened) begin
-				t.CMD  = CTRL_CAS;
-				t.COL  = raddr[10:2];
-				t.RD   = 1;
-				t.BANK = 2'd1;
+				tf.CMD  = CTRL_CAS;
+				tf.COL  = laddr[10:2];
+				tf.RD   = 1;
+				tf.BANK = 2'd0;
 			end
 			if (lras && lcode == 4'h2 && (slot == 4'd2 || slot == 4'd6) && lpage_opened) begin
-				t.CMD  = CTRL_CAS;
-				t.COL  = laddr[10:2];
-				t.WE   = 1;
-				t.BE   = lwe;
-				t.DATA = din[31:16];
-				t.BANK = 2'd0;
-			end
-			if (rras && rcode == 4'h2 && (slot == 4'd3 || slot == 4'd7) && rpage_opened) begin
-				t.CMD  = CTRL_CAS;
-				t.COL  = raddr[10:2];
-				t.WE   = 1;
-				t.BE   = rwe;
-				t.DATA = din[15:0];
-				t.BANK = 2'd1;
+				tf.CMD  = CTRL_CAS;
+				tf.COL  = laddr[10:2];
+				tf.WE   = 1;
+				tf.BE   = lwe;
+				tf.DATA = din[31:16];
+				tf.BANK = 2'd0;
 			end
 			// 3DO refresh. Skipped if it would follow a deferred slot-3
 			// precharge by one cycle (tRP); the SEC refresh covers any gap.
 			if (lras && (lcode == 4'h4 || lcode == 4'hC) && slot == 4'd4 && !r_pre_slot3) begin
-				t.CMD  = CTRL_RAS;
-				t.BANK = 2'd0;
-				t.RFS  = 1;
+				tf.CMD  = CTRL_RAS;
+				tf.BANK = 2'd0;
+				tf.RFS  = 1;
 				tdm_refresh_seen <= 1;
 			end
 			else if (!lras && !rras && (lcode == 4'h2) && slot == 4'd4 && !r_pre_slot3) begin
-				t.CMD  = CTRL_RAS;
-				t.BANK = 2'd0;
-				t.RFS  = 1;
+				tf.CMD  = CTRL_RAS;
+				tf.BANK = 2'd0;
+				tf.RFS  = 1;
 				tdm_refresh_seen <= 1;
 			end
 			// Page close: slot 0/1 as MiSTer, and while parked (MiSTer's parked
@@ -300,20 +320,31 @@ module sdram_3do #(
 			// tRAS: if the page was opened only in the previous MCLK (slot 5/6
 			// -> slot 0/1 would be 30 ns), the precharge moves to slot 2/3.
 			if (!lras && lpage_opened && (((slot == 4'd0 || parked) && act_cnt[0] >= 4'd3) || slot == 4'd2)) begin
-				t.CMD  = CTRL_PRE;
-				t.BANK = 2'd0;
+				tf.CMD  = CTRL_PRE;
+				tf.BANK = 2'd0;
 				lpage_opened <= 0;
 			end
+			// right page close: slots 1 and 3 in tdm_slow, parked in tdm_fast
 			if (!rras && rpage_opened && (((slot == 4'd1 || (parked && !(!lras && lpage_opened))) && act_cnt[1] >= 4'd3) || slot == 4'd3)) begin
-				t.CMD  = CTRL_PRE;
-				t.BANK = 2'd1;
+				if (parked) begin
+					tf.CMD  = CTRL_PRE;
+					tf.BANK = 2'd1;
+				end else begin
+					ts.CMD  = CTRL_PRE;
+					ts.BANK = 2'd1;
+				end
 				rpage_opened <= 0;
 				r_pre_slot3 <= (slot == 4'd3);
 			end
 			if (slot == 4'd0) r_pre_slot3 <= 0;
 		end
-		tdm_s0 <= t;
+		tdm_fast <= tf;
+		if (slot_odd) tdm_slow <= ts;
+		tdm_slow_sel <= slot_odd;
 	end
+	// lpage_row: loaded only at the end of slot 5 (timed as tdm_slow)
+	always @(posedge clk)
+		if (init_done && !sec_active && lras && lcode == 4'h8 && slot == 4'd5) lpage_row <= laddr[22:11];
 
 	// ------------------------------------------------------------------
 	// SEC part

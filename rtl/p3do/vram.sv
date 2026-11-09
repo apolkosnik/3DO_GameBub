@@ -45,9 +45,21 @@ module P3DO_VRAM #(parameter USE_BRAM = 0) (
 	bit  [17: 0] A_FF;
 	bit  [15: 0] D_FF;
 	
-	wire         USE_INT_RAM4 = (A >= ({BRAM4_OFFS+0,16'h0000}>>2) && A <= ({BRAM4_OFFS+3,16'hFFFF}>>2)) && USE_BRAM;
-	wire         USE_INT_RAM2 = (A >= ({BRAM2_OFFS+0,16'h0000}>>2) && A <= ({BRAM2_OFFS+1,16'hFFFF}>>2)) && USE_BRAM;
-	wire         USE_INT_RAM1 = (A >= ({BRAM1_OFFS+0,16'h0000}>>2) && A <= ({BRAM1_OFFS+0,16'hBFFF}>>2)) || (A >= (20'hFC000>>2));
+	// On-chip windows (the MiSTer core's compares: BRAM4 blocks OFFS..OFFS+3,
+	// BRAM2 OFFS..OFFS+1, BRAM1 OFFS up to xBFFF, and FC000-FFFFF). Every
+	// bound is on a 16 KiB boundary, so each window is a map of the address's
+	// 16 KiB unit (byte address [19:14] = A[17:12]), built from the static
+	// offsets (Game Bub port: the address goes through a 64:1 select instead
+	// of adders and 18-bit compares, on MADAM's address timing path).
+	wire [63: 0] MAP4, MAP2, MAP1;
+	for (genvar q = 0; q < 64; q++) begin : onchip_map
+		assign MAP4[q] = USE_BRAM && (q / 4) >= BRAM4_OFFS && (q / 4) <= BRAM4_OFFS + 3;
+		assign MAP2[q] = USE_BRAM && (q / 4) >= BRAM2_OFFS && (q / 4) <= BRAM2_OFFS + 1;
+		assign MAP1[q] = ((q / 4) == BRAM1_OFFS && (q % 4) != 3) || q == 63;
+	end
+	wire         USE_INT_RAM4 = MAP4[A[17:12]];
+	wire         USE_INT_RAM2 = MAP2[A[17:12]];
+	wire         USE_INT_RAM1 = MAP1[A[17:12]];
 
 //	bit  [15: 0] MASK;
 	bit  [15: 0] COLOR;

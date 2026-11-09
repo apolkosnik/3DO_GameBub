@@ -691,8 +691,20 @@ module p3do_gamebub #(
 	wire [31: 0] ddr_io_do;
 	wire         ddr_io_busy, ddr_busy, ddr_bbusy;
 
-	wire         ddr_luse = ~((USE_BRAM_BLOCKS_FOR_VRAM && LA[19:2] >= ({BRAM4_OFFS+0,16'h0000}>>2) && LA[19:2] <= ({BRAM4_OFFS+3,16'hFFFF}>>2)) || (USE_BRAM_BLOCKS_FOR_VRAM && LA[19:2] >= ({BRAM2_OFFS+0,16'h0000}>>2) && LA[19:2] <= ({BRAM2_OFFS+1,16'hFFFF}>>2)) || (LA[19:2] >= ({BRAM1_OFFS+0,16'h0000}>>2) && LA[19:2] <= ({BRAM1_OFFS+0,16'hBFFF}>>2)) || (LA[19:2] >= (20'hFC000>>2)));
-	wire         ddr_ruse = ~((USE_BRAM_BLOCKS_FOR_VRAM && RA[19:2] >= ({BRAM4_OFFS+0,16'h0000}>>2) && RA[19:2] <= ({BRAM4_OFFS+3,16'hFFFF}>>2)) || (USE_BRAM_BLOCKS_FOR_VRAM && RA[19:2] >= ({BRAM2_OFFS+0,16'h0000}>>2) && RA[19:2] <= ({BRAM2_OFFS+1,16'hFFFF}>>2)) || (RA[19:2] >= ({BRAM1_OFFS+0,16'h0000}>>2) && RA[19:2] <= ({BRAM1_OFFS+0,16'hBFFF}>>2)) || (RA[19:2] >= (20'hFC000>>2)));
+	// VRAM words outside the on-chip blocks (BRAM4/BRAM2 with
+	// USE_BRAM_BLOCKS_FOR_VRAM, BRAM1 up to xBFFF, FC000-FFFFF) go to
+	// ddram.sv. All the window bounds are on 16 KiB boundaries, so this is a
+	// map of the address's 16 KiB unit ([19:14]) built from the static
+	// offsets; the address only selects from it (the MiSTer core compared it
+	// with each bound, on MADAM's address timing path).
+	wire [63: 0] ddr_onchip;
+	for (genvar q = 0; q < 64; q++) begin : ddr_onchip_map
+		assign ddr_onchip[q] = (USE_BRAM_BLOCKS_FOR_VRAM && (q / 4) >= BRAM4_OFFS && (q / 4) <= BRAM4_OFFS + 3) ||
+		                       (USE_BRAM_BLOCKS_FOR_VRAM && (q / 4) >= BRAM2_OFFS && (q / 4) <= BRAM2_OFFS + 1) ||
+		                       ((q / 4) == BRAM1_OFFS && (q % 4) != 3) || q == 63;
+	end
+	wire         ddr_luse = ~ddr_onchip[LA[19:14]];
+	wire         ddr_ruse = ~ddr_onchip[RA[19:14]];
 
 	wire         DDRAM_BUSY, DDRAM_DOUT_READY, DDRAM_RD, DDRAM_WE;
 	wire [ 7: 0] DDRAM_BURSTCNT, DDRAM_BE;

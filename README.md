@@ -106,9 +106,13 @@ firmware also when you pause.
   in Cannon Fodder's title), with the VRAM in the SRAM or in the SDRAM: being
   investigated. The SRAM removed the pauses between Microcosm's animated sequences.
 * A band of wrong lines at the top of the screen, late in the BIOS boot, was seen on
-  hardware with a build that had only the first video-cache fix (no prefetch after CPU copy
-  reads). The v0.3 build adds the second (writes update cached rows); whether the band is
-  gone with it has not been checked on hardware yet.
+  hardware. In simulation it comes from page copies holding VRAM past a line's transfers;
+  v0.4 holds copies before each shown line (*Page copies before a line's transfers*), and
+  also keeps the CEL engine and the video cache's prefetches out of the time before a
+  line's transfers. Whether the band is gone has not been checked on hardware yet.
+  Copies now run between the shown lines, so a game that clears or copies its frame
+  buffer while the picture is shown does so more slowly than before (most with the
+  SRAM's safe timing).
 * CLIO's horizontal and vertical interpolation are off: the picture is captured at
   320 x 240, which keeps neither the interpolated dots nor the interpolated lines.
 * Video lines that start before their VRAM transfer (see *Video lines that started late*)

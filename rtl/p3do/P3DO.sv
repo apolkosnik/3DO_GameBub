@@ -89,6 +89,8 @@ module P3DO
 	// Game Bub port: the VRAM access in progress is the CPU's SPORT access
 	output             VRAM_SP_CPU,
 	output             VID_DMA,      // Game Bub port
+	output             VID_GUARD,    // Game Bub port: a line's video transfers are due
+	input      [10: 0] SPORT_HOLD_START, // Game Bub port: HCOUNT at which the CPU's SPORT accesses wait (MADAM_SPORT)
 
 	input              VCLK,
 	output     [23: 0] RGB,
@@ -331,6 +333,8 @@ module P3DO
 		.VID_FB_PREV_V(VID_FB_PREV_V),
 		.VRAM_SP_CPU(VRAM_SP_CPU),
 		.VID_DMA(VID_DMA),
+		.VID_GUARD(VID_GUARD),
+		.SPORT_HOLD_START(SPORT_HOLD_START),
 		
 		.DBG_SPR_EN(SCRN_EN[1]),
 		.DBG_EXT(DBG_EXT)

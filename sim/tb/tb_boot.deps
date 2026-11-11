@@ -1,2 +1,3 @@
 models/gb_clocks_sim.sv
 tb/sdram_tdm_check.sv
+tb/cpu_start_check.sv

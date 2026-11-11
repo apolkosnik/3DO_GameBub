@@ -50,6 +50,8 @@ module ddram
 	input          brwr,
 	input          brrd,
 	input          bfw,
+	input          byield,   // Game Bub port: the burst read may wait for the slow bus between 32-beat chunks
+	input          bwait,    // Game Bub port: ... and its next chunk waits (a line's video transfers are due)
 	output reg [ 9: 2] ba,
 	input  [63: 0] bin,
 	output [63: 0] bout,
@@ -67,6 +69,13 @@ module ddram
 	
 	reg  [ 63:  0] dout_buf;
 	reg            burst_read_lbusy = 0,burst_read_rbusy = 0;
+	// Game Bub port: a burst read that may yield (byield) goes in 32-beat
+	// chunks; between them a slow-bus access (BIOS ROM, NVRAM: the 3DO is
+	// paused while it waits) goes first, and while bwait is high (a line's
+	// video transfers are due) the next chunk waits. brd_chunk: this burst
+	// is chunked; brd_part: a chunked burst read is part way through.
+	reg            brd_chunk, brd_part;   // cleared by rst
+	wire           brd_yield = brd_part && byield && (io_write_pend2 || io_read_busy || bwait);
 	reg            burst_write_lbusy = 0,burst_write_rbusy = 0;
 	reg            read_lbusy = 0,read_rbusy = 0;
 	reg            write_lpend = 0,write_rpend = 0;
@@ -82,6 +91,12 @@ module ddram
 	reg  [ 15:  0] write_ldata,write_rdata;
 	reg  [  7:  0] write_lbe,write_rbe;
 	reg  [ 19:  2] read_laddr = '1,read_raddr = '1;
+	// Game Bub port: the random-read blocks are valid only until a write
+	// burst (page copy, write transfer, masked flash write) or a lazy flash
+	// write could have changed their rows; read_*addr alone kept serving
+	// a block from before such a write (a translucent cel or the CPU read
+	// the old frame buffer pixels after a SPORT clear or copy)
+	reg            read_lval,read_rval;     // cleared by rst
 	reg            read_lact,read_ract;
 	reg  [  3:  0] lcache_wren,rcache_wren;
 	reg            lcache_load,rcache_load;
@@ -192,17 +207,26 @@ module ddram
 			read_lbusy <= 0;
 		end else if (lrd && !old_lrd && lras && old_lras) begin
 			read_laddr <= laddr;
-			if (read_laddr[19:7] != laddr[19:7]) begin
+			if (!read_lval || read_laddr[19:7] != laddr[19:7]) begin
 				read_lbusy <= 1;
+				read_lval <= 1;
 			end
 		end
 		if (rst) begin
 			read_rbusy <= 0;
 		end else if (rrd && !old_rrd && rras && old_rras) begin
 			read_raddr <= raddr;
-			if (read_raddr[19:7] != raddr[19:7]) begin
+			if (!read_rval || read_raddr[19:7] != raddr[19:7]) begin
 				read_rbusy <= 1;
+				read_rval <= 1;
 			end
+		end
+		// a write burst starting or a lazy flash write: drop both blocks (the
+		// burst's end drops them again, below, for a block read between its
+		// passes)
+		if (rst || (blwr && !old_blwr) || (brwr && !old_brwr) || bfw) begin
+			read_lval <= 0;
+			read_rval <= 0;
 		end
 		
 		if (rst) begin
@@ -294,6 +318,8 @@ module ddram
 		vram_fw_bwr <= 0;
 		if (rst && !old_rst) begin
 			state <= 0;
+			brd_chunk <= 0;
+			brd_part <= 0;
 		end else if (DDRAM_BUSY) begin
 			case (state)
 				4'd1: if (blte || brte) begin
@@ -341,7 +367,7 @@ module ddram
 						brte <= 1;
 						state       <= 4'd1;
 					end
-					else if (burst_read_lbusy) begin 
+					else if (burst_read_lbusy && !brd_yield) begin 
 						burst_lact <= 1;
 						if (burst_read_rbusy && burst_raddr == burst_laddr) burst_ract <= 1;
 						vram_fw_baddr <= burst_laddr[19:3];
@@ -349,18 +375,20 @@ module ddram
 						ram_address <= {8'b00000000,burst_laddr[19:3],2'b00};
 						ram_ba      <= 8'hFF;
 						ram_read 	<= 1;
-						ram_burst   <= 8'd128 - burst_laddr[9:3];
+						ram_burst   <= byield ? 8'd32 - 8'(burst_laddr[7:3]) : 8'd128 - burst_laddr[9:3];
+						brd_chunk   <= byield;
 						rpos        <= {1'b0,burst_laddr[9:3]};
 						state       <= 4'd2;
 					end
-					else if (burst_read_rbusy) begin 
+					else if (burst_read_rbusy && !brd_yield) begin 
 						burst_ract <= 1;
 						vram_fw_baddr <= burst_raddr[19:3];
 						vram_fw_brd <= 1;
 						ram_address <= {8'b00000000,burst_raddr[19:3],2'b00};
 						ram_ba      <= 8'hFF;
 						ram_read 	<= 1;
-						ram_burst   <= 8'd128 - burst_raddr[9:3];
+						ram_burst   <= byield ? 8'd32 - 8'(burst_raddr[7:3]) : 8'd128 - burst_raddr[9:3];
+						brd_chunk   <= byield;
 						rpos        <= {1'b0,burst_raddr[9:3]};
 						state       <= 4'd2;
 					end
@@ -493,6 +521,8 @@ module ddram
 					if (wpos == 8'd255) begin
 						if (burst_lact) burst_write_lbusy <= 0;
 						if (burst_ract) burst_write_rbusy <= 0;
+						read_lval <= 0;
+						read_rval <= 0;
 						burst_lact <= 0;
 						burst_ract <= 0;
 						state <= burst_read_lbusy || burst_read_rbusy ? 4'd3 : 4'd4;
@@ -512,6 +542,17 @@ module ddram
 						if (burst_ract) burst_read_rbusy <= 0;
 						burst_lact <= 0;
 						burst_ract <= 0;
+						brd_chunk <= 0;
+						brd_part <= 0;
+						state <= 4'd3;
+					end else if (brd_chunk && rpos[4:0] == 5'h1F) begin
+						// end of a chunk: the rest from the next beat on
+						if (burst_lact) burst_laddr[9:3] <= rpos[6:0] + 7'd1;
+						if (burst_ract) burst_raddr[9:3] <= rpos[6:0] + 7'd1;
+						burst_lact <= 0;
+						burst_ract <= 0;
+						brd_chunk <= 0;
+						brd_part <= 1;
 						state <= 4'd3;
 					end
 					

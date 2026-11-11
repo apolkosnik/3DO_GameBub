@@ -568,8 +568,10 @@ module tb_top;
 		// Poll the verdict in NVRAM bytes 0x100..0x10F
 		done = 0;
 		nvram_changed = 0;
-		// (about 250 ms: test 14 reads CD-DA sectors in real time)
-		for (int t = 0; t < 2500 && !done; t++) begin
+		// (up to about 900 ms: test 14 reads CD-DA sectors in real time; test
+		// 15 copies with the video DMA on, one transfer per shown line with the
+		// SRAM safe timing; tests 15-17 wait for frame starts)
+		for (int t = 0; t < 9000 && !done; t++) begin
 			#100us;
 			read_nvram(16'h110);
 			if (nvram_size != 0) nvram_changed = 1;
@@ -591,7 +593,10 @@ module tb_top;
 			// (matrix engine): 3
 			// test 7's final status: 1; test 14: 25 checks with the streamed
 			// disc (audio track), 1 with a preloaded ISO (disc info only)
-			if (checks != 64*4 + 1 + 64*5 + 2 + 16 + 1 + 2 + 4 + 1 + (stream_mode ? 25 : 1) + 3 * 13 * 512 + 10 + 3 + 64 + 16)
+			// test 15 (page copies with the video DMA on): 64 + 32 rows; test 16
+			// (relative VDL next pointer): 1; test 17 (cel culling): 5; test 18
+			// (cels drawn into a shown frame buffer): 1
+			if (checks != 64*4 + 1 + 64*5 + 2 + 16 + 1 + 2 + 4 + 1 + (stream_mode ? 25 : 1) + 3 * 13 * 512 + 10 + 3 + 64 + 16 + 96 + 1 + 5 + 1)
 				fail($sformatf("unexpected number of checks %0d", checks));
 			for (int i = 0; i < 16; i++)
 				if (nvram[8'h80 + i] != 8'(8'hA5 + 8'h13 * i)) fail($sformatf("NVRAM byte %02h = %02h", 8'h80 + i, nvram[8'h80 + i]));
@@ -602,6 +607,16 @@ module tb_top;
 		$display("[%0t] video: %0d frames, bad lines %0d, bad frames %0d; at the %0d software reset(s): %0d lines, %0d frames",
 		         $realtime, frames, bad_lines, bad_frames, soft_resets, srst_lines, srst_frames);
 		if (bad_lines || bad_frames) fail("video timing");
+		// test ROM test 15: lines shown during the page copies
+		$display("tb_top: video DMA lines %0d, %0d of them late (started before a read transfer; shown lines), %0d late in the vertical blanking (not shown); CPU write transfers while it was on %0d",
+		         vl_lines, vl_late, vl_late_blank, vl_copies);
+		$display("tb_top: longest CPU SPORT transfer: left %0.2f us, right %0.2f us", cx_max[0] / 1us, cx_max[1] / 1us);
+		if (vl_lines < 400) fail($sformatf("only %0d video DMA lines: test 15's VDL did not start the video DMA", vl_lines));
+		// 2 x 600 copies, each from line 40 of a frame: 385 to 430 of them while
+		// lines are shown, about 100 with the SRAM's safe timing (one transfer
+		// per line: they wait for the line's transfers)
+		if (vl_copies < 80) fail($sformatf("%0d CPU write transfers with the video DMA on, expected at least 80", vl_copies));
+		if (vl_late) fail("video lines started before their read transfers (tests 15, 18)");
 		// one from CLIO's power-on state (CSTAT = 0x11), one by the test ROM
 		if (soft_resets != 2) fail($sformatf("%0d CLIO software resets, expected 2 (power-on and the test ROM's)", soft_resets));
 
@@ -623,9 +638,105 @@ module tb_top;
 		else $fatal(1, "tb_top: FAIL");
 	end
 
+	// Video lines with the video DMA on (test ROM test 15): from the point a
+	// +vdl_trace: MADAM's VDL DMA register writes (group 0x60: 0x580 VDL
+	// address, 0x584 next VDL, 0x590/0x594 previous/current line address)
+	bit vdl_trace = 0;
+	initial vdl_trace = $test$plusargs("vdl_trace");
+	always @(posedge clk_mem)
+		if (vdl_trace && dut.p3do.madam.AG.EN && dut.p3do.madam.AG.CE_R && dut.p3do.madam.AG.DMA_STACK_WE &&
+		    dut.p3do.madam.AG.DMA_STACK_WADDR[6:3] == 4'hC)
+			$display("[%0t] VDL reg %02h <= %06h (%s, line %0d)", $realtime, dut.p3do.madam.AG.DMA_STACK_WADDR,
+			         {dut.p3do.madam.AG.DMA_STACK_IN, 2'b00}, dut.p3do.madam.AG.BUS_STATE_FF.name(), dut.p3do.madam.SPORT.VCOUNT);
+
+	// line's transfers are scheduled (MADAM_SPORT VIDEO_TRANS_PEND) to its
+	// scanout (VIDEO_TRANS_EXEC) both VRAM halves must have had a read
+	// transfer that is not the CPU's (as tb_boot). A late line shows the
+	// serial registers' old contents.
+	int vl_lines = 0, vl_late = 0, vl_copies = 0, vl_late_blank = 0;
+	// Lines the video encoder shows (VE.sv: 240 from line 22, PAL 45; it
+	// starts CLIO's line count, so MADAM's is within a line of it): one more
+	// at each end, so a late line that might be shown counts as shown.
+	function automatic bit vl_shown(input [9:0] vc);
+		int s;
+		s = dut.p3do.ve.PAL_SYNC[1] ? 45 : 22;
+		return int'(vc) >= s - 1 && int'(vc) <= s + 240;
+	endfunction
+	realtime vl_t0;
+	real vl_t_ack;
+	int vl_np;
+	bit vl_hold0;
+	string vl_st0, vl_st_max, vl_st_last, vl_why;
+	bit vl_armed = 0, vl_l = 0, vl_r = 0, vl_pend_d = 0, vl_exec_d = 0, vl_rtl_d = 0, vl_rtr_d = 0, vl_mwt_d = 0;
+	always @(posedge clk_mem) begin
+		if (dut.reset_3do) vl_armed = 0;
+		else begin
+			if (dut.p3do.madam.SPORT.VIDEO_TRANS_PEND && !vl_pend_d) begin
+				vl_armed = 1; vl_l = 0; vl_r = 0;
+				vl_t0 = $realtime; vl_t_ack = -1.0; vl_np = 0; vl_hold0 = dut.p3do.madam.SE_HOLD;
+				vl_st0 = dut.p3do.madam.ARB.BUS_ST.name(); vl_st_max = "";
+				vl_why = $sformatf("ddr_busy %b io %b LRDY %b RRDY %b sec_hold %b | ddram state %0d rd L/R %b%b wr L/R %b%b burst rd %b%b wr %b%b | bridge %s | sdram sec %s | fill %b h %03h e %0d yield %b/%b chunk %b part %b | delivery L %b e %0d R %b e %0d | VRAM L row %03h R row %03h",
+				                   dut.ddr_busy, dut.ddr_io_busy, dut.VRAM_LRDY, dut.VRAM_RRDY, dut.sec_hold_s,
+				                   dut.ddram.state, dut.ddram.read_lbusy, dut.ddram.read_rbusy, dut.ddram.write_lpend, dut.ddram.write_rpend,
+				                   dut.ddram.burst_read_lbusy, dut.ddram.burst_read_rbusy, dut.ddram.burst_write_lbusy, dut.ddram.burst_write_rbusy,
+				                   dut.ddr_bridge.st.name(), dut.sdram.sst.name(), dut.rtcache.fill_busy, dut.rtcache.fill_h, dut.rtcache.fill_e,
+				                   dut.rtcache.fill_yield, dut.rtcache.d_byield, dut.ddram.brd_chunk, dut.ddram.brd_part,
+				                   dut.rtcache.dl_act[0], dut.rtcache.dl_e[0], dut.rtcache.dl_act[1], dut.rtcache.dl_e[1],
+				                   dut.vram_l.MEM_ROW, dut.vram_r.MEM_ROW);
+			end
+			if (vl_armed) begin
+				if (dut.pause) vl_np++;
+				if (dut.p3do.madam.ARB.VIDOUT_ACK && vl_t_ack < 0) vl_t_ack = ($realtime - vl_t0) / 1000.0;
+				if (vl_t_ack < 0 && dut.p3do.madam.ARB.BUS_ST.name() != vl_st_last) vl_st_max = {vl_st_max, " ", dut.p3do.madam.ARB.BUS_ST.name()};
+				vl_st_last = dut.p3do.madam.ARB.BUS_ST.name();
+			end
+			if (dut.vram_l.RT_REQ && !vl_rtl_d && !dut.vram_l.XFER_CPU) vl_l = 1;
+			if (dut.vram_r.RT_REQ && !vl_rtr_d && !dut.vram_r.XFER_CPU) vl_r = 1;
+			if (dut.vram_l.MWT_EXEC && !vl_mwt_d && dut.vram_l.XFER_CPU && dut.p3do.madam.SPORT.ENVIDDMA) vl_copies++;
+			if (dut.p3do.madam.SPORT.VIDEO_TRANS_EXEC && !vl_exec_d && vl_armed) begin
+				vl_armed = 0;
+				vl_lines++;
+				if ((!vl_l || !vl_r) && !vl_shown(dut.p3do.madam.SPORT.VCOUNT)) begin
+					vl_late_blank++;
+					if (vl_late_blank <= 5)
+						$display("[%0t] tb_top: video line %0d (vertical blanking, not shown) started before its read transfer", $realtime, dut.p3do.madam.SPORT.VCOUNT);
+				end else if (!vl_l || !vl_r) begin
+					vl_late++;
+					if (vl_late <= 10)
+						$display("[%0t] TB ERROR: video line %0d started before its read transfer (left %b right %b); grant %0.2f us after scheduling, 3DO paused %0.2f us, SE_HOLD at scheduling %b, bus at scheduling %s, then:%s",
+						         $realtime, dut.p3do.madam.SPORT.VCOUNT, vl_l, vl_r, vl_t_ack, vl_np * 0.01, vl_hold0, vl_st0,
+						         vl_st_max.len() > 300 ? vl_st_max.substr(0, 299) : vl_st_max);
+						$display("            at scheduling: %s", vl_why);
+				end
+			end
+		end
+		vl_pend_d <= dut.p3do.madam.SPORT.VIDEO_TRANS_PEND;
+		vl_exec_d <= dut.p3do.madam.SPORT.VIDEO_TRANS_EXEC;
+		vl_rtl_d  <= dut.vram_l.RT_REQ;
+		vl_rtr_d  <= dut.vram_r.RT_REQ;
+		vl_mwt_d  <= dut.vram_l.MWT_EXEC;
+	end
+
+	// the longest CPU SPORT transfer (page copy read or write transfer, flash
+	// write) per VRAM half: the time its half was busy
+	realtime cx_t [2], cx_max [2] = '{0, 0};
+	bit cx_busy [2] = '{0, 0};
+	always @(posedge clk_mem) begin
+		bit b [2];
+		b[0] = (dut.vram_l.RT_EXEC || dut.vram_l.MWT_EXEC || dut.vram_l.FW_EXEC || dut.vram_l.MRD_EXEC) && dut.vram_l.XFER_CPU;
+		b[1] = (dut.vram_r.RT_EXEC || dut.vram_r.MWT_EXEC || dut.vram_r.FW_EXEC || dut.vram_r.MRD_EXEC) && dut.vram_r.XFER_CPU;
+		for (int i = 0; i < 2; i++) begin
+			if (b[i] && !cx_busy[i]) cx_t[i] = $realtime;
+			if (!b[i] && cx_busy[i] && $realtime - cx_t[i] > cx_max[i]) cx_max[i] = $realtime - cx_t[i];
+			cx_busy[i] = b[i];
+		end
+	end
+
 	initial begin
-		#400ms;
-		$display("tb_top: TIMEOUT");
+		#1000ms;
+		$display("tb_top: TIMEOUT: cpu A=%08h, MADAM stretch %b, SPORT hold %b, line %0d, video DMA lines %0d, CPU write transfers %0d",
+		         dut.p3do.CPU_A, dut.p3do.madam.CPUIF.STRETCH, dut.p3do.madam.SPORT.SPORT_HOLD, dut.p3do.madam.SPORT.VCOUNT,
+		         vl_lines, vl_copies);
 		$fatal(1, "tb_top: FAIL");
 	end
 endmodule

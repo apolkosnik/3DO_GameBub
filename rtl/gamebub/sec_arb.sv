@@ -1,6 +1,9 @@
 // Fixed-priority arbiter for the SDRAM secondary port.
 // Client 0 has the highest priority. A grant is held until the client's
 // transfer is finished (sec_done) and the client has dropped its request.
+// While hold is high, no request is granted (a transfer already granted
+// goes on): every transfer pauses the 3DO, and p3do_gamebub holds them back
+// while a line's video transfers are due (vid_sec_guard.sv).
 //
 // Copyright (c) 2026 Adam Polkosnik
 // SPDX-License-Identifier: GPL-3.0-or-later
@@ -8,6 +11,7 @@
 module sec_arb #(parameter int N = 3) (
 	input              clk,
 	input              rst,
+	input              hold,
 
 	// clients
 	input      [N-1:0] c_req,
@@ -45,11 +49,12 @@ module sec_arb #(parameter int N = 3) (
 			wait_drop <= 0;
 			sel       <= '0;
 		end else if (!busy) begin
-			for (i = N-1; i >= 0; i = i - 1)
-				if (c_req[i]) begin
-					sel  <= W'(i);
-					busy <= 1;
-				end
+			if (!hold)
+				for (i = N-1; i >= 0; i = i - 1)
+					if (c_req[i]) begin
+						sel  <= W'(i);
+						busy <= 1;
+					end
 		end else begin
 			if (m_done) wait_drop <= 1;
 			if (wait_drop && !c_req[sel]) begin

@@ -242,9 +242,20 @@ strip at the top of the picture in Wolfenstein 3D):
   writes into the rows the video is about to show (the frame drawn and the one shown), so a
   line's two transfers could both miss, and their fills ran one after the other: the second
   ended after the line's read-out had begun. A single-beat write now updates the bytes it
-  enables in an idle entry. Write bursts (SPORT copies) and flash writes still drop entries,
-  and so does a write into an entry being shifted out, whose read-out keeps the data it
-  started with. `tb_rtcache` phase 15: the old RTL dropped both rows and missed on the line.
+  enables in an idle entry. Flash writes still drop entries, and so does a write into an
+  entry being shifted out, whose read-out keeps the data it started with. `tb_rtcache`
+  phase 15: the old RTL dropped both rows and missed on the line.
+* A page copy (the CPU's SPORT read and write transfers) into a cached half-row dropped it
+  too, and the next video transfer of that row missed: its fill (5.8 µs from the SDRAM,
+  10.4 µs from the SRAM) ran past the line's scanout, in either VRAM memory. An audit found
+  it: copying each displayed row onto itself, VRAM unchanged, corrupted 12 of 12 cases;
+  without the copy, or with the rows fetched again afterwards, none. The copy's write
+  transfer is two 128-beat bursts, and `ddram.sv` gives each burst's address with every
+  beat, unchanged; the cache now counts the beats, and every beat, single or in a burst,
+  updates an idle entry like a single write. `tb_rtcache` phase 16: copies of rows onto
+  themselves and masked copies of other rows into cached rows leave the line's next
+  transfers hits with the copied data (the old RTL dropped the rows and missed), and a copy
+  whose beats reach an entry while it is delivered to one half (a split transfer) drops it.
 
 `tb_boot` checks that every video line has had its transfers before it starts: a late line
 while the 3DO was paused (the port's memory system) is an error; one delayed by MADAM's
@@ -284,10 +295,106 @@ Two causes:
   demand fill now waits while MADAM is in its video DMA sequence, until the other side
   has asked too, at most 2 µs (`tb_rtcache` phase 11). These were the remaining 32 late
   lines of the controller test's first 3.4 s.
+* **SDRAM transfers just before the request.** Every transfer on the SDRAM's secondary
+  port pauses the 3DO (its DRAM shares the bus), while the scanout goes on. A 512-word one
+  (an RT cache half-row fill, a CD sector read from a preloaded image, a host block) takes
+  5.6 µs, more than the 4.4 µs between the line's request and its scanout (found by an
+  audit: 512-word transfers at the request made 10 of 10 lines late), and short ones back
+  to back keep the 3DO paused just as long (a second audit: 2- and 4-word requests with no
+  gap, 64-word ones up to 20 cycles apart). MADAM_SPORT's `VID_GUARD` is now high from
+  5.7 µs before the request until the line's second transfer is on the bus. While it is,
+  `sec_arb.sv` starts no transfer (`vid_sec_guard.sv`), unless the 3DO is already paused
+  for something else: a VRAM access waiting in `ddram.sv` or the cache, which may need
+  that transfer (the 3DO's own random VRAM reads and writes keep `ddram.sv` busy until
+  they are done, so they are never held). What waits is cache fills and prefetches, copy
+  and flash bursts, CD and host transfers, at most about 6 µs per line in the test (15 µs
+  at most by design). `tb_vidguard` runs the real SPORT, arbiter, video, guard, secondary
+  port and SDRAM controller for PAL and NTSC with long transfers at every point of the line
+  and streams of short ones back to back: no line is late and no transfer starts inside
+  the guard. With the 3DO stalled, transfers start at once; the test holds that stall
+  through the line's request, so those lines (one per run, PAL or NTSC) are late by
+  construction and are counted apart: the guard cannot help a line while MADAM itself is
+  stopped. With `+no_guard` (the arbiter as before) the same test finds the audits' late
+  lines. Mid-line transfers (a line crossing a VRAM row) are not guarded.
+* **Page copies before a line's transfers.** The guard does not cover the 3DO's own SPORT
+  transfers: a page copy's read or write transfer (or a flash write) keeps its VRAM half
+  busy until the row is in or out of the SRAM or SDRAM, 8 to 21 µs (real VRAM: about
+  0.2 µs). A line's video transfer that comes in the meantime waits for it while the
+  scanout goes on. The OS clears and copies frame buffers in the vertical blanking; here
+  those copies reached into the top of the picture, and those lines showed the serial
+  registers' old contents (the band of about 20 lines at the top). MADAM now keeps the
+  CPU's SPORT accesses waiting before each shown line's request until the line's
+  transfers are on the bus (`SPORT_HOLD`, MADAM_SPORT to MADAM_CPUIF's stretch cycle),
+  from at least the longest CPU SPORT transfer before it: 45 µs with the SRAM (longest
+  40 µs), 30 µs SDRAM only (27 µs), and with the SRAM's safe timing (56 µs) from the
+  start of the scanout, so that copies start only right after a line's transfers (one
+  transfer per shown line). Copies go on between the lines and freely in the vertical
+  blanking. Test ROM test 15 turns the video DMA on (a VDL
+  entry for 240 lines of a frame buffer outside the FPGA) and makes 600 page copies while
+  the picture is shown, once into SDRAM rows and once into SRAM rows; `tb_top` checks
+  every line's transfers and reports the longest CPU SPORT transfer. Without the hold
+  367 of 474 lines were late (SRAM), with it none of 480 in every VRAM memory mode.
+  On a line with a VDL fetch (HCOUNT 1279: the frame start, or an entry's last line) the
+  hold starts 190 dots earlier: a copy still running there paused the fetch, and the
+  next line's transfers came after its scanout. Test 15 used to stop the video DMA after
+  one frame (its entry set bit 18, a relative next pointer, by mistake); with the entry
+  repeating every frame the frame-start line was late in 4 of 5 frames before this.
+* **The BIOS ROM behind a read-transfer fill.** ddram.sv serves the 3DO's slow bus (BIOS
+  ROM, NVRAM) last, after the read-transfer cache's fills, and a fill is one burst of 128
+  beats (about 5.5 µs from the SDRAM, 10-20 µs from the SRAM). The fill itself does not
+  pause the 3DO, but a ROM fetch queued behind it does: in the PAL BIOS boot a VDL hint
+  fill (a new frame buffer's first rows) held the CPU's next ROM fetch, the pause held
+  MADAM, it could not post the next line's video request, and the line came out late
+  (line 22 at 0.30 s, `tb_boot +late_diag`). Fills that are not demands (queued
+  prefetches, VDL hints, frame start) now go in 32-beat chunks with a waiting slow-bus
+  access between them, until a video transfer waits for the entry's rows; demand fills
+  stay one burst. `tb_rtcache` phase 18 reads the slow bus during a prefetch fill (SDRAM
+  and SRAM rows) and a hint fill: before, the read waited 5.9 to 20.8 µs; now 1.8 to
+  4.1 µs, with the fill still running, the right word and the prefetched rows intact.
+  `tb_boot +late_diag` now starts its count when a line is scheduled (VIDEO_TRANS_PEND),
+  as the late-line check does, and reports how long the 3DO was already paused then.
+* **CEL drawing into a shown frame buffer in the SDRAM.** Every CEL engine frame buffer
+  read and write in the SDRAM pauses the 3DO; drawing while the picture is shown, the
+  pauses took most of the 4.4 µs from a line's video request to its scanout, MADAM
+  granted the request 3.9-4.3 µs late behind the CEL engine, and the line showed old data
+  (the PAL BIOS CD player's visualizer: 10 late lines in 16 s). Three changes:
+  `SE_HOLD` (MADAM_SPORT): from 80 dots (3.3 µs) before each shown line's request, and
+  80 dots before a VDL fetch on a line with one, until the line's transfers are on the
+  bus, the CEL engine leaves MADAM's bus at its next step and starts nothing new
+  (MADAM_ARB `SE_YIELD`); about 7 % of a line, only while the video DMA is on. Prefetch
+  fills (not demands, VDL hints or the frame start's) do not start while a line's
+  transfers are due (`VID_GUARD`, `pf_hold`), and one under way stops between its 32-beat
+  chunks: the secondary port's guard lets a transfer go as soon as the 3DO stalls on
+  something else, such as a CEL read queued behind the fill in ddram.sv. Test ROM test
+  18 turns the video DMA on and draws two translucent 256x100 cels (every pixel a frame
+  buffer read and write) into the shown frame buffer: before, 169 of 2060 lines were
+  late (SRAM mode); now none of the shown lines in any VRAM memory mode. `tb_rtcache`
+  phase 19 checks the prefetch hold. `tb_top` counts late lines in the vertical blanking
+  (not shown: the encoder shows 240 lines from line 22, PAL 45) apart; its late-line
+  report says where the time went.
 
-`tb_boot +late_diag` reports for every late or nearly late line where the time went
+`tb_boot` places the BIOS in the SDRAM directly; it now also gives `gb_host` the BIOS
+checksum that streaming the file would have left, so Region "By BIOS" picks PAL for a PAL
+BIOS (before, every BIOS ran as NTSC), and `+region=<0 by BIOS, 1 NTSC, 2 PAL>` sets the
+Region setting; the run reports the standard the core chose. `tb_boot` checks every line from the point its transfers are scheduled (HCOUNT 1469, on
+the dot clock); it used to start at MADAM's request, which a pause can hold until after the
+scanout has begun, and such a line was then not counted or was checked against the
+previous line's transfers. `tb_boot +late_diag` reports for every late or nearly late line where the time went
 (grant, transfers, pauses by cause, MADAM's bus, the SDRAM work started), and
 `+clio_trace=<µs>` traces MADAM's arbitration cycle by cycle.
+`tb_boot` also compares every halfword the video shift registers shift out with what
+real VRAM would shift out at that tap (a full read transfer loads the whole row, a split
+transfer always loads its half), from the VRAM shadow; each difference is reported with
+its line, dot, tap and the side's last transfers (`+tap_log=<n>`). A PAL BIOS boot
+without a disc (to 5.6 s) gives none.
+
+**Random reads after copies (fix to `ddram.sv`).** `ddram.sv` keeps the 32-word block of
+each half's last random read and serves later reads in that block from it. Write bursts
+(page copies, write transfers, masked flash writes) and lazy flash writes did not touch
+it, so a translucent cel or the CPU read the frame buffer's old pixels after a SPORT
+clear or copy (upstream behaviour). The blocks are now dropped when a write burst
+starts and ends and on a flash write. `tb_rtcache` phase 17 reads words after a flash
+write, a page copy and a masked flash write (before the fix: the old words).
 
 **Random VRAM writes (fixes to `ddram.sv`).** On MiSTer, framebuffers are normally in
 block RAM (a per-game table moves the on-chip blocks to where a game puts them). On Game
@@ -627,6 +734,55 @@ so only the console can tell.
   later display control words of the same VDL entry from loading. They are now ignored
   until the next CLUT download window.
 
+Against the Opera emulator (audit, November 2026):
+
+* A VDL entry that does not load the current-line address (LDCURR clear, a palette-only
+  entry) still set the field line from bit 1 of its (ignored) address word. On an odd
+  line the line repeated the one above and every line below the entry moved down one.
+  Only an entry with LDCURR sets the field line now (Opera's `vdlp_process_vdl_entry`).
+* A VDL entry with no optional words (ListLen 0) shifted 64 words to CLIO: the count
+  wrapped, and the words after the entry (the next entry's header among them, taken as
+  colour words) changed the palette and display control. It shifts none now (Opera; the
+  patent: "a number of optional additional control words ... if any").
+* A cel's P-mode override 01 forced the first PIXC half. Only 10 (first half) and 11
+  (second half) override; 01 uses the pixel's P-mode bit, as 00 does (Opera; the SDK
+  defines 00, 10 and 11). Cels with two different PIXC halves were processed with the
+  wrong one (a subtracting half shows as inverted colours).
+* MADAM's arbiter acknowledged line-start and mid-line video requests with one signal. A
+  mid-line grant while the line-start request was also pending acknowledged both, and
+  the line got no transfers (the rest of the frame a line behind). Each has its own
+  acknowledge now. A pending mid-line request is also posted only when no video sequence
+  is on the bus: posting changed the register a running mid-line sequence advances.
+
+`tb_viddma` checks these four on the real SPORT, arbiter, address generator, CLIO video
+and encoder (all four fail before the fixes), `tb_gfx` the PIXC half per pixel for every
+override value.
+
+Against the Opera emulator, part 2 (cel engine, VDL processor, CD drive and XBUS):
+
+* A VDL entry with header bit 18 set (VDL_RELSEL: the next entry's address is relative)
+  went to the entry's address + 0x14, whatever its word 3 said, and the list fell apart.
+  The next entry is now word 3 + the entry's address + 16 (the patent: REL = target -
+  PC - 4; Opera `next_entry += curr_vdl + 16`). Portfolio's own VDLs are absolute; a
+  game building relative ones got a broken display. Test ROM test 16 chains a relative
+  entry to one 0x100 bytes further on and reads MADAM's next VDL address (0x584) back.
+* Face culling on the cel engine's 1:1 path (HDX or HDY 1.0, VDY or VDX 1.0, no HDDX or
+  HDDY) took the winding from the span's direction, the sign of HDX (or VDX) alone. A
+  cel flipped up and down, or turned 90 degrees, with only one of ACW / ACCW was drawn
+  when it should have been culled, and the other way round; the same cel at another
+  scale (region fill) was right. The winding there is now the sign of HDX * VDY - HDY *
+  VDX (Opera `TestInitVisual`). Test ROM test 17 draws a 4x4 cel on MADAM as stored,
+  flipped and turned, with ACW or ACCW only, and counts its pixels.
+
+Checked and left as they are: the PLUT load length (4, 8 or 16 words by BPP is the
+patent's; Opera loads fewer), SKIP cels not loading state, a null next CCB pointer
+without LAST, the default AMV for formats without one (Opera's 0x49 looks like an
+emulator convention), the VDL frame-start line in PAL, background detection (the RTL
+follows the patent's subposition bits). On the CD drive, commands the core does not
+answer (seek, spin down, inject, reset, mode sense), Abort and Flush not dropping a
+buffered block and the expansion interrupt being edge-latched differ from Opera but
+match SataTo3DO, a drive emulator proven on hardware; they stay until a game shows one.
+
 
 `tb_gfx` checks the pixel processor (224,608 whole pens: every PIXC field, NOBLK, the
 blue LSB selections, B0POS / B15POS with SWAPHV, NOSWAP and CFBDSUB, against a model
@@ -636,7 +792,8 @@ and single-component palette writes, VDL downloads against pixel lines with real
 timing), the video encoder's outputs in reset, and the cel engine's SPRSTOP and clip
 Y end (engine control by the CPU interface and the interrupt request). Before the first four
 fixes it fails 20,252 of the first 224,693 checks; before the second four, 51,344 of
-224,724; before the next five, 28,053 of 224,732; before the last two, 16 of 224,821. The
+224,724; before the next five, 28,053 of 224,732; before the next two, 16 of 224,821;
+before the P-mode override fix, 7 of 224,901. The
 secondary divider code AV[4:3] = 11 ("use the two lowest bits of the color component",
 divided by 4 here) is not checked: documentation, core and emulator differ.
 
@@ -687,6 +844,8 @@ sim/lint.sh                    # Verilator lint of the whole core
 sim/run_tb.sh tb_div           # MADAM divider vs. LPM_DIVIDE semantics (20k cases)
 sim/run_tb.sh tb_gfx           # MADAM pixel processor, CLIO display control word and CLUT bypass
                                # vs. the 3DO documentation
+sim/run_tb.sh tb_viddma        # MADAM video DMA: line-start / mid-line acknowledges, mid-line register
+                               # choice, field line across VDL entries, VDL entries with ListLen 0
 sim/run_tb.sh tb_clio          # CLIO interrupt summary, timer cascade, timer controls, TimerSlack,
                                # DSP output memory and FIFO status, FIFOs (DSP reads during DMA refills),
                                # DSP instructions without operands, frame start state, empty input FIFOs,

@@ -49,6 +49,33 @@
 @      buffer, filled by a DSP program: the words arrive, the transfer ends
 @      in its short last burst (nothing at address 0 or past the buffer) and
 @      the channel's enable bit clears. Before 8.
+@  15. Page copies with the video DMA on: a VDL entry (in the VDL area) for
+@      240 lines of a frame buffer outside the FPGA (through the read-transfer
+@      cache), MCTL CLUTXEN and VSCTXEN on; from line 40 of the next frame
+@      (CLIO's line count) 600 page copies (the CPU's read transfer of a
+@      source row, its write transfer into the next of the destination rows)
+@      back to back while the picture is being shown; every destination row
+@      must hold the source row. Twice: 0x210000, 64 rows (SDRAM), and
+@      0x2A0000, 32 rows (block A: SRAM unless it is off). tb_top checks that
+@      every video line had both of its read transfers before its scanout
+@      (a copy's transfer must not hold a line's transfer past it). Before 8.
+@  16. VDL next pointer relative (header bit 18, VDL_RELSEL; patent: the
+@      next CLUT list address is absolute or relative, REL = target - PC - 4,
+@      Opera next += entry + 16): entry A (4 lines, relative, word 3 = 0xF0)
+@      must chain to A + 0x100 (B), not to A + 16 (C); read back at MADAM
+@      0x584 (the next VDL pointer, B's own) at line 100. Before 8.
+@  17. Cel face culling on the cel engine's 1:1 path (HDX or HDY 1.0, VDY or
+@      VDX 1.0, no HDDX/HDDY): a 4x4 uncoded 16-bit cel drawn by MADAM
+@      (SPRSTRT, first CCB at 0x5A4) with ACW or ACCW only, as stored,
+@      flipped up/down and turned 90 degrees; the winding is the sign of
+@      HDX * VDY - HDY * VDX (Opera), so the flipped cel needs ACCW. The
+@      pixels drawn are counted (16 or 0). Before 8.
+@  18. Cel drawing into the shown frame buffer: the video DMA on (a VDL entry
+@      for 240 lines of 0x210000, in the SDRAM), 2 translucent cels (a 4x4
+@      source scaled to 256x100, PIXC reading the frame buffer: every pixel a
+@      frame buffer read and write) drawn into it. tb_top checks every line's
+@      transfers: the CEL engine's SDRAM accesses pause the 3DO and must not
+@      hold a line's video request past its scanout. Before 8.
 @   8. CLIO software reset (CSTAT bits 4 and 5, the BIOS's DIPIR reset): the
 @      ARM must start at 0 in SVC mode with IRQ and FIQ disabled (CPSR I and F
 @      set, flags kept), the interrupted CPSR in SPSR_svc and the interrupted
@@ -82,6 +109,7 @@
 	.equ CD_BUF,     0x00016000	@ DRAM: CD status bytes (test 14)
 	.equ CD_CODE,    0x00018000	@ DRAM: test 14's block check code, copied there
 	.equ CD_DATA,    0x0001A000	@ DRAM: the CD block being checked (test 14)
+	.equ VID_CODE,   0x0001C000	@ DRAM: test 15's code, copied there
 
 @ call the block check code in DRAM (cdblk_code)
 	.macro CDBLK
@@ -753,6 +781,82 @@ entry:
 	bne	fail
 	add	r11, r11, #7
 
+	@ ---- 15. page copies with the video DMA on (from DRAM) ----
+	mov	r12, #15
+	ldr	r3, =VID_CODE
+	ldr	r4, =ROM_BASE + vid_code
+	ldr	r5, =ROM_BASE + vid_code_end
+14:	ldr	r6, [r4], #4
+	str	r6, [r3], #4
+	cmp	r4, r5
+	bcc	14b
+	ldr	r3, =VID_CODE
+	mov	lr, pc
+	mov	pc, r3
+
+	@ ---- 16. VDL next pointer relative (header bit 18) ----
+	mov	r12, #16
+	ldr	r10, =0x002FC100	@ entry A: 4 lines, relative next
+	ldr	r6, =0x00040004
+	str	r6, [r10]
+	mov	r6, #0
+	str	r6, [r10, #4]
+	str	r6, [r10, #8]
+	mov	r6, #0xF0		@ next = A + 16 + 0xF0 = A + 0x100 (B)
+	str	r6, [r10, #12]
+	add	r3, r10, #0x10		@ entry C right after A's 4 words: absolute,
+	mov	r6, #0xF0		@ 240 lines, next = itself (the old RTL's
+	str	r6, [r3]		@ relative next lands here)
+	mov	r6, #0
+	str	r6, [r3, #4]
+	str	r6, [r3, #8]
+	str	r3, [r3, #12]
+	add	r4, r10, #0x100		@ entry B: absolute, 240 lines, next = itself
+	mov	r6, #0xF0
+	str	r6, [r4]
+	mov	r6, #0
+	str	r6, [r4, #4]
+	str	r6, [r4, #8]
+	str	r4, [r4, #12]
+	ldr	r5, =0x03300000
+	str	r10, [r5, #0x580]
+	ldr	r9, [r5, #8]
+	orr	r6, r9, #0x2000		@ MCTL CLUTXEN (VDL DMA only)
+	str	r6, [r5, #8]
+	@ A is taken at the next frame start; wait for CLIO's line count to go
+	@ back to the top, then for line 100 (A's 4 lines are over, B fetched)
+	ldr	r8, =0x03400000
+	ldr	r7, =0x1FF
+	ldr	r0, [r8, #0x34]
+	and	r0, r0, r7
+16:	ldr	r6, [r8, #0x34]
+	and	r6, r6, r7
+	cmp	r6, r0
+	mov	r0, r6
+	bcs	16b
+17:	ldr	r6, [r8, #0x34]
+	and	r6, r6, r7
+	cmp	r6, #100
+	bcc	17b
+	ldr	r2, [r5, #0x584]	@ the next VDL pointer: B's, i.e. B
+	str	r9, [r5, #8]		@ MCTL back
+	cmp	r2, r4
+	bne	fail
+	add	r11, r11, #1
+
+	@ ---- 17. cel face culling on the 1:1 path ----
+	mov	r12, #17
+	ldr	r0, =ROM_BASE + cel_cases
+	mov	r1, #5
+18:	bl	cel_case
+	add	r0, r0, #24
+	subs	r1, r1, #1
+	bne	18b
+
+	@ ---- 18. cel drawing into a shown SDRAM frame buffer ----
+	mov	r12, #18
+	bl	cel_shown
+
 	@ ---- 8. CLIO software reset ----
 	mov	r12, #8
 	ldr	r0, =PON_CPSR		@ power-on: SVC mode, IRQ and FIQ disabled, flags clear
@@ -835,6 +939,185 @@ report:
 	str	r12, [r0, #4]
 	str	r11, [r0, #8]
 done:	b	done
+
+@ one cel of test 17: r0 = its record (CCB flags, HDX, HDY, VDX, VDY, the
+@ number of pixels it must draw); a 4x4 uncoded 16-bit literal cel at
+@ (16, 8) into the frame buffer at 0x280000 (320 wide), after clearing its
+@ first 64 pixel pairs of rows 0-15. Keeps r0, r1; r11++.
+cel_case:
+	mov	r13, lr
+	ldr	r4, =0x00280000
+	mov	r5, #0
+	mov	r6, #8
+1:	mov	r7, #64
+2:	str	r5, [r4], #4
+	subs	r7, r7, #1
+	bne	2b
+	add	r4, r4, #1280 - 256
+	subs	r6, r6, #1
+	bne	1b
+	ldr	r4, =0x00031000		@ the CCB
+	ldr	r6, [r0]
+	str	r6, [r4]		@ flags
+	str	r5, [r4, #4]		@ next (none, LAST)
+	ldr	r6, =0x00031100
+	str	r6, [r4, #8]		@ source
+	str	r5, [r4, #12]		@ PLUT (not loaded)
+	mov	r6, #0x00100000
+	str	r6, [r4, #16]		@ X 16 (16.16)
+	mov	r6, #0x00080000
+	str	r6, [r4, #20]		@ Y 8
+	ldr	r6, [r0, #4]
+	str	r6, [r4, #24]		@ HDX (12.20)
+	ldr	r6, [r0, #8]
+	str	r6, [r4, #28]		@ HDY (12.20)
+	ldr	r6, [r0, #12]
+	str	r6, [r4, #32]		@ VDX (16.16)
+	ldr	r6, [r0, #16]
+	str	r6, [r4, #36]		@ VDY (16.16)
+	str	r5, [r4, #40]		@ HDDX
+	str	r5, [r4, #44]		@ HDDY
+	ldr	r6, =0x1F001F00		@ PIXC: x 8 / 8, nothing added
+	str	r6, [r4, #48]
+	mov	r6, #0xD6		@ PRE0: 4 rows (VCNT 3), LINEAR, 16 bpp
+	str	r6, [r4, #52]
+	ldr	r6, =0x00001003		@ PRE1: WOFFSET 0, TLLSB PDC0, 4 pixels
+	str	r6, [r4, #56]
+	ldr	r4, =0x00031100		@ the pixels: 4 rows of 2 words
+	ldr	r6, =0x12341234
+	mov	r7, #8
+3:	str	r6, [r4], #4
+	subs	r7, r7, #1
+	bne	3b
+	ldr	r4, =0x03300000
+	ldr	r6, =0x00001414		@ REGCTL0: modulo 320 (256 + 64) both ways
+	str	r6, [r4, #0x130]
+	ldr	r6, =0x00EF013F		@ REGCTL1: clip 319, 239
+	str	r6, [r4, #0x134]
+	ldr	r6, =0x00280000
+	str	r6, [r4, #0x138]	@ REGCTL2, REGCTL3: the frame buffer
+	str	r6, [r4, #0x13C]
+	ldr	r6, =0x00031000
+	str	r6, [r4, #0x5A4]	@ the first CCB
+	str	r6, [r4, #0x100]	@ SPRSTRT
+4:	ldr	r6, [r4, #0x28]		@ until SPRON (STATBits 0x10) clears
+	tst	r6, #0x10
+	bne	4b
+	ldr	r4, =0x00280000		@ count the pixels drawn
+	mov	r8, #0
+	mov	r6, #8
+5:	mov	r7, #64
+6:	ldr	r9, [r4], #4
+	movs	r10, r9, lsl #16
+	addne	r8, r8, #1
+	movs	r10, r9, lsr #16
+	addne	r8, r8, #1
+	subs	r7, r7, #1
+	bne	6b
+	add	r4, r4, #1280 - 256
+	subs	r6, r6, #1
+	bne	5b
+	ldr	r6, [r0, #20]
+	cmp	r8, r6
+	movne	r2, r8
+	bne	fail
+	add	r11, r11, #1
+	mov	pc, r13
+	.ltorg
+
+@ test 18: video DMA on (VDL entry at 0x2FC000: 240 lines of the frame buffer
+@ at 0x210000, in the SDRAM), then 2 translucent cels drawn into that frame
+@ buffer: a 4x4 16-bit source scaled to 256x100 at (32, 20), PIXC (PDC x 4 /
+@ 8) + (CFBD / 2), so every pixel reads the frame buffer and writes it.
+@ tb_top checks that no shown line started before its read transfers. r11++.
+cel_shown:
+	mov	r13, lr
+	ldr	r10, =0x002FC000
+	ldr	r6, =0x002180F0
+	str	r6, [r10]
+	ldr	r6, =0x00210000
+	str	r6, [r10, #4]
+	str	r6, [r10, #8]
+	str	r10, [r10, #12]
+	ldr	r5, =0x03300000
+	str	r10, [r5, #0x580]
+	ldr	r9, [r5, #8]
+	orr	r6, r9, #0x6000		@ MCTL CLUTXEN, VSCTXEN
+	str	r6, [r5, #8]
+	ldr	r8, =0x03400000		@ the next frame start (CLIO's line count)
+	ldr	r7, =0x1FF
+	ldr	r0, [r8, #0x34]
+	and	r0, r0, r7
+1:	ldr	r6, [r8, #0x34]
+	and	r6, r6, r7
+	cmp	r6, r0
+	mov	r0, r6
+	bcs	1b
+	ldr	r4, =0x00031100		@ the source: 4 rows of 2 words
+	ldr	r6, =0x5A3C5A3C
+	mov	r7, #8
+2:	str	r6, [r4], #4
+	subs	r7, r7, #1
+	bne	2b
+	ldr	r6, =0x00001414		@ REGCTL0: modulo 320
+	str	r6, [r5, #0x130]
+	ldr	r6, =0x00EF013F		@ REGCTL1: clip 319, 239
+	str	r6, [r5, #0x134]
+	ldr	r6, =0x00210000
+	str	r6, [r5, #0x138]	@ REGCTL2: CFBD source
+	str	r6, [r5, #0x13C]	@ REGCTL3: destination
+	mov	r3, #2
+3:	ldr	r4, =0x00031000		@ the CCB
+	ldr	r6, =0x7F660000		@ LAST NPABS SPABS PPABS LDSIZE LDPRS LDPPMP CCBPRE YOXY ACW ACCW
+	str	r6, [r4]
+	mov	r6, #0
+	str	r6, [r4, #4]
+	ldr	r6, =0x00031100
+	str	r6, [r4, #8]
+	mov	r6, #0
+	str	r6, [r4, #12]
+	mov	r6, #0x00200000		@ X 32
+	str	r6, [r4, #16]
+	mov	r6, #0x00140000		@ Y 20
+	str	r6, [r4, #20]
+	mov	r6, #0x04000000		@ HDX 64.0 (12.20)
+	str	r6, [r4, #24]
+	mov	r6, #0
+	str	r6, [r4, #28]		@ HDY
+	str	r6, [r4, #32]		@ VDX
+	mov	r6, #0x00190000		@ VDY 25.0 (16.16)
+	str	r6, [r4, #36]
+	mov	r6, #0
+	str	r6, [r4, #40]
+	str	r6, [r4, #44]
+	ldr	r6, =0x0F810F81		@ PIXC: PDC x 4 / 8 + CFBD / 2
+	str	r6, [r4, #48]
+	mov	r6, #0xD6		@ PRE0: 4 rows, LINEAR, 16 bpp
+	str	r6, [r4, #52]
+	ldr	r6, =0x00001003		@ PRE1: 4 pixels
+	str	r6, [r4, #56]
+	str	r4, [r5, #0x5A4]	@ the first CCB
+	str	r4, [r5, #0x100]	@ SPRSTRT
+4:	ldr	r6, [r5, #0x28]		@ until SPRON clears
+	tst	r6, #0x10
+	bne	4b
+	subs	r3, r3, #1
+	bne	3b
+	str	r9, [r5, #8]		@ MCTL back
+	add	r11, r11, #1
+	mov	pc, r13
+	.ltorg
+
+@ test 17's cels: flags, HDX, HDY, VDX, VDY, pixels drawn. The winding is
+@ the sign of HDX * VDY - HDY * VDX (Opera TestInitVisual): positive takes
+@ ACW, negative ACCW. LAST, NPABS, SPABS, PPABS, LDSIZE, LDPRS, LDPPMP,
+@ CCBPRE, YOXY = 0x7F600000; ACW 0x40000, ACCW 0x20000.
+cel_cases:
+	.word	0x7F640000, 0x00100000, 0, 0, 0x00010000, 16	@ ACW, as stored
+	.word	0x7F640000, 0x00100000, 0, 0, 0xFFFF0000, 0	@ ACW, flipped up/down
+	.word	0x7F620000, 0x00100000, 0, 0, 0xFFFF0000, 16	@ ACCW, flipped up/down
+	.word	0x7F620000, 0x00100000, 0, 0, 0x00010000, 0	@ ACCW, as stored
+	.word	0x7F640000, 0, 0x00100000, 0xFFFF0000, 0, 16	@ ACW, 90 degrees
 
 @ CD command byte r1 -> XBUS command register (keeps r1)
 cd_cmd:
@@ -1191,3 +1474,102 @@ sp_check:
 
 	.ltorg
 sport_code_end:
+
+@ ---- test 15, copied to VID_CODE and run there (position independent, its
+@ own literal pool). r11 = checks; a mismatch goes to fail with its address
+@ in r2.
+	.align 4
+vid_code:
+	mov	r7, lr
+	ldr	r0, =0x00210000		@ frame buffer rows 0x20-0x5F (SDRAM), source row 0x7F
+	mov	r1, #0x7F
+	mov	r2, #0x20
+	mov	r3, #64
+	bl	vid_pass
+	ldr	r0, =0x002A0000		@ rows 0x140-0x15F (block A: SRAM unless it is off), source 0x17F
+	ldr	r1, =0x17F
+	ldr	r2, =0x140
+	mov	r3, #32
+	bl	vid_pass
+	mov	pc, r7
+
+@ one pass: frame buffer r0 (the VDL's line addresses), source row r1,
+@ destination rows r2 .. r2 + r3 - 1 (r3 a power of 2)
+vid_pass:
+	mov	r13, lr
+	@ VDL entry at 0x2FC000: ENVIDDMA, LDCURR, LDPREV, no optional words,
+	@ 240 lines; current and previous line address r0; the next entry is
+	@ this one (absolute: bit 18 clear)
+	ldr	r10, =0x002FC000
+	ldr	r6, =0x002180F0
+	str	r6, [r10]
+	str	r0, [r10, #4]
+	str	r0, [r10, #8]
+	str	r10, [r10, #12]
+	@ the source row: word i = 0x5A5A0000 + 512 - i
+	mov	r5, r1, lsl #11
+	add	r5, r5, #0x00200000
+	mov	r9, #512
+	ldr	r4, =0x5A5A0000
+71:	add	r6, r4, r9
+	str	r6, [r5], #4
+	subs	r9, r9, #1
+	bne	71b
+	@ video DMA on: the VDL address, MCTL CLUTXEN (bit 13) and VSCTXEN (14)
+	ldr	r10, =0x03300000
+	ldr	r6, =0x002FC000
+	str	r6, [r10, #0x580]
+	ldr	r9, [r10, #8]
+	orr	r6, r9, #0x6000
+	str	r6, [r10, #8]
+	@ the VDL is taken at the next frame start: wait for CLIO's line count
+	@ (0x03400034, bits 8-0) to go back to the top, then for line 40
+	ldr	r8, =0x03400000
+	ldr	r4, =0x1FF
+	ldr	r5, [r8, #0x34]
+	and	r5, r5, r4
+72:	ldr	r6, [r8, #0x34]
+	and	r6, r6, r4
+	cmp	r6, r5
+	mov	r5, r6
+	bcs	72b
+73:	ldr	r6, [r8, #0x34]
+	and	r6, r6, r4
+	cmp	r6, #40
+	bcc	73b
+	@ 600 copies: the source row into the destination rows in turn
+	ldr	r8, =0x03200000
+	add	r4, r8, r2, lsl #2	@ SPORT address of the first destination row
+	add	r8, r8, r1, lsl #2	@ ... of the source row
+	sub	r3, r3, #1
+	mvn	r1, #0			@ write mask: all bits
+	ldr	r0, =600
+	mov	r5, #0
+74:	ldr	r6, [r8]		@ read transfer of the source row
+	str	r1, [r4, r5, lsl #2]	@ write transfer into the next row
+	add	r5, r5, #1
+	and	r5, r5, r3
+	subs	r0, r0, #1
+	bne	74b
+	@ video DMA off again
+	str	r9, [r10, #8]
+	@ every word of the destination rows: the source row's
+	mov	r2, r2, lsl #11
+	add	r2, r2, #0x00200000
+	add	r3, r3, #1
+	ldr	r4, =0x5A5A0000
+75:	mov	r1, #512
+76:	add	r6, r4, r1
+	ldr	r5, [r2]
+	cmp	r5, r6
+	ldrne	pc, =ROM_BASE + fail
+	add	r2, r2, #4
+	subs	r1, r1, #1
+	bne	76b
+	add	r11, r11, #1
+	subs	r3, r3, #1
+	bne	75b
+	mov	pc, r13
+
+	.ltorg
+vid_code_end:

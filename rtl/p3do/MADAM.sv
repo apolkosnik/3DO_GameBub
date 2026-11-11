@@ -91,6 +91,8 @@ module MADAM
 	// Game Bub port: the VRAM access in progress is the CPU's SPORT access
 	output             VRAM_SP_CPU,
 	output             VID_DMA,      // Game Bub port: the bus is in a video DMA sequence (line or mid-line transfers)
+	output             VID_GUARD,    // Game Bub port: a line's video transfers are due (MADAM_SPORT)
+	input      [10: 0] SPORT_HOLD_START, // Game Bub port: see MADAM_SPORT
 	
 	input              DBG_SPR_EN,
 	input      [ 7: 0] DBG_EXT
@@ -143,6 +145,8 @@ module MADAM
 	//EXTP
 	bit          CLIO_REQ;
 	wire         CLIO_HOLD;   // GameBub: see MADAM_EXTPIF
+	wire         SPORT_HOLD;  // GameBub: see MADAM_SPORT
+	wire         SE_HOLD;     // GameBub: see MADAM_SPORT
 	bit          EXTP_REQ;
 	bit          EXTP_ACK;
 	bit          EXTP_GRANT;
@@ -190,6 +194,7 @@ module MADAM
 	bit          VIDMID_REQ;
 	bit          VIDMID_CURR,VIDMID_FIRST;
 	bit          VIDOUT_ACK;
+	bit          VIDMID_ACK;
 	AddrGenCtl_t SPORT_AG_CTL;
 	bit          SPORT_GRANT;
 	bit          SPORT_LINE0;
@@ -478,6 +483,7 @@ module MADAM
 		.SPRDATA_REQ(SPRDATA_REQ),
 		.SPR_SEL(SPR_SEL),
 		.SPRDRAW_REQ(SPRDRAW_REQ),
+		.SE_HOLD(SE_HOLD),
 		.CFB_SEL(CFB_SEL),
 		.CFB_SUSPEND(CFB_SUSPEND),
 		.SPRPAUS_REQ(SPRPAUS_REQ),
@@ -490,6 +496,7 @@ module MADAM
 		.CLUTWR_ACK(CLUTWR_ACK),
 		.VIDOUT_REQ(VIDOUT_REQ),
 		.VIDOUT_ACK(VIDOUT_ACK),
+		.VIDMID_ACK(VIDMID_ACK),
 		.VIDMID_REQ(VIDMID_REQ),
 		.VIDMID_CURR(VIDMID_CURR),
 		.VIDMID_FIRST(VIDMID_FIRST),
@@ -544,7 +551,8 @@ module MADAM
 		.SLOW_SEL(0/*CPU_SLOW_SEL*/),
 		.CLIO_SEL(CPU_CLIO_SEL),
 		.CLIO_RDY(~CREADY_N & ~CLIO_HOLD),   // GameBub: CLIO_HOLD, see MADAM_EXTPIF
-		.WAIT(0)
+		.WAIT(0),
+		.SPORT_HOLD(SPORT_HOLD)              // GameBub: see MADAM_SPORT
 	);
 	
 	MADAM_EXTPIF EXTPIF
@@ -769,13 +777,18 @@ module MADAM
 		.VIDMID_CURR(VIDMID_CURR),
 		.VIDMID_FIRST(VIDMID_FIRST),
 		.VIDOUT_ACK(VIDOUT_ACK),
+		.VIDMID_ACK(VIDMID_ACK),
 		
 		.VCE(VCE),
 		.PCSC(PCSC),
 		.LSC(SPORT_LSC),
 		.RSC(SPORT_RSC),
 		
-		.FIELD(FIELD)
+		.FIELD(FIELD),
+		.VID_GUARD(VID_GUARD),
+		.SPORT_HOLD_START(SPORT_HOLD_START),
+		.SPORT_HOLD(SPORT_HOLD),
+		.SE_HOLD(SE_HOLD)
 	);
 	
 	MADAM_PLAYER PLAYER

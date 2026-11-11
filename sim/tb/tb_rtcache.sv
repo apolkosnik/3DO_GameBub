@@ -32,6 +32,23 @@
 //     eight byte lanes), so a line's transfers of two just-written rows hit;
 //     a write during an entry's delivery leaves the read-out as it began
 //     (phase 15)
+//   * write transfers (the CPU's page copies, two 128-beat bursts) into
+//     cached half-rows update them too: a copy of a displayed row onto
+//     itself or of another row into it (with write masks) leaves the line's
+//     next transfer a hit with the copied data; a copy into the half-row
+//     being shifted out leaves that read-out as it began (phase 16)
+//   * random reads (CPU, CEL engine frame buffer reads) after a flash write,
+//     a masked flash write or a page copy into the block ddram.sv last read
+//     return the new data: its random-read block buffer was kept across
+//     write bursts and lazy flash writes and served the old words (phase 17)
+//   * a slow-bus read (the CPU's BIOS ROM fetch; the core pauses the 3DO
+//     while it waits) during a prefetch or VDL hint fill is served between the fill's
+//     32-beat chunks, not after the whole fill (about 5.5 us from the SDRAM,
+//     which held MADAM past a line's video request), with the right data,
+//     and the prefetched half-row is still correct (phase 18)
+//   * while a line's video transfers are due (pf_hold, MADAM_SPORT
+//     VID_GUARD) a demand fill starts, a queued prefetch waits, and a
+//     prefetch fill under way stops between its chunks (phase 19)
 // and checks every word shifted out against a reference model of VRAM. The
 // important cases write to rows that are already in the cache.
 //
@@ -107,7 +124,8 @@ module tb_rtcache;
 
 	// ---------------- cache + ddram.sv ----------------
 	wire [17:0] ddr_bladdr, ddr_braddr;
-	wire        ddr_blwr, ddr_brwr, ddr_blrd, ddr_brrd, ddr_bfw, ddr_blte, ddr_brte, ddr_bbusy;
+	wire        ddr_blwr, ddr_brwr, ddr_blrd, ddr_brrd, ddr_bfw, ddr_blte, ddr_brte, ddr_bbusy, ddr_byield, ddr_bwait;
+	reg         pf_hold = 0;               // a line's video transfers are due (phase 19)
 	wire [63:0] ddr_bout;
 	wire [ 9:2] ddr_ba;
 	wire [63:0] ddr_bin = {bldata[31:16], brdata[31:16], bldata[15:0], brdata[15:0]};
@@ -127,7 +145,8 @@ module tb_rtcache;
 		.r_esrd(v_rrd), .r_esnp(v_rnp), .r_esaddr(v_raddr), .r_eswr(v_rwr), .r_este(v_rte), .r_esq(v_rq),
 		.d_bladdr(ddr_bladdr), .d_blrd(ddr_blrd), .d_blwr(ddr_blwr), .d_bfw(ddr_bfw),
 		.d_braddr(ddr_braddr), .d_brrd(ddr_brrd), .d_brwr(ddr_brwr),
-		.d_blte(ddr_blte), .d_brte(ddr_brte), .d_bout(ddr_bout), .d_ba(ddr_ba), .d_bbusy(ddr_bbusy),
+		.d_blte(ddr_blte), .d_brte(ddr_brte), .d_bout(ddr_bout), .d_ba(ddr_ba), .d_bbusy(ddr_bbusy), .d_byield(ddr_byield), .d_bwait(ddr_bwait),
+		.pf_hold(pf_hold),
 		.ddr_we(DDRAM_WE && !DDRAM_BUSY), .ddr_addr(DDRAM_ADDR),
 		.ddr_din(DDRAM_DIN), .ddr_be(DDRAM_BE), .ddr_burstcnt(DDRAM_BURSTCNT),
 		.frame(frame), .vid_dma(vid_dma), .hint(hint), .hint_curr(hint_curr), .hint_curr_v(hint_curr_v), .hint_prev(hint_prev), .hint_prev_v(hint_prev_v),
@@ -140,21 +159,30 @@ module tb_rtcache;
 	reg  [15:0] w_ldata = 0, w_rdata = 0;
 	reg  [ 1:0] w_lwe = 0, w_rwe = 0;
 	reg         w_ras = 0;
+	reg         w_lrd = 0, w_rrd = 0;      // random reads (phase 17)
+	// the slow bus (BIOS ROM, NVRAM) port (phase 18)
+	reg  [21:2] io_a = '0;
+	reg  [31:0] io_d = '0;
+	reg  [ 3:0] io_we = '0;
+	reg         io_rd = 0;
+	wire [31:0] io_q;
+	wire        io_busy;
+	wire [15:0] w_ldout, w_rdout;
 
 	ddram ddram (
 		.DDRAM_CLK(), .DDRAM_BUSY(DDRAM_BUSY), .DDRAM_BURSTCNT(DDRAM_BURSTCNT), .DDRAM_ADDR(DDRAM_ADDR),
 		.DDRAM_DOUT(DDRAM_DOUT), .DDRAM_DOUT_READY(DDRAM_DOUT_READY), .DDRAM_RD(DDRAM_RD),
 		.DDRAM_DIN(DDRAM_DIN), .DDRAM_BE(DDRAM_BE), .DDRAM_WE(DDRAM_WE),
 		.clk(clk_mem), .rst(rst),
-		.io_addr('0), .io_din('0), .io_we('0), .io_rd(1'b0), .io_dout(), .io_busy(),
+		.io_addr(io_a), .io_din(io_d), .io_we(io_we), .io_rd(io_rd), .io_dout(io_q), .io_busy(io_busy),
 		.nvram_addr('0), .nvram_din('0), .nvram_wr(1'b0), .nvram_rd(1'b0), .nvram_dout(), .nvram_busy(),
 		.sclk(1'b0),
-		.laddr(w_addr), .ldin(w_ldata), .lras(w_ras), .lwe(w_lwe), .lrd(1'b0), .ldout(),
-		.raddr(w_addr), .rdin(w_rdata), .rras(w_ras), .rwe(w_rwe), .rrd(1'b0), .rdout(),
+		.laddr(w_addr), .ldin(w_ldata), .lras(w_ras), .lwe(w_lwe), .lrd(w_lrd), .ldout(w_ldout),
+		.raddr(w_addr), .rdin(w_rdata), .rras(w_ras), .rwe(w_rwe), .rrd(w_rrd), .rdout(w_rdout),
 		.busy(),
 		.bladdr(ddr_bladdr), .blwr(ddr_blwr), .blrd(ddr_blrd), .braddr(ddr_braddr), .brwr(ddr_brwr),
 		.brrd(ddr_brrd), .bfw(ddr_bfw), .ba(ddr_ba), .bin(ddr_bin), .bout(ddr_bout),
-		.blte(ddr_blte), .brte(ddr_brte), .bbusy(ddr_bbusy)
+		.blte(ddr_blte), .brte(ddr_brte), .bbusy(ddr_bbusy), .byield(ddr_byield), .bwait(ddr_bwait)
 	);
 
 	wire        sec_req, sec_we, sec_wnext, sec_rvalid, sec_done, init_done;
@@ -352,6 +380,24 @@ module tb_rtcache;
 		mem_cycles(3);
 		ref_l[a] = dl; ref_r[a] = dr;
 	endtask
+	// random read of both halves through ddram.sv (the CPU's or the CEL
+	// engine's frame buffer read), checked against the reference model
+	task automatic cpu_read(input [17:0] a, input string what);
+		bit [15:0] ql, qr;
+		while (ddram.busy) @(posedge clk_mem);
+		@(posedge clk_mem); w_addr <= a; w_ras <= 1;
+		mem_cycles(2);
+		w_lrd <= 1; w_rrd <= 1;
+		mem_cycles(2);
+		while (ddram.busy) @(posedge clk_mem);
+		mem_cycles(2);
+		ql = w_ldout; qr = w_rdout;
+		w_lrd <= 0; w_rrd <= 0; w_ras <= 0;
+		mem_cycles(3);
+		checks++;
+		if (ql !== rl(a) || qr !== rr(a))
+			fail($sformatf("%s: random read of %05h gave %04h %04h, VRAM holds %04h %04h", what, a, ql, qr, rl(a), rr(a)));
+	endtask
 	// CPU write with byte enables per half ({upper, lower} byte), as the
 	// 3DO's byte and halfword stores reach ddram.sv (phase 15)
 	task automatic cpu_write_be(input [17:0] a, input [15:0] dl, input [15:0] dr, input [1:0] lm, input [1:0] rm);
@@ -461,6 +507,11 @@ module tb_rtcache;
 		ras_end();
 		l_off = 0; r_off = 0;
 	endtask
+
+	// Phase 16: write beats that reach a cached entry while it is delivered
+	// or filled (not merged: the entry is dropped)
+	int p16_busy_beats = 0;
+	always @(posedge clk_mem) if (cache.sn_we && |cache.snoop_hit && !cache.sn_merge) p16_busy_beats++;
 
 	// Phase 12 coverage. ddram.sv serves a half's write burst in two passes
 	// of 128 beats (one half-row each) and serves the left half first.
@@ -1317,9 +1368,10 @@ module tb_rtcache;
 		//     written (the frame buffer being shown and the one drawn), and
 		//     two misses run their fills one after the other: the second
 		//     came after the line's read-out had begun (stale pixels).
-		//     Write bursts and flash writes still drop entries (phases 5,
-		//     6), and so does a write into an entry being shifted out, whose
-		//     serial read-out keeps the data it started with.
+		//     Flash writes still drop entries (phase 6; write bursts update
+		//     them too, phase 16), and so does a write into an entry being
+		//     shifted out, whose serial read-out keeps the data it started
+		//     with.
 		begin
 			int errors0, m0;
 			bit [8:0] ra, rb, rc;
@@ -1397,6 +1449,223 @@ module tb_rtcache;
 				rt_read({rc, 9'h0}, 0, 512);
 			end
 			$display("[%0t] phase 15: single-beat writes update cached half-rows, errors=%0d", $realtime, errors - errors0);
+		end
+
+		// 16) Write transfers (the CPU's page copies: a read transfer into
+		//     the CPU shift register, then a write transfer from it, two
+		//     128-beat bursts through ddram.sv) into cached half-rows update
+		//     them. A copy dropped them, and the next video transfers of the
+		//     copied rows missed: their fills (5.8 us from the SDRAM, 10.4 us
+		//     from the SRAM) ran past the line's scanout (audit: a copy of
+		//     each displayed row onto itself, VRAM unchanged, corrupted 12 of
+		//     12 cases; none without the copy).
+		begin
+			int errors0, m0;
+			bit [8:0] ra, rb, rs;
+			errors0 = errors;
+			ra = 9'h0D0; rb = 9'h0D4; rs = 9'h0D8;
+			for (int h = 0; h < 2; h++)
+				if (cache.is_internal({ra, 1'(h)}) || cache.is_internal({rb, 1'(h)}) || cache.is_internal({rs, 1'(h)}))
+					fail("phase 16: a test row is on chip, the test cannot work");
+			for (int w = 0; w < 512; w++) begin
+				cpu_write({ra, 9'(w)}, 16'h7100 ^ 16'(w), 16'h7200 ^ 16'(w));
+				cpu_write({rb, 9'(w)}, 16'h7300 ^ 16'(w), 16'h7400 ^ 16'(w));
+				cpu_write({rs, 9'(w)}, 16'h7500 ^ 16'(w * 3), 16'h7600 ^ 16'(w * 5));
+			end
+			wait_idle();
+			for (int n = 0; n < 6; n++) begin
+				bit [8:0] src;
+				bit [15:0] ml, mr;
+				// a) n = 0, 1: each row copied onto itself (VRAM unchanged);
+				// b) n = 2..5: the source row into each, with write masks
+				src = n < 2 ? 9'h0 : rs;
+				ml = n < 2 ? 16'hFFFF : 16'($urandom()); mr = n < 2 ? 16'hFFFF : 16'($urandom());
+				rt_read({ra, 9'h0}, 0, 0); rt_read({rb, 9'h0}, 0, 0);
+				wait_idle(); mem_cycles(400); wait_idle();
+				for (int h = 0; h < 2; h++)
+					if (!cache.find({ra, 1'(h)})[4] || !cache.find({rb, 1'(h)})[4]) fail("phase 16: rows not cached before the copies");
+				cpu_rt(n < 2 ? ra : src); cpu_mwt(ra, ml, mr);
+				cpu_rt(n < 2 ? rb : src); cpu_mwt(rb, ml, mr);
+				wait_idle();
+				for (int h = 0; h < 2; h++) begin
+					if (!cache.find({ra, 1'(h)})[4]) fail($sformatf("phase 16: a copy dropped half-row %03h", {ra, 1'(h)}));
+					if (!cache.find({rb, 1'(h)})[4]) fail($sformatf("phase 16: a copy dropped half-row %03h", {rb, 1'(h)}));
+				end
+				m0 = st_misses;
+				rt_read({ra, 9'h0}, 0, 512);
+				rt_read({rb, 9'h0}, 0, 512);
+				if (st_misses != m0) fail($sformatf("phase 16 (%s): the line's transfers of the copied rows missed %0d times",
+				                                    n < 2 ? "row onto itself" : "masked copy", st_misses - m0));
+			end
+			// c) a copy into a half-row while the cache delivers it to one
+			//    VRAM half (a split transfer, as for a line's mid-line
+			//    transfers): the other half takes the copy at once, and its
+			//    write beats reach the entry during the delivery. They must
+			//    not be merged (the entry is dropped); the half being
+			//    delivered takes the copy when it is ready (MADAM paused by
+			//    RDY, the command held on the pins), and the row then reads
+			//    back as copied.
+			begin
+				int busy_beats0;
+				busy_beats0 = p16_busy_beats;
+				// ra cached; the video shift register then holds rb (a split
+				// transfer of the half-row it holds is skipped)
+				rt_read({ra, 9'h0}, 0, 0);
+				rt_read({rb, 9'h0}, 0, 0);
+				wait_idle(); mem_cycles(400); wait_idle();
+				if (!cache.find({ra, 1'b0})[4]) fail("phase 16: row not cached before the split transfer");
+				cpu_rt(rs);
+				half_rt_paused(0, {ra, 9'h0});
+				if (!cache.dl_act[0]) fail("phase 16: the split transfer is not being delivered, the test cannot work");
+				cpu_mwt_paused(ra);
+				wait_idle();
+				if (p16_busy_beats == busy_beats0) fail("phase 16: no copy beat reached the entry during its delivery, the test cannot work");
+				$display("[%0t] phase 16: %0d copy beats reached the entry during its delivery", $realtime, p16_busy_beats - busy_beats0);
+				rt_read({ra, 9'h0}, 0, 512);
+			end
+			$display("[%0t] phase 16: write transfers update cached half-rows, errors=%0d", $realtime, errors - errors0);
+		end
+
+		// 17) random reads after writes into the block ddram.sv last read
+		begin
+			int errors0;
+			bit [8:0] r, src;
+			errors0 = errors;
+			for (int k = 0; k < 2; k++) begin
+				r = rows[k * 2]; src = rows[k * 2 + 1];
+				cpu_write({r, 9'h004}, 16'h1111 + 16'(k), 16'h2222 + 16'(k));
+				cpu_write({src, 9'h004}, 16'h5555 + 16'(k), 16'h6666 + 16'(k));
+				wait_idle();
+				cpu_read({r, 9'h004}, "phase 17, before");
+				flash_write(r, 16'hABCD, 16'hDCBA);
+				wait_idle();
+				cpu_read({r, 9'h004}, "phase 17, after a flash write");
+				cpu_read({r, 9'h006}, "phase 17, after a flash write");
+				cpu_rt(src);
+				cpu_mwt(r);
+				wait_idle();
+				cpu_read({r, 9'h004}, "phase 17, after a page copy");
+				cpu_read({r, 9'h005}, "phase 17, after a page copy");
+				flash_write(r, 16'h0F0F, 16'hF0F0, 16'h00FF, 16'hFF00);
+				wait_idle();
+				cpu_read({r, 9'h004}, "phase 17, after a masked flash write");
+				cpu_read({src, 9'h104}, "phase 17, another block");
+				cpu_read({r, 9'h004}, "phase 17, back to the block");
+			end
+			$display("[%0t] phase 17: random reads after writes into the read block, errors=%0d", $realtime, errors - errors0);
+		end
+
+		// ---- phase 18: the slow bus during a prefetch fill ----
+		// A split transfer of a row's first half-row (a demand fill) queues
+		// the prefetch of the next half-rows; once a prefetch fill has begun,
+		// a slow-bus read of a word written there before. It must end while
+		// the fill is still running (served between chunks), within 2.5 us,
+		// with the word; then the prefetched half-row is read out.
+		begin
+			int errors0;
+			bit [8:0] q;
+			bit [8:0] qs [$];
+			bit       qh [$];
+			errors0 = errors;
+			// block B (SDRAM), block 1 (SRAM unless off): a queued prefetch;
+			// block B again: a VDL frame buffer hint's fill (the boot case: a
+			// VDL entry's new frame buffer, the next line's rows)
+			qs = '{9'd352, 9'd40, 9'd368};
+			qh = '{0, 0, 1};
+			foreach (qs[n]) begin
+				int to, lat;
+				bit fill_on;
+				bit [31:0] pf0;
+				q = qs[n];
+				if (cache.is_internal({q, 1'b0}) || cache.is_internal({q, 1'b1}) || cache.is_internal(10'({q, 1'b1} + 1)))
+					fail($sformatf("phase 18: row %03h is on chip, the test cannot work", q));
+				// the ROM word (DDRAM space 0x0400000 + ...)
+				// (held as the slow bus holds it: ddram.sv takes the byte enables
+				// two cycles after the write starts)
+				@(posedge clk_mem); io_a <= 20'h40000 + 20'(n * 4); io_d <= 32'hC0DE0000 + 32'(q); io_we <= 4'hF;
+				mem_cycles(6);
+				@(posedge clk_mem); io_we <= '0;
+				to = 0; while ((io_busy || !io_busy && to < 2) && to < 10000) begin @(posedge clk_mem); to++; end
+				wait_idle(); mem_cycles(400); wait_idle();
+				if (cache.find({q, 1'b0})[4] || cache.find({q, 1'b1})[4]) fail($sformatf("phase 18: row %03h cached before the test", q));
+				pf0 = st_pf;
+				if (qh[n]) vdl_hint({q, 9'h000}, 1, '0, 0); // the hint: half-row 2q
+				else begin
+					ras_cycle({q, 9'h000}, 0, 2'b11, 1);    // split transfer: demand fill of half-row 2q
+					ras_end();
+				end
+				to = 0;
+				while (!(cache.fill_busy && st_pf != pf0) && to < 100000) begin @(posedge clk_mem); to++; end
+				if (to >= 100000) begin fail($sformatf("phase 18: no prefetch fill after row %03h", q)); continue; end
+				mem_cycles(30);                          // the fill's first beats are on their way
+				if (!cache.fill_busy) fail("phase 18: the prefetch fill ended before the slow-bus read");
+				@(posedge clk_mem); io_rd <= 1;
+				@(posedge clk_mem); io_rd <= 0;
+				lat = 1;
+				while (io_busy || lat < 2) begin @(posedge clk_mem); lat++; if (lat > 100000) break; end
+				fill_on = cache.fill_busy;
+				checks++;
+				if (io_q !== 32'hC0DE0000 + 32'(q)) fail($sformatf("phase 18: slow-bus read got %08h expected %08h", io_q, 32'hC0DE0000 + 32'(q)));
+				$display("[%0t] phase 18: row %03h (%s): slow-bus read during a %s fill took %0.2f us, fill %s", $realtime, q,
+				         in_sram(q) ? "SRAM" : "SDRAM", qh[n] ? "VDL hint" : "prefetch", lat / 100.0, fill_on ? "still running" : "over");
+				// at most one 32-beat chunk: about 1.5 us from the SDRAM, 5 us
+				// from the SRAM (a whole fill: 5.5 / 10-20 us)
+				if (!fill_on || lat > (in_sram(q) ? 600 : 250))
+					fail($sformatf("phase 18: the slow-bus read waited %0.2f us for the prefetch fill (row %03h)", lat / 100.0, q));
+				wait_idle();
+				rt_read({q, 9'h000}, 0, 512);           // the row, its second half-row prefetched
+			end
+			$display("[%0t] phase 18: slow-bus reads between prefetch fill chunks, errors=%0d", $realtime, errors - errors0);
+		end
+
+		// ---- phase 19: no prefetch fill while a line's transfers are due ----
+		// pf_hold (MADAM_SPORT VID_GUARD): a demand fill starts at once, a
+		// queued prefetch waits until pf_hold drops; a prefetch fill under
+		// way stops at its next 32-beat boundary and goes on after it. Every
+		// SDRAM transfer pauses the 3DO, so a prefetch there held MADAM past
+		// the line's scanout (test ROM test 18).
+		begin
+			int errors0, to, f0, f1;
+			bit [8:0] q;
+			bit [31:0] pf0;
+			errors0 = errors;
+			q = 9'd360;                              // block B (SDRAM)
+			if (cache.is_internal({q, 1'b0}) || cache.is_internal({q, 1'b1}) || cache.is_internal(10'({q, 1'b1} + 1)))
+				fail("phase 19: the row is on chip, the test cannot work");
+			wait_idle(); mem_cycles(400); wait_idle();
+			if (cache.find({q, 1'b0})[4] || cache.find({q, 1'b1})[4]) fail("phase 19: row cached before the test");
+			// (a) under pf_hold: the demand fill runs, the prefetch waits
+			@(posedge clk_mem); pf_hold <= 1;
+			pf0 = st_pf;
+			ras_cycle({q, 9'h000}, 0, 2'b11, 1);
+			ras_end();
+			to = 0;
+			while (!(cache.find({q, 1'b0})[4] && !cache.fill_busy) && to < 100000) begin @(posedge clk_mem); to++; end
+			if (to >= 100000) fail("phase 19: the demand fill did not complete under pf_hold");
+			mem_cycles(500);                         // 5 us: past the prefetch hold-off
+			if (st_pf != pf0 || cache.fill_busy) fail("phase 19: a prefetch fill started under pf_hold");
+			checks++;
+			@(posedge clk_mem); pf_hold <= 0;
+			to = 0;
+			while (!(cache.fill_busy && st_pf != pf0) && to < 1000) begin @(posedge clk_mem); to++; end
+			if (to >= 1000) fail("phase 19: the prefetch did not start after pf_hold dropped");
+			// (b) pf_hold during that prefetch fill: it stops at a chunk boundary
+			to = 0;
+			while (cache.filled[cache.fill_e] < 8'd40 && to < 100000) begin @(posedge clk_mem); to++; end
+			@(posedge clk_mem); pf_hold <= 1;
+			mem_cycles(300);                         // the chunk under way ends
+			f0 = cache.filled[cache.fill_e];
+			mem_cycles(300);
+			f1 = cache.filled[cache.fill_e];
+			checks++;
+			if (!cache.fill_busy || f0 != f1 || f0 % 32 != 0)
+				fail($sformatf("phase 19: the prefetch fill did not stop at a chunk boundary under pf_hold (busy %b, %0d then %0d beats)",
+				               cache.fill_busy, f0, f1));
+			$display("[%0t] phase 19: prefetch fill stopped at beat %0d under pf_hold", $realtime, f0);
+			@(posedge clk_mem); pf_hold <= 0;
+			wait_idle();
+			rt_read({q, 9'h000}, 0, 512);            // the row: both half-rows correct
+			$display("[%0t] phase 19: no prefetch fill while a line's transfers are due, errors=%0d", $realtime, errors - errors0);
 		end
 
 		$display("tb_rtcache: %0d words checked, hits %0d misses %0d prefetches %0d invalidations %0d",

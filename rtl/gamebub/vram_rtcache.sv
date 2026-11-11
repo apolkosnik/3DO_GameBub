@@ -51,13 +51,16 @@
 // being filled (same half-row), or misses and is served by the same fill.
 //
 // Coherence: writes are snooped where they become visible to later reads,
-// at ddram.sv's committed DDRAM write commands. A single-beat write updates
-// the enabled bytes of an idle cached half-row instead of evicting it: a
-// CEL write after prefetch otherwise caused a cold video read, and fills
-// for different previous/current rows ran in sequence past scanout.
-// Write bursts and flash writes still invalidate matching entries. A
-// delivery or fill in progress also retains the original invalidation
-// behavior, keeping the serial snapshot intact and dropping dirty fills.
+// at ddram.sv's committed DDRAM write beats. A write beat, single or in a
+// burst, updates the enabled bytes of an idle cached half-row instead of
+// evicting it: a CEL write after prefetch otherwise caused a cold video
+// read, and fills for different previous/current rows ran in sequence past
+// scanout; a write transfer (a page copy into a displayed row: two 128-beat
+// bursts) did the same. ddram.sv gives a burst's address with every beat,
+// unchanged, so the beats are counted here. Flash writes still invalidate
+// matching entries. A delivery or fill in progress also retains the
+// original invalidation behavior, keeping the serial snapshot intact and
+// dropping dirty fills.
 // The stat_invalidations counter continues to count matched write snoops,
 // including the single-beat updates.
 //
@@ -105,6 +108,9 @@ module vram_rtcache #(
 	input      [63: 0] d_bout,
 	input      [ 9: 2] d_ba,
 	input              d_bbusy,
+	output             d_byield,           // the fill may wait for the slow bus between 32-beat chunks
+	output             d_bwait,            // ... and waits there now (pf_hold)
+	input              pf_hold,            // a line's video transfers are due (MADAM_SPORT VID_GUARD, clk_mem)
 
 	// snoop: ddram.sv DDRAM write commands
 	input              ddr_we,
@@ -216,6 +222,29 @@ module vram_rtcache #(
 	reg  [ 7:0] dem_age;               // cycles a demand miss has waited
 	wire        dem_hold = vid_dma && (dem_pend[0] != dem_pend[1]) && dem_age < 8'(DEM_HOLD_MAX);
 	reg  [ 7:0] req_age;
+	// A prefetch fill (queued, VDL hint or frame start; not a demand) lets
+	// ddram.sv serve the 3DO's slow bus (BIOS ROM, NVRAM) between its 32-beat
+	// chunks: a ROM fetch queued behind a whole fill (128 beats, about 5.5 us)
+	// kept the 3DO paused, MADAM could not post a line's video request and
+	// the line showed old data (tb_boot, PAL BIOS at 0.30 s: a VDL hint fill,
+	// the next line's rows). Not once a video transfer is waiting for the
+	// entry's rows: from then on it goes on in one burst.
+	reg         fill_yield, fill_plain;
+	assign d_byield = fill_busy && fill_yield &&
+	                  !(dl_act[0] && dl_e[0] == fill_e) && !(dl_act[1] && dl_e[1] == fill_e);
+	// While a line's video transfers are due (pf_hold, from 5.7 us before
+	// MADAM's request until they are on the bus) a queued prefetch fill
+	// does not start, and one under way stops between its chunks: every
+	// SDRAM transfer pauses the 3DO, and a fill there held MADAM past the
+	// line's scanout. The guard on the secondary port (vid_sec_guard.sv)
+	// lets it go as soon as the 3DO stalls on something else, e.g. a CEL
+	// engine frame buffer read queued behind the fill in ddram.sv (test ROM
+	// test 18). Not a VDL hint's or the frame start's fill (the next
+	// line's rows; the frame start's comes in the vertical blanking, where
+	// the video DMA may run too, and held there it met the first line), and
+	// not while a demand waits (ddram.sv runs one fill at a time).
+	wire        dem_wait = dem_pend[0] || dem_pend[1];
+	assign d_bwait = d_byield && fill_plain && pf_hold && !dem_wait;
 	wire        pf_quiet = req_age >= 8'(PF_HOLDOFF);
 
 	// VDL framebuffer hint: waits for a cycle without a request (requests
@@ -223,7 +252,6 @@ module vram_rtcache #(
 	// hint_q blocks fill starts for the cycle after, when hit_p is stale.
 	reg         hint_d, hint_pend, hint_q, hint_v2;
 	reg  [ 9:0] hint_h1, hint_h2;
-
 	// Frame start again at the start of each frame (vertical blanking, ~20
 	// lines before the picture): the first half-rows of the last two frame
 	// buffers the VDL pointed at (double buffering) are queued like a hint.
@@ -242,7 +270,14 @@ module vram_rtcache #(
 	reg  [ 6:0] sn_beat;
 	reg  [63:0] sn_data;
 	reg  [ 7:0] sn_be;
-	reg         sn_single;
+	// beat address of a DDRAM write: the command's address for its first
+	// beat, counted up for the others (ddram.sv holds the address)
+	reg  [ 7:0] wb_left;        // beats of the burst still to come
+	reg  [16:0] wb_next;        // address of the next one
+	reg         wb_vram;        // the burst is in VRAM
+	wire        wb_cont = wb_left != 8'd0;
+	wire [16:0] wb_a    = wb_cont ? wb_next : ddr_addr[16:0];
+	wire        wb_v    = wb_cont ? wb_vram : ddr_addr[24:17] == '0;
 	reg  [EW-1:0] sn_e;         // entry holding sn_h when the write was issued
 	reg         sn_hit;
 	reg         sn_fw;
@@ -290,13 +325,16 @@ module vram_rtcache #(
 
 	always @(posedge clk) rd_q <= data[rd_addr];
 
-	// Update enabled bytes of idle cached rows on committed single-beat writes.
-	// Bursts retain their base address; they and active deliveries still invalidate.
+	// Update enabled bytes of idle cached rows on committed write beats
+	// (single or in a burst); active deliveries and fills still invalidate.
 	// One byte-enabled write port, shared by fills and committed writes.
 	// Keeping its address/data mux outside the RAM write process preserves
 	// block-RAM inference on the Game Bub FPGA. ddram.sv takes no write
-	// command while a fill's read burst runs, so the two never meet; should
-	// they, the fill writes and the snooped entry is invalidated instead.
+	// command during a fill's read burst (a yielding fill's random writes go
+	// between its chunks, d_byield, when no beat is written), so the two
+	// never meet; should they, the fill writes and the snooped entry is
+	// invalidated instead. A write into the entry being filled marks it
+	// dirty: it is dropped when the fill ends.
 	// The entry is looked up a cycle early, on the write command's address
 	// (sn_e/sn_hit, registered with the other snoop inputs), so the block
 	// RAM's write address does not wait for the 16-way tag compare. In the
@@ -306,7 +344,7 @@ module vram_rtcache #(
 	// between is not merged either. Either way the snoop invalidates it
 	// (snoop_hit, compared afresh), as for any write it does not merge.
 	wire fill_write = fill_busy && d_blte;
-	wire sn_merge = sn_we && sn_single && sn_hit && valid[sn_e] && tag[sn_e] == sn_h &&
+	wire sn_merge = sn_we && sn_hit && valid[sn_e] && tag[sn_e] == sn_h &&
 	                !entry_busy(sn_e) && !fill_write;
 	wire [EW+6:0] data_wa = fill_write ? {fill_e, d_ba[8:2]} : {sn_e, sn_beat};
 	wire [63:0] data_wd = fill_write ? d_bout : sn_data;
@@ -353,13 +391,18 @@ module vram_rtcache #(
 		hint_q   <= 0;
 		req_v[0] <= l_esrd; req_a[0] <= l_esaddr; req_np[0] <= l_esnp;
 		req_v[1] <= r_esrd; req_a[1] <= r_esaddr; req_np[1] <= r_esnp;
-		sn_we  <= ddr_we && ddr_addr[24:17] == '0;
-		sn_h   <= ddr_addr[16:7];
-		sn_beat <= ddr_addr[6:0];
+		sn_we  <= ddr_we && wb_v;
+		sn_h   <= wb_a[16:7];
+		sn_beat <= wb_a[6:0];
 		sn_data <= ddr_din;
 		sn_be <= ddr_be;
-		sn_single <= ddr_burstcnt == 8'd1;
-		{sn_hit, sn_e} <= find(ddr_addr[16:7]);
+		{sn_hit, sn_e} <= find(wb_a[16:7]);
+		if (rst) wb_left <= 8'd0;
+		else if (ddr_we) begin
+			wb_next <= wb_a + 1'd1;
+			wb_vram <= wb_v;
+			wb_left <= (wb_cont ? wb_left : ddr_burstcnt) - 8'd1;
+		end
 		sn_fw  <= l_esfw;
 		sn_row <= l_esaddr[17:9];
 		hit_d[0] <= fdem0[EW];
@@ -450,12 +493,12 @@ module vram_rtcache #(
 				go = 0; from_pf = 0; from_hint = 0; nh = '0;
 				if (dem_pend[0] && !hit_d[0]) begin if (!dem_hold) begin go = 1; nh = dem_h[0]; end end
 				else if (dem_pend[1] && !hit_d[1]) begin if (!dem_hold) begin go = 1; nh = dem_h[1]; end end
-				else if (pf_v[0] && (pf_quiet || pf_hint[0])) begin
+				else if (pf_v[0] && (pf_quiet || pf_hint[0]) && (pf_hint[0] || !pf_hold)) begin
 					from_pf = 1;
 					from_hint = pf_hint[0];
 					if (!hit_p[0]) begin go = 1; nh = pf_h[0]; end
 					pf_v[0] <= 0;
-				end else if (pf_v[1] && (pf_quiet || pf_hint[1])) begin
+				end else if (pf_v[1] && (pf_quiet || pf_hint[1]) && (pf_hint[1] || !pf_hold)) begin
 					from_pf = 1;
 					from_hint = pf_hint[1];
 					if (!hit_p[1]) begin go = 1; nh = pf_h[1]; end
@@ -474,6 +517,8 @@ module vram_rtcache #(
 					d_blrd       <= 1;
 					d_brrd       <= 1;
 					fill_busy    <= 1;
+					fill_yield   <= from_pf;
+					fill_plain   <= from_pf && !from_hint;
 					vptr         <= vptr + 1'd1;
 					if (from_pf) stat_prefetches <= stat_prefetches + 1'd1;
 				end

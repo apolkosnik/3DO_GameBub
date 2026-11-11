@@ -30,6 +30,7 @@ module MADAM_SPORT
 	output reg         VIDMID_CURR,
 	output reg         VIDMID_FIRST,
 	input              VIDOUT_ACK,
+	input              VIDMID_ACK,   // Game Bub port: see MADAM_ARB
 	
 	input              VCE,
 	input              PCSC,
@@ -37,7 +38,11 @@ module MADAM_SPORT
 	output             RSC,
 	
 	output             FIELD,
-	output             V480
+	output             V480,
+	output reg         VID_GUARD,    // Game Bub port: a line's video transfers are due (see below)
+	input      [10: 0] SPORT_HOLD_START, // Game Bub port: HCOUNT at which SPORT_HOLD rises (10 .. 1468)
+	output reg         SPORT_HOLD,   // Game Bub port: the CPU's SPORT accesses wait (see below)
+	output reg         SE_HOLD       // Game Bub port: the CEL engine leaves the bus (see below)
 	
 `ifdef DEBUG
 	                   ,
@@ -120,6 +125,12 @@ module MADAM_SPORT
 	//CLUT transfer
 	bit  [ 8: 0] LINE;
 	bit          ENVIDDMA;
+	// Game Bub port: a VDL entry is fetched on this line (HCOUNT 1279): the
+	// CPU's SPORT accesses wait from 190 dots before SPORT_HOLD_START (see
+	// SPORT_HOLD below), at the line start if that is earlier
+	bit          VDL_HOLD_SET, VDL_SE_SET;
+	wire [10: 0] VDL_HOLD_START = SPORT_HOLD_START > 11'd200 ? SPORT_HOLD_START - 11'd190 : 11'd10;
+	localparam bit [10:0] SE_HOLD_LEAD = 11'd80;   // dots: see SE_HOLD below
 	always @(posedge CLK or negedge RST_N) begin
 		bit          ALLOW;
 		bit          PEND;
@@ -129,6 +140,8 @@ module MADAM_SPORT
 			CLUTWR_REQ <= 0;
 			LINE0 <= 0;
 			ALLOW <= 0;
+			VDL_HOLD_SET <= 0;
+			VDL_SE_SET <= 0;
 			// synopsys translate_off
 			LINE <= '0;
 			ENVIDDMA <= 0;
@@ -147,6 +160,9 @@ module MADAM_SPORT
 						ENVIDDMA <= 0;
 					end
 				end
+				
+				VDL_HOLD_SET <= HCOUNT == VDL_HOLD_START && ALLOW && CLUTXEN && (LINE == 9'd1 || FC);
+				VDL_SE_SET   <= HCOUNT == 11'd1290 - 11'd10 - 1 - SE_HOLD_LEAD && ALLOW && CLUTXEN && (LINE == 9'd1 || FC);
 				
 				if (HCOUNT == 11'd1290 - 11'd10 - 1 && ALLOW && CLUTXEN) begin
 					/*if (VZ) begin
@@ -206,7 +222,11 @@ module MADAM_SPORT
 				if (PEND && HCOUNT >= 11'd1340 - 1) begin
 					CNT <= '0;
 					PEND <= 0;
-					CLUT_TRANS_EXEC <= CLUTXEN;
+					// Game Bub port: an entry with no optional words (length 0)
+					// shifts none out (Opera; the patent: "a number of optional
+					// additional control words ... if any"). The count wrapped
+					// to 64 words before, the next entry's header among them.
+					CLUT_TRANS_EXEC <= CLUTXEN && CLUT_DMACTL.LEN != '0;
 				end
 				
 				if (CLUT_TRANS_EXEC) begin
@@ -264,8 +284,69 @@ module MADAM_SPORT
 		end
 	end 
 	
+	wire VID_SEQ = (BUS_STATE_FF >= VID_PREINIT1 && BUS_STATE_FF <= VID_MIDCURR1);
 	wire VID_PREV_TRANS = (BUS_STATE_FF == VID_PREV1);
 	wire VID_CURR_TRANS = (BUS_STATE_FF == VID_CURR1);
+
+	// Game Bub port: VID_GUARD is high from 140 dots (5.7 us) before a line's
+	// video transfers are requested (HCOUNT 1469) until the second of them
+	// (VID_CURR1) is on the bus, or the scanout begins (HCOUNT 9) without it.
+	// p3do_gamebub holds back long SDRAM transfers, which pause the whole
+	// 3DO, while it is high, so they cannot pause MADAM across the transfer
+	// deadline (about 4.4 us after the request) while the scanout continues.
+	// A transfer started just before it (512 words, 5.6 us) ends before the
+	// request.
+	// SPORT_HOLD: the same, from HCOUNT SPORT_HOLD_START on (set by the
+	// port for the memory VRAM is in: at least the longest CPU SPORT
+	// transfer before the request). A CPU SPORT transfer (page copy read or
+	// write transfer, flash write) keeps its VRAM half busy until its row is
+	// in or out of the memory behind it, 1024 16-bit words each way: up to
+	// about 27 us in the SDRAM, 40 us in the SRAM, 56 us in the SRAM with
+	// the safe timing, against about 0.2 us in real VRAM. A line's video transfer that comes in the meantime
+	// waits for it, with the scanout going on: the OS's frame buffer
+	// clears and copies, run in the vertical blanking, reach into the top
+	// of the picture, and those lines came out from the old serial register
+	// contents. MADAM_CPUIF keeps the CPU's SPORT access waiting (stretch)
+	// while SPORT_HOLD is high, so every transfer started before it is over
+	// by the request. Copies go on between the lines.
+	// SE_HOLD: from SE_HOLD_LEAD dots (3.3 us) before a shown line's video
+	// request until its second transfer is on the bus (or the scanout
+	// begins), the CEL engine leaves MADAM's bus at its next step and starts
+	// nothing new (MADAM_ARB SE_YIELD). Its frame buffer reads and writes in
+	// the SDRAM pause the 3DO for each access; drawing into a shown frame
+	// buffer, the pauses took 3.5 to 4.3 us of the 4.4 us from the request
+	// to the scanout (CD player visualizer, tb_boot +late_diag: the request
+	// was granted 3.9 to 4.3 us late, behind the CEL engine), and the line
+	// came out late. In real VRAM those accesses take nanoseconds. On a
+	// line with a VDL fetch (HCOUNT 1279) it starts SE_HOLD_LEAD dots before
+	// the fetch: the entry's frame buffer hint fill (5.5 us from the SDRAM)
+	// and the CEL engine's accesses together ran past the next line's
+	// request (test ROM test 18, the entry repeating every 240 lines).
+	// (SE_HOLD_LEAD: declared at the top)
+	// On a line with a VDL fetch (HCOUNT 1279: the frame start, where
+	// ENVIDDMA is clear until the entry is in, or an entry's last line) the
+	// hold starts 190 dots earlier (VDL_HOLD_START): a copy still running
+	// at 1279 paused the fetch, and the video transfers behind it missed
+	// the scanout of the next line (test ROM test 15 over several frames).
+	// With SPORT_HOLD_START below 200 (the slowest memory) it starts at
+	// the line start.
+	always @(posedge CLK or negedge RST_N) begin
+		if (!RST_N) begin
+			VID_GUARD <= 0;
+			SPORT_HOLD <= 0;
+			SE_HOLD <= 0;
+		end else begin
+			if (EN && VCE) begin
+				if (HCOUNT == 11'd1490 - 11'd20 - 1 - 11'd140 && ENVIDDMA && VSCTXEN) VID_GUARD <= 1;
+				if (HCOUNT == 11'd1490 - 11'd20 - 1 - SE_HOLD_LEAD && ENVIDDMA && VSCTXEN) SE_HOLD <= 1;
+				if (VDL_SE_SET && VSCTXEN) SE_HOLD <= 1;
+				if (HCOUNT == SPORT_HOLD_START && ENVIDDMA && VSCTXEN) SPORT_HOLD <= 1;
+				if (VDL_HOLD_SET) SPORT_HOLD <= 1;
+				if (HCOUNT == 11'd10 - 1) begin VID_GUARD <= 0; SPORT_HOLD <= 0; SE_HOLD <= 0; end
+			end
+			if (EN && CE_R && VID_CURR_TRANS) begin VID_GUARD <= 0; SPORT_HOLD <= 0; SE_HOLD <= 0; end
+		end
+	end
 	always @(posedge CLK or negedge RST_N) begin
 		bit          LMID_PEND,RMID_PEND;
 		
@@ -290,17 +371,22 @@ module MADAM_SPORT
 			if (LMIDLINE_REQ && VIDEO_TRANS_EXEC) LMID_PEND <= 1;
 			if (RMIDLINE_REQ && VIDEO_TRANS_EXEC) RMID_PEND <= 1;
 			
-			if (LMID_PEND && !VIDMID_REQ) begin
+			// Game Bub port: a pending mid-line request is posted only when no
+			// video sequence is on the bus: posting sets VIDMID_CURR, which a
+			// running sequence still reads to pick the DMA register it
+			// advances (VID_MIDINIT1), and the original's posting one CE_R
+			// after the previous grant advanced the other half's register.
+			if (LMID_PEND && !VIDMID_REQ && !VID_SEQ) begin
 				LMID_PEND <= 0;
 				VIDMID_REQ <= 1;
 				VIDMID_CURR <= ~VIDOUT_PFL;
 			end
-			else if (RMID_PEND && !VIDMID_REQ) begin
+			else if (RMID_PEND && !VIDMID_REQ && !VID_SEQ) begin
 				RMID_PEND <= 0;
 				VIDMID_REQ <= 1;
 				VIDMID_CURR <= VIDOUT_PFL;
 			end
-			if (VIDMID_REQ && VIDOUT_ACK) begin
+			if (VIDMID_REQ && VIDMID_ACK) begin
 				VIDMID_REQ <= 0;
 			end
 `ifdef DEBUG
@@ -400,14 +486,24 @@ module MADAM_SPORT
 				AG_CTL.DMA_ADDER_CTL = 4'b0001;
 			end
 			
+			// Header bit 18 (VDL_RELSEL, named NPABS here) set: the next
+			// VDL address is relative, word 3 + the address after it
+			// (entry + 16 bytes; patent: REL = target - PC - 4; Opera
+			// next += entry + 16). Clear: word 3 as loaded in CLUT_NEXT1.
+			// REL0 (the address bus holds word 3's address, OFFS_FF word
+			// 3) writes the next VDL address (1) as address + OFFS + 1 and
+			// reads the list pointer (0, word 3's address) back onto the
+			// bus; REL1 then writes the pointer as address + 1, the first
+			// optional word, for CLUT_TRANSFER.
 			CLUT_NEXT_REL0: begin
 				AG_CTL.DMA_OWN_SEL = 1;
 				AG_CTL.DMA_REG_READ_SEL = 1;
 				AG_CTL.DMA_REG_READ_CTL = 2'h0;
 				AG_CTL.DMA_REG_WRITE_SEL = 0;
-				AG_CTL.DMA_REG_WRITE_CTL = 3'h0;
-				AG_CTL.DMA_REG_WRITE_EN = 1;
-				AG_CTL.DMA_ADDER_CTL = 4'b0001;
+				AG_CTL.DMA_REG_WRITE_CTL = 3'h1;
+				AG_CTL.DMA_REG_WRITE_EN = CLUT_DMACTL.NPABS;
+				AG_CTL.DMA_ADDR_SEL = 1;
+				AG_CTL.DMA_ADDER_CTL = 4'b0110;
 			end
 			
 			CLUT_NEXT_REL1: begin
@@ -415,8 +511,8 @@ module MADAM_SPORT
 				AG_CTL.DMA_REG_READ_SEL = 1;
 				AG_CTL.DMA_REG_READ_CTL = 2'h0;
 				AG_CTL.DMA_REG_WRITE_SEL = 0;
-				AG_CTL.DMA_REG_WRITE_CTL = 3'h1;
-				AG_CTL.DMA_REG_WRITE_EN = CLUT_DMACTL.NPABS;
+				AG_CTL.DMA_REG_WRITE_CTL = 3'h0;
+				AG_CTL.DMA_REG_WRITE_EN = 1;
 				AG_CTL.DMA_ADDR_SEL = 1;
 				AG_CTL.DMA_ADDER_CTL = 4'b0001;
 			end

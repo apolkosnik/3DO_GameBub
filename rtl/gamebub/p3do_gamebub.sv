@@ -303,6 +303,17 @@ module p3do_gamebub #(
 	wire [19:2] VID_FB_CURR, VID_FB_PREV;                   // (VRAM word addresses), for vram_rtcache
 	wire        VRAM_SP_CPU;                                 // VRAM access is the CPU's SPORT access (vram.sv)
 	wire        VID_DMA;                                     // MADAM's bus is in a video DMA sequence (vram_rtcache.sv)
+	wire        VID_GUARD;                                   // a line's video transfers are due (MADAM_SPORT)
+	// The CPU's SPORT accesses wait from this HCOUNT until the line's
+	// video transfers are on the bus (MADAM_SPORT SPORT_HOLD; the request
+	// is at 1469, 24.56 dots per us): at least the longest CPU SPORT
+	// transfer (tb_top, test ROM test 15) plus a margin before it. SRAM:
+	// 40 us -> 45 us; SDRAM only: 27 us -> 30 us; SRAM with the safe timing:
+	// 56 us, more than the time from the scanout start, so from the scanout
+	// start on (copies start right after a line's transfers).
+	reg  [ 1:0] vram_mem_r = 2'd0;   // the "VRAM memory" setting (see vsram below)
+	wire [10:0] sport_hold_start = vram_mem_r == 2'd0 ? 11'd1469 - 11'd1105 :
+	                               vram_mem_r == 2'd1 ? 11'd10 : 11'd1469 - 11'd737;
 
 	P3DO p3do (
 		.RST_N(~reset_3do),
@@ -335,6 +346,8 @@ module p3do_gamebub #(
 		.VID_FB_PREV(VID_FB_PREV), .VID_FB_PREV_V(VID_FB_PREV_V),
 		.VRAM_SP_CPU(VRAM_SP_CPU),
 		.VID_DMA(VID_DMA),
+		.VID_GUARD(VID_GUARD),
+		.SPORT_HOLD_START(sport_hold_start),
 		.RGB({R,G,B}),
 		.HS_N(HS_N), .VS_N(VS_N), .HBLK_N(HBL_N), .VBLK_N(VBL_N), .DCLK(DCLK),
 		.ACLK_CE(ACLK_CE),
@@ -554,9 +567,14 @@ module p3do_gamebub #(
 	wire [ 2:0] arb_wnext, arb_rvalid, arb_done;
 	wire        vs_sdram_req;
 
+	// No transfer starts while a line's video transfers are due
+	// (vid_sec_guard.sv, in PAUSE below).
+	wire        sec_vid_hold;
+
 	sec_arb #(.N(3)) arb (
 		.clk     (clk_mem),
 		.rst     (rst_mem),
+		.hold    (sec_vid_hold),
 		.c_req   ({host_sec_req, cdd_sec_req, vs_sdram_req}),
 		.c_we    ({host_sec_we,  cdd_sec_we,  ddr_sec_we}),
 		.c_addr  ('{ddr_sec_addr,  cdd_sec_addr,  host_sec_addr}),
@@ -582,9 +600,9 @@ module p3do_gamebub #(
 	// (vram_sram.sv): no SDRAM access, so no pause of the 3DO
 	wire        ddr_sec_wnext, ddr_sec_rvalid, ddr_sec_done;
 	wire [15:0] ddr_sec_rdata;
-	// the "VRAM memory" setting, taken while the 3DO is in reset (the map
-	// must not change under a running game)
-	reg  [ 1:0] vram_mem_r = 2'd0;
+	// the "VRAM memory" setting, taken while the 3DO is in reset (vram_mem_r,
+	// declared with sport_hold_start): the map must not change under a
+	// running game
 	always @(posedge clk_sys) if (reset_3do) vram_mem_r <= vram_mem;
 	wire [15:0] vsram_map_v;
 	wire [ 2:0] vsram_map_slot [16];
@@ -689,7 +707,11 @@ module p3do_gamebub #(
 
 	/////////////////////////  "DDR" (VRAM overflow, ROMs, NVRAM)  ///////////
 	wire [31: 0] ddr_io_do;
-	wire         ddr_io_busy, ddr_busy, ddr_bbusy;
+	wire         ddr_io_busy, ddr_busy, ddr_bbusy, ddr_byield, ddr_bwait;
+	// MADAM_SPORT VID_GUARD in clk_mem: no prefetch fill while a line's video
+	// transfers are due (vram_rtcache.sv)
+	reg  [ 1: 0] vid_guard_m;
+	always @(posedge clk_mem) vid_guard_m <= {vid_guard_m[0], VID_GUARD};
 
 	// VRAM words outside the on-chip blocks (BRAM4/BRAM2 with
 	// USE_BRAM_BLOCKS_FOR_VRAM, BRAM1 up to xBFFF, FC000-FFFFF) go to
@@ -759,6 +781,8 @@ module p3do_gamebub #(
 		.brwr  (ddr_brwr),
 		.brrd  (ddr_brrd),
 		.bfw   (ddr_bfw),
+		.byield(ddr_byield),
+		.bwait (ddr_bwait),
 		.ba(ddr_ba),
 		.bin(ddr_bin),
 		.bout(ddr_bout),
@@ -777,7 +801,8 @@ module p3do_gamebub #(
 		.r_esrd(v_rrd), .r_esnp(v_rnp), .r_esaddr(v_raddr), .r_eswr(v_rwr), .r_este(v_rte), .r_esq(v_rq),
 		.d_bladdr(ddr_bladdr), .d_blrd(ddr_blrd), .d_blwr(ddr_blwr), .d_bfw(ddr_bfw),
 		.d_braddr(ddr_braddr), .d_brrd(ddr_brrd), .d_brwr(ddr_brwr),
-		.d_blte(ddr_blte), .d_brte(ddr_brte), .d_bout(ddr_bout), .d_ba(ddr_ba), .d_bbusy(ddr_bbusy),
+		.d_blte(ddr_blte), .d_brte(ddr_brte), .d_bout(ddr_bout), .d_ba(ddr_ba), .d_bbusy(ddr_bbusy), .d_byield(ddr_byield), .d_bwait(ddr_bwait),
+		.pf_hold(vid_guard_m[1]),
 		.ddr_we(DDRAM_WE && !DDRAM_BUSY), .ddr_addr(DDRAM_ADDR),
 		.ddr_din(DDRAM_DIN), .ddr_be(DDRAM_BE), .ddr_burstcnt(DDRAM_BURSTCNT),
 		.frame(VID_FRAME),
@@ -826,6 +851,18 @@ module p3do_gamebub #(
 		end
 		if (!sec_hold_s) sec_paused <= 0;
 	end
+
+	// Video transfer guard for the secondary port: stall is the pause
+	// condition without the secondary port's own hold.
+	vid_sec_guard vsg (
+		.clk_sys   (clk_sys),
+		.vid_guard (VID_GUARD),
+		.reset_3do (reset_3do),
+		.stall     (ddr_io_busy || ddr_busy || !VRAM_LRDY || !VRAM_RRDY),
+		.clk_mem   (clk_mem),
+		.rst_mem   (rst_mem),
+		.hold      (sec_vid_hold)
+	);
 
 	/////////////////////////  VIDEO / AUDIO  ////////////////////////////////
 	video_capture #(.CDEPTH(6)) vcap (

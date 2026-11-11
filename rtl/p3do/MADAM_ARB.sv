@@ -35,6 +35,7 @@ module MADAM_ARB
 	input      [ 1: 0] SPRDATA_REQ,
 	input      [ 1: 0] SPR_SEL,
 	input              SPRDRAW_REQ,
+	input              SE_HOLD,      // Game Bub port: see SE_YIELD
 	input      [ 2: 0] CFB_SEL,
 	output reg         CFB_SUSPEND,
 	input              SPRPAUS_REQ,
@@ -51,6 +52,7 @@ module MADAM_ARB
 	input              VIDMID_CURR,
 	input              VIDMID_FIRST,
 	output reg         VIDOUT_ACK,
+	output reg         VIDMID_ACK,   // Game Bub port: the mid-line request's own acknowledge
 	output reg         SPORT_GRANT,
 	input AddrGenCtl_t SPORT_AG_CTL,
 	
@@ -91,6 +93,10 @@ module MADAM_ARB
 	end 
 	
 	wire HI_PRIO_REQ = VIDMID_REQ | CLUTWR_REQ | VIDOUT_REQ | REFRESH_REQ | PLAYER_REQ | EXTP_REQ | SPRPAUS_REQ;
+	// Game Bub port: the CEL engine leaves the bus (as for a higher priority
+	// request) and starts nothing new while SE_HOLD is high (MADAM_SPORT:
+	// before a shown line's video request)
+	wire SE_YIELD = HI_PRIO_REQ | SE_HOLD;
 	BusState_t  BUS_ST;
 	always @(posedge CLK or negedge RST_N) begin
 		bit         CPU_GRANT_INT,EXTP_GRANT_INT,SE_GRANT_INT,SPORT_GRANT_INT,PLAYER_GRANT_INT;
@@ -128,8 +134,13 @@ module MADAM_ARB
 			end
 			
 			if (CLUTWR_ACK && !CLUTWR_REQ) CLUTWR_ACK <= 0;
+			// Game Bub port: the line-start and mid-line requests have an
+			// acknowledge each. With the original shared one, a mid-line grant
+			// while the line-start request was also pending acknowledged both:
+			// MADAM_SPORT dropped the line-start request and the line got no
+			// transfers (the rest of the frame a line behind).
 			if (VIDOUT_ACK && !VIDOUT_REQ) VIDOUT_ACK <= 0;
-			if (VIDOUT_ACK && !VIDMID_REQ) VIDOUT_ACK <= 0;
+			if (VIDMID_ACK && !VIDMID_REQ) VIDMID_ACK <= 0;
 			if (SE_ACK && !SCOBLD_REQ) SE_ACK <= 0;
 			if (SE_ACK && !SPRDATA_REQ) SE_ACK <= 0;
 			if (EXTP_ACK && !EXTP_REQ) EXTP_ACK <= 0;
@@ -143,7 +154,7 @@ module MADAM_ARB
 						CPU_GRANT_INT <= 1;
 					end
 					else if (VIDMID_REQ) begin	//priority 2
-						VIDOUT_ACK <= 1;
+						VIDMID_ACK <= 1;
 						VIDMID_PREV_CURR <= VIDMID_CURR;
 						SPORT_GRANT_INT <= 1;
 						SE_GRANT_INT <= 0;
@@ -182,17 +193,17 @@ module MADAM_ARB
 						SE_GRANT_INT <= 0;
 						BUS_ST <= !EXTP_NEXT[0] ? EXTP_PREINIT1 : EXTP_PREINIT3;
 					end
-					else if ((SPRDRAW_REQ || SPRDRAW_RESTART || CFB_SUSPEND) && !SPRPAUS_REQ) begin	
+					else if ((SPRDRAW_REQ || SPRDRAW_RESTART || CFB_SUSPEND) && !SPRPAUS_REQ && !SE_HOLD) begin	
 						SE_GRANT_INT <= 1;
 						CFB_SUSPEND <= 0;
 						SPRDRAW_RESTART <= 0;
 						BUS_ST <= CFB_INIT0;
 					end
-					else if (SPRDATA_REQ && !SPRPAUS_REQ) begin	//priority 7
+					else if (SPRDATA_REQ && !SPRPAUS_REQ && !SE_HOLD) begin	//priority 7
 						SE_GRANT_INT <= 1;
 						BUS_ST <= SPRDATA_REQ == 2'd1 ? SPR_PREINIT1 : SPR_PREINIT3;
 					end
-					else if (SCOBLD_REQ && !SPRPAUS_REQ) begin	//priority 8
+					else if (SCOBLD_REQ && !SPRPAUS_REQ && !SE_HOLD) begin	//priority 8
 						SE_ACK <= 1;
 						SE_GRANT_INT <= 1;
 						SE_RUN <= 1;
@@ -411,7 +422,7 @@ module MADAM_ARB
 				end
 				SCOB_YPOS0: BUS_ST <= SCOB_YPOS1;
 				SCOB_YPOS1: begin
-					if (!SCOB_SEL[0] && !HI_PRIO_REQ) begin
+					if (!SCOB_SEL[0] && !SE_YIELD) begin
 						BUS_ST <= SCOBLD_REQ == 3'd2 ? SCOB_PREINIT3 : SCOBLD_REQ == 3'd3 ? SCOB_PREINIT5 : BUS_IDLE;
 					end
 					else begin
@@ -495,7 +506,7 @@ module MADAM_ARB
 							BUS_ST <= SCOB_PPMP0;
 						end
 					end
-					else if (SCOBLD_REQ == 3'd3 && !HI_PRIO_REQ) begin
+					else if (SCOBLD_REQ == 3'd3 && !SE_YIELD) begin
 						BUS_ST <= SCOB_PREINIT5;
 					end
 					else begin
@@ -526,7 +537,7 @@ module MADAM_ARB
 							BUS_ST <= SCOB_PPMP0;
 						end
 					end
-					else if (SCOBLD_REQ == 3'd3 && !HI_PRIO_REQ) begin
+					else if (SCOBLD_REQ == 3'd3 && !SE_YIELD) begin
 						BUS_ST <= SCOB_PREINIT5;
 					end
 					else begin
@@ -536,7 +547,7 @@ module MADAM_ARB
 				end
 				SCOB_PPMP0: BUS_ST <= SCOB_PPMP1;
 				SCOB_PPMP1: begin
-					if (SCOBLD_REQ == 3'd3 && !HI_PRIO_REQ) begin
+					if (SCOBLD_REQ == 3'd3 && !SE_YIELD) begin
 						BUS_ST <= SCOB_PREINIT5;
 					end
 					else begin
@@ -567,10 +578,10 @@ module MADAM_ARB
 							BUS_ST <= SCOB_PRE10;
 						end
 					end
-					else if (SCOBLD_REQ == 3'd4 && !HI_PRIO_REQ) begin
+					else if (SCOBLD_REQ == 3'd4 && !SE_YIELD) begin
 						BUS_ST <= SCOB_PREINIT7;
 					end
-					else if (SPRDATA_REQ && !HI_PRIO_REQ) begin
+					else if (SPRDATA_REQ && !SE_YIELD) begin
 						BUS_ST <= SPRDATA_REQ == 2'd1 ? SPR_PREINIT1 : SPR_PREINIT3;
 					end
 					else begin
@@ -580,10 +591,10 @@ module MADAM_ARB
 				end
 				SCOB_PRE10: BUS_ST <= SCOB_PRE11;
 				SCOB_PRE11: begin
-					if (SCOBLD_REQ == 3'd4 && !HI_PRIO_REQ) begin
+					if (SCOBLD_REQ == 3'd4 && !SE_YIELD) begin
 						BUS_ST <= SCOB_PREINIT7;
 					end
-					else if (SPRDATA_REQ && !HI_PRIO_REQ) begin
+					else if (SPRDATA_REQ && !SE_YIELD) begin
 						BUS_ST <= SPRDATA_REQ == 2'd1 ? SPR_PREINIT1 : SPR_PREINIT3;
 					end
 					else begin
@@ -606,10 +617,10 @@ module MADAM_ARB
 							BUS_ST <= SCOB_PIP0;
 						end
 					end
-					else if (SCOBLD_REQ == 3'd4 && !HI_PRIO_REQ) begin
+					else if (SCOBLD_REQ == 3'd4 && !SE_YIELD) begin
 						BUS_ST <= SCOB_PREINIT7;
 					end
-					else if (SPRDATA_REQ && !HI_PRIO_REQ) begin
+					else if (SPRDATA_REQ && !SE_YIELD) begin
 						BUS_ST <= SPRDATA_REQ == 2'd1 ? SPR_PREINIT1 : SPR_PREINIT3;
 					end
 					else begin
@@ -643,7 +654,7 @@ module MADAM_ARB
 				SPR_OFFS3: BUS_ST <= SPR_CALC0;
 				SPR_CALC0: BUS_ST <= SPR_CALC1;
 				SPR_CALC1:
-					if (SPRDATA_REQ && !HI_PRIO_REQ) begin
+					if (SPRDATA_REQ && !SE_YIELD) begin
 						BUS_ST <= SPRDATA_REQ == 2'd1 ? SPR_PREINIT1 : SPR_PREINIT3;
 					end
 					else begin
@@ -657,7 +668,7 @@ module MADAM_ARB
 				SPR_DATA0: BUS_ST <= SPR_DATA1;
 				SPR_DATA1: 
 					if (SPR_SEL[0]) begin
-						if (SPRDATA_REQ && !HI_PRIO_REQ) begin
+						if (SPRDATA_REQ && !SE_YIELD) begin
 							BUS_ST <= SPRDATA_REQ == 2'd1 ? SPR_PREINIT1 : SPR_PREINIT3;
 						end else begin
 							SE_GRANT_INT <= 0;
@@ -683,7 +694,7 @@ module MADAM_ARB
 				end
 				CFB_READ0: BUS_ST <= CFB_READ1;
 				CFB_READ1: begin
-					if (HI_PRIO_REQ && !CFB_SUSPEND && DBG_EXT[0]) CFB_SUSPEND <= 1;
+					if (SE_YIELD && !CFB_SUSPEND && DBG_EXT[0]) CFB_SUSPEND <= 1;
 					BUS_ST <= CFB_WRITE0;
 				end
 				CFB_WRITE0: BUS_ST <= CFB_WRITE1;
@@ -701,7 +712,7 @@ module MADAM_ARB
 						BUS_ST <= CFB_READ0;
 					end
 					else begin
-						if (HI_PRIO_REQ && !CFB_SUSPEND && DBG_EXT[0]) CFB_SUSPEND <= 1;
+						if (SE_YIELD && !CFB_SUSPEND && DBG_EXT[0]) CFB_SUSPEND <= 1;
 						BUS_ST <= CFB_WRITE0;
 					end
 				end

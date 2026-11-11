@@ -35,6 +35,11 @@
 //    (and back to white), started in, late in, and after CLIO's usual palette
 //    window, shows every palette pen (2-31) in the new colour on the next
 //    lines.
+// 12. PIXC half per pixel (MADAM_PPMP with two different halves): the
+//    pixel's P-mode bit picks the half with POVER 00 and 01, POVER 10 forces
+//    the first half (PIXC[15:0]), 11 the second (Opera opera_madam.c PPROC:
+//    only PMODE_ZERO 10 and PMODE_ONE 11 override; the SDK defines 00, 10
+//    and 11).
 // 10. VE (video encoder) held in reset during active display, at each of the
 //    four dot-clock phases: no dot clock, horizontal and vertical blanking
 //    (the capture to the framework keeps running through a 3DO reset).
@@ -69,6 +74,15 @@ module tb_gfx;
 		.CLK(clk), .RST(rst), .EN(1'b1), .CE(1'b1),
 		.SCOBCTL(ctl), .SCOB_FLAG(flag), .SCOB_PRE1(pre1), .PPMPCA(pixc), .PPMPCB(pixc),
 		.IPN(ipn), .CFBD(cfbd), .PEN(pen)
+	);
+
+	// section 12: a pixel processor with two different PIXC halves
+	PPMPCx_t   pixc_a = '0, pixc_b = '0;
+	wire [15:0] pen2;
+	MADAM_PPMP ppmp2 (
+		.CLK(clk), .RST(rst), .EN(1'b1), .CE(1'b1),
+		.SCOBCTL(ctl), .SCOB_FLAG(flag), .SCOB_PRE1(pre1), .PPMPCA(pixc_a), .PPMPCB(pixc_b),
+		.IPN(ipn), .CFBD(cfbd), .PEN(pen2)
 	);
 
 	// one 5-bit component: cel = the decoder's component, fb = the frame
@@ -745,6 +759,34 @@ module tb_gfx;
 				ve_rst_n = 1;
 			end
 			$display("[%0t] VE in reset: %0d errors", $realtime, errors - e0);
+		end
+
+		// ---------------- 12. PIXC half per pixel ----------------
+		begin
+			int e0;
+			e0 = errors;
+			// half A: the cel unchanged (x8 / 8); half B: cel / 16 minus the
+			// cel, wrapped (1S x1 / 16; 2S = the cel, AV = 00101: NEG, wrap):
+			// the two give different pens for every cel
+			pixc_a = '0; pixc_a.MXF = 3'd7; pixc_a.DV1 = 2'd3;
+			pixc_b = '0; pixc_b.S2 = 2'd3; pixc_b.AV = 5'b00101;
+			ctl = '0; ctl.B0POS = 2'd2; ctl.B15POS = 2'd0; ctl.IPNLSB = 2'd1; ctl.CFBDLSB = 2'd1;
+			flag = '0; flag.USEAV = 1; flag.NOBLK = 1; flag.PACKED = 1;
+			pre1 = '0; cfbd = '0;
+			for (int pov = 0; pov < 4; pov++) for (int d = 0; d < 2; d++) for (int c = 1; c < 32; c += 5) begin
+				bit half_b;
+				bit [4:0] e;
+				flag.DOVER = 2'(pov);
+				ipn = '0; ipn.D = d[0]; ipn.R = 5'(c); ipn.G = 5'(c); ipn.B = 5'(c);
+				repeat (4) @(negedge clk);
+				half_b = pov == 3 ? 1'b1 : pov == 2 ? 1'b0 : d[0];
+				e = half_b ? 5'((c >> 4) - c) : 5'(c);
+				checks++;
+				if (pen2[14:10] !== e || pen2[9:5] !== e || pen2[4:0] !== e)
+					fail($sformatf("POVER %0d%0d, pixel P-mode %0d, cel %0d: pen %04h, expected %0d per component (PIXC %s half)",
+					               pov[1], pov[0], d, c, pen2, e, half_b ? "second" : "first"));
+			end
+			$display("[%0t] PIXC half per pixel: %0d errors", $realtime, errors - e0);
 		end
 
 		$display("tb_gfx: %0d checks, %0d errors", checks, errors);

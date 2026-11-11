@@ -38,6 +38,7 @@ module MADAM_CPUIF
 	input              CLIO_SEL,
 	input              CLIO_RDY,
 	input              WAIT,
+	input              SPORT_HOLD,   // Game Bub port: hold SPORT accesses (MADAM_SPORT)
 	
 	output reg         MCLK
 );
@@ -97,6 +98,9 @@ module MADAM_CPUIF
 				else if (GRANT && CPU_PB && !(ICYCLE && SEQ) && !STRETCH && !BREAK) BREAK <= 1;
 				else if (GRANT && CPU_SPORT && !STRETCH && !BREAK) STRETCH <= 1;
 				else if (GRANT) BREAK <= 0;
+				// Game Bub port: a SPORT access stays in its stretch cycle
+				// while MADAM_SPORT holds them (a line's video transfers due)
+				if (GRANT && CPU_SPORT && STRETCH && SPORT_HOLD) STRETCH <= 1;
 			end
 		end
 	end 
@@ -121,7 +125,19 @@ module MADAM_CPUIF
 		end
 	end 
 	assign ACCESS = ~(STRETCH | BREAK | ICYCLE);
-	assign START = (STRETCH | BREAK | (ICYCLE && SEQ)) & PHASE2;
+	// Game Bub port: START (to the DRAM RAS and code lines, and through them
+	// the SDRAM controller and ddram.sv, a clk_mem path) takes SEQ from a
+	// register loaded at CE_F, in the middle of each CE_R period. The CPU's
+	// registers that SEQ is decoded from change only at MCLK_PH2 (CE_R at the
+	// end of PHASE2), so during PHASE2, the only time START uses it, SEQ_MID
+	// equals SEQ, without the CPU's instruction decode in front of the
+	// clk_mem registers (sim/tb/cpu_start_check.sv compares the two).
+	bit         SEQ_MID;
+	always @(posedge CLK or negedge RST_N) begin
+		if (!RST_N) SEQ_MID <= 0;
+		else if (EN && CE_F) SEQ_MID <= SEQ;
+	end
+	assign START = (STRETCH | BREAK | (ICYCLE && SEQ_MID)) & PHASE2;
 	
 	bit         EXEC;
 	always @(posedge CLK or negedge RST_N) begin

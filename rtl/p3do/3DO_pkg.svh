@@ -351,6 +351,7 @@ package P3DO_PKG;
 	typedef struct packed
 	{
 		bit         MF;
+		bit         MCW;
 		bit         NP;
 		bit         LC;
 		bit         RC;

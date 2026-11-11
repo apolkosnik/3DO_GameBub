@@ -333,7 +333,13 @@ module MADAM_AG
 					V480 <= MDTI[19];
 				end
 				
-				CLUT_CURR1: begin
+				// Game Bub port: only an entry that loads the current-line
+				// address (LDCURR: the register write is enabled) sets the
+				// field line from it; others keep the line sequence (Opera's
+				// vdlp_process_vdl_entry). The original took bit 1 of every
+				// entry's address word, so a palette-only entry on an odd line
+				// repeated the line above and shifted the rest down a line.
+				CLUT_CURR1: if (DMA_CTL.DMA_REG_WRITE_EN) begin
 					CURR1_LATCH <= MDTI[1];
 					CURR_FETCHED <= 1;
 				end

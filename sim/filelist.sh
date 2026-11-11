@@ -10,7 +10,7 @@ RTL_FILES=(
     p3do/CLIO_XBUS.sv p3do/CLIO.sv
     p3do/OSA.sv p3do/VE.sv p3do/P3DO.sv
     p3do/vram.sv p3do/ddram.sv p3do/3DO_CDROM.sv p3do/hps2pad.sv
-    gamebub/vram_rtcache.sv gamebub/sdram_3do.sv gamebub/ddr_bridge.sv gamebub/sec_arb.sv gamebub/cdd_emu.sv
+    gamebub/vram_rtcache.sv gamebub/sdram_3do.sv gamebub/ddr_bridge.sv gamebub/sec_arb.sv gamebub/vid_sec_guard.sv gamebub/cdd_emu.sv
     gamebub/sram_sec.sv gamebub/vram_sram.sv
     gamebub/gb_host.sv gamebub/gb_util.sv gamebub/p3do_gamebub.sv
 )

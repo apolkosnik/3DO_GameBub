@@ -1069,8 +1069,8 @@ module MADAM_SE
 				default: D = PIP_DOUT[15];
 			endcase
 			case (SCOB_FLAG.DOVER)
-				2'b00: PPMPC_SEL = D;
-				2'b01: PPMPC_SEL = 0;
+				2'b00,
+				2'b01: PPMPC_SEL = D;   // Game Bub port: 01 = no override (see MADAM_PPMP)
 				2'b10: PPMPC_SEL = 0;
 				2'b11: PPMPC_SEL = 1;
 			endcase
@@ -1114,8 +1114,8 @@ module MADAM_SE
 				default: D = PIP_B_DOUT[15];
 			endcase
 			case (SCOB_FLAG.DOVER)
-				2'b00: PPMPC_SEL = D;
-				2'b01: PPMPC_SEL = 0;
+				2'b00,
+				2'b01: PPMPC_SEL = D;   // Game Bub port: 01 = no override (see MADAM_PPMP)
 				2'b10: PPMPC_SEL = 0;
 				2'b11: PPMPC_SEL = 1;
 			endcase
@@ -1260,6 +1260,17 @@ module MADAM_SE
 	CornerState_t CRNA_ST,CRNB_ST;
 	
 	MathStat_t   MATH_A_STAT,MATH_B_STAT;
+	// Face culling (ACW/ACCW). The region fill's edge walkers give a span
+	// from right to left for a counterclockwise quad, so the span's
+	// direction selects the flag. The 1:1 path (MF: HDX or HDY +-1.0, VDY
+	// or VDX +-1.0, no HDDX/HDDY) spans corner 0 to corner 2, whose
+	// direction is the sign of HDX (or VDX) only; there the winding is the
+	// sign of HDX * VDY - HDY * VDX (MATH STAT.MCW: clockwise, Opera
+	// TestInitVisual), for both directions of the span.
+	wire         ACW_A_EN  = MATH_A_STAT.MF ? (MATH_A_STAT.MCW ? SCOB_FLAG.ACW : SCOB_FLAG.ACCW) : SCOB_FLAG.ACW;
+	wire         ACCW_A_EN = MATH_A_STAT.MF ? (MATH_A_STAT.MCW ? SCOB_FLAG.ACW : SCOB_FLAG.ACCW) : SCOB_FLAG.ACCW;
+	wire         ACW_B_EN  = MATH_B_STAT.MF ? (MATH_B_STAT.MCW ? SCOB_FLAG.ACW : SCOB_FLAG.ACCW) : SCOB_FLAG.ACW;
+	wire         ACCW_B_EN = MATH_B_STAT.MF ? (MATH_B_STAT.MCW ? SCOB_FLAG.ACW : SCOB_FLAG.ACCW) : SCOB_FLAG.ACCW;
 	MathCtl_t    MATH_A_CTL,MATH_B_CTL;
 	
 	bit          REGIS_A_OUT,REGIS_B_OUT;
@@ -1437,15 +1448,15 @@ module MADAM_SE
 						if ($signed(MATH_A_XR) < $signed(MATH_A_XL) && $signed(MATH_A_XL) > 0) begin
 							X1_A_CLIPPED = !MATH_A_XR[11] ? MATH_A_XR : '0;
 							X2_A_CLIPPED = $signed(MATH_A_XL) <= {1'b0,REGCTL1.CLIPX} ? $signed(MATH_A_XL) - 12'd1 : {1'b0,REGCTL1.CLIPX};
-							if ($signed(X2_A_CLIPPED) != $signed(X1_A_CLIPPED)) begin LF_A_RUN <= SCOB_FLAG.ACCW & ~SCOB_FLAG.MARIA; end
+							if ($signed(X2_A_CLIPPED) != $signed(X1_A_CLIPPED)) begin LF_A_RUN <= ACCW_A_EN & ~SCOB_FLAG.MARIA; end
 							else begin LF_A_LAST <= UNPACKER_A_EOL && REGIS_A_DONE; end
-							LF_A_REQ <= SCOB_FLAG.ACCW;
+							LF_A_REQ <= ACCW_A_EN;
 						end else if ($signed(MATH_A_XR) > $signed(MATH_A_XL) && $signed(MATH_A_XR) > 0) begin
 							X1_A_CLIPPED = !MATH_A_XL[11] ? MATH_A_XL : '0;
 							X2_A_CLIPPED = $signed(MATH_A_XR) <= {1'b0,REGCTL1.CLIPX} ? $signed(MATH_A_XR) - 12'd1 : {1'b0,REGCTL1.CLIPX};
-							if ($signed(X1_A_CLIPPED) != $signed(X2_A_CLIPPED)) begin LF_A_RUN <= SCOB_FLAG.ACW & ~SCOB_FLAG.MARIA; end
+							if ($signed(X1_A_CLIPPED) != $signed(X2_A_CLIPPED)) begin LF_A_RUN <= ACW_A_EN & ~SCOB_FLAG.MARIA; end
 							else begin LF_A_LAST <= UNPACKER_A_EOL && REGIS_A_DONE; end
-							LF_A_REQ <= SCOB_FLAG.ACW;
+							LF_A_REQ <= ACW_A_EN;
 						end else begin 
 							X1_A_CLIPPED = MATH_A_XL;
 							X2_A_CLIPPED = MATH_A_XR;
@@ -1573,15 +1584,15 @@ module MADAM_SE
 						if ($signed(MATH_B_XR) < $signed(MATH_B_XL) && $signed(MATH_B_XL) > 0) begin
 							X1_B_CLIPPED = !MATH_B_XR[11] ? MATH_B_XR : '0;
 							X2_B_CLIPPED = $signed(MATH_B_XL) <= {1'b0,REGCTL1.CLIPX} ? $signed(MATH_B_XL) - 12'd1 : {1'b0,REGCTL1.CLIPX};
-							if ($signed(X2_B_CLIPPED) != $signed(X1_B_CLIPPED)) begin LF_B_RUN <= SCOB_FLAG.ACCW & ~SCOB_FLAG.MARIA; end
+							if ($signed(X2_B_CLIPPED) != $signed(X1_B_CLIPPED)) begin LF_B_RUN <= ACCW_B_EN & ~SCOB_FLAG.MARIA; end
 							else begin LF_B_LAST <= UNPACKER_B_EOL && REGIS_B_DONE; end
-							LF_B_REQ <= SCOB_FLAG.ACCW;
+							LF_B_REQ <= ACCW_B_EN;
 						end else if ($signed(MATH_B_XR) > $signed(MATH_B_XL) && $signed(MATH_B_XR) > 0) begin
 							X1_B_CLIPPED = !MATH_B_XL[11] ? MATH_B_XL : '0;
 							X2_B_CLIPPED = $signed(MATH_B_XR) <= {1'b0,REGCTL1.CLIPX} ? $signed(MATH_B_XR) - 12'd1 : {1'b0,REGCTL1.CLIPX};
-							if ($signed(X1_B_CLIPPED) != $signed(X2_B_CLIPPED)) begin LF_B_RUN <= SCOB_FLAG.ACW & ~SCOB_FLAG.MARIA; end
+							if ($signed(X1_B_CLIPPED) != $signed(X2_B_CLIPPED)) begin LF_B_RUN <= ACW_B_EN & ~SCOB_FLAG.MARIA; end
 							else begin LF_B_LAST <= UNPACKER_B_EOL && REGIS_B_DONE; end
-							LF_B_REQ <= SCOB_FLAG.ACW;
+							LF_B_REQ <= ACW_B_EN;
 						end else begin 
 							X1_B_CLIPPED = MATH_B_XL;
 							X2_B_CLIPPED = MATH_B_XR;
@@ -3053,8 +3064,12 @@ module MADAM_PPMP (
 		bit          PPMPC_SEL;
 		
 		case (SCOB_FLAG.DOVER)
-			2'b00: PPMPC_SEL = IPN.D;
-			2'b01: PPMPC_SEL = 0;
+			// Game Bub port: POVER 01 is not an override (Opera: only 10 and 11
+			// force the P-mode; SDK PMODE_PDC 00, ZERO 10, ONE 11, i.e. bit 8
+			// enables the override, bit 7 is its value). The original forced
+			// the first PIXC half.
+			2'b00,
+			2'b01: PPMPC_SEL = IPN.D;
 			2'b10: PPMPC_SEL = 0;
 			2'b11: PPMPC_SEL = 1;
 		endcase
@@ -3526,6 +3541,10 @@ module MADAM_MATH_PLATFORM (
 						  CTL.A3DH_SAVE ? {DXa3[31:16],DYa3[31:16]} : 
 						  CTL.A3DL_SAVE ? {DXa3[15: 0],DYa3[15: 0]} : '0;
 	assign STAT.MF = MUNK_FUNC;
+	// 1:1 path winding: HD along x (HDX +-1, VDY +-1): clockwise when HDX and
+	// VDY have the same sign; HD along y (HDY +-1, VDX +-1): when HDY and VDX
+	// have opposite signs (HDX * VDY - HDY * VDX > 0)
+	assign STAT.MCW = (DX_ONE & DY_Z & LDX_Z & LDY_ONE) ? (DX_N == LDY_N) : (DY_N != LDX_N);
 	assign STAT.LC = LINE_CLIP;
 	assign STAT.RC = REGION_CLIP;
 	assign STAT.CW = ($signed(Xa1[31:16]) >= $signed(Xa0[31:16]) && $signed(Xa2[31:16]) >= $signed(Xa3[31:16]));

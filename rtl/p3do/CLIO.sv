@@ -1333,22 +1333,23 @@ module CLIO
 	end
 	
 	
+	bit          EIFIFO_SUPPLY[13];      // the CPU's word at 0x070+n waits for the DSP's next read
 	wire EIFIFO_STAT_OE = DSP_EI_ADDR >= 8'hD0 && DSP_EI_ADDR <= 8'hDE;	//0x0D0-0x0DE
 	wire EIFIFO_OE2 = DSP_EI_ADDR >= 8'h70 && DSP_EI_ADDR <= 8'h7C;			//0x070-0x07C
 	wire EIFIFO_OE = DSP_EI_ADDR >= 8'hF0 && DSP_EI_ADDR <= 8'hFC;			//0x0F0-0x0FC
-	wire EIFIFO0_OE  = EIFIFO_OE && DSP_EI_ADDR[3:0] == 4'h0 && DSP_EI_OE;
-	wire EIFIFO1_OE  = EIFIFO_OE && DSP_EI_ADDR[3:0] == 4'h1 && DSP_EI_OE;
-	wire EIFIFO2_OE  = EIFIFO_OE && DSP_EI_ADDR[3:0] == 4'h2 && DSP_EI_OE;
-	wire EIFIFO3_OE  = EIFIFO_OE && DSP_EI_ADDR[3:0] == 4'h3 && DSP_EI_OE;
-	wire EIFIFO4_OE  = EIFIFO_OE && DSP_EI_ADDR[3:0] == 4'h4 && DSP_EI_OE;
-	wire EIFIFO5_OE  = EIFIFO_OE && DSP_EI_ADDR[3:0] == 4'h5 && DSP_EI_OE;
-	wire EIFIFO6_OE  = EIFIFO_OE && DSP_EI_ADDR[3:0] == 4'h6 && DSP_EI_OE;
-	wire EIFIFO7_OE  = EIFIFO_OE && DSP_EI_ADDR[3:0] == 4'h7 && DSP_EI_OE;
-	wire EIFIFO8_OE  = EIFIFO_OE && DSP_EI_ADDR[3:0] == 4'h8 && DSP_EI_OE;
-	wire EIFIFO9_OE  = EIFIFO_OE && DSP_EI_ADDR[3:0] == 4'h9 && DSP_EI_OE;
-	wire EIFIFO10_OE = EIFIFO_OE && DSP_EI_ADDR[3:0] == 4'hA && DSP_EI_OE;
-	wire EIFIFO11_OE = EIFIFO_OE && DSP_EI_ADDR[3:0] == 4'hB && DSP_EI_OE;
-	wire EIFIFO12_OE = EIFIFO_OE && DSP_EI_ADDR[3:0] == 4'hC && DSP_EI_OE;
+	wire EIFIFO0_OE  = EIFIFO_OE && DSP_EI_ADDR[3:0] == 4'h0 && DSP_EI_OE && !EIFIFO_SUPPLY[0];
+	wire EIFIFO1_OE  = EIFIFO_OE && DSP_EI_ADDR[3:0] == 4'h1 && DSP_EI_OE && !EIFIFO_SUPPLY[1];
+	wire EIFIFO2_OE  = EIFIFO_OE && DSP_EI_ADDR[3:0] == 4'h2 && DSP_EI_OE && !EIFIFO_SUPPLY[2];
+	wire EIFIFO3_OE  = EIFIFO_OE && DSP_EI_ADDR[3:0] == 4'h3 && DSP_EI_OE && !EIFIFO_SUPPLY[3];
+	wire EIFIFO4_OE  = EIFIFO_OE && DSP_EI_ADDR[3:0] == 4'h4 && DSP_EI_OE && !EIFIFO_SUPPLY[4];
+	wire EIFIFO5_OE  = EIFIFO_OE && DSP_EI_ADDR[3:0] == 4'h5 && DSP_EI_OE && !EIFIFO_SUPPLY[5];
+	wire EIFIFO6_OE  = EIFIFO_OE && DSP_EI_ADDR[3:0] == 4'h6 && DSP_EI_OE && !EIFIFO_SUPPLY[6];
+	wire EIFIFO7_OE  = EIFIFO_OE && DSP_EI_ADDR[3:0] == 4'h7 && DSP_EI_OE && !EIFIFO_SUPPLY[7];
+	wire EIFIFO8_OE  = EIFIFO_OE && DSP_EI_ADDR[3:0] == 4'h8 && DSP_EI_OE && !EIFIFO_SUPPLY[8];
+	wire EIFIFO9_OE  = EIFIFO_OE && DSP_EI_ADDR[3:0] == 4'h9 && DSP_EI_OE && !EIFIFO_SUPPLY[9];
+	wire EIFIFO10_OE = EIFIFO_OE && DSP_EI_ADDR[3:0] == 4'hA && DSP_EI_OE && !EIFIFO_SUPPLY[10];
+	wire EIFIFO11_OE = EIFIFO_OE && DSP_EI_ADDR[3:0] == 4'hB && DSP_EI_OE && !EIFIFO_SUPPLY[11];
+	wire EIFIFO12_OE = EIFIFO_OE && DSP_EI_ADDR[3:0] == 4'hC && DSP_EI_OE && !EIFIFO_SUPPLY[12];
 	wire [15: 0] EIFIFO_DATA = DMA_TO_DSP_WRITE[1] ? DMA_BUF[15:0] : DMA_BUF[31:16];
 	wire         EIFIFO_WRREQ[13] = '{(DMA_TO_DSP_WRITE[1] || DMA_TO_DSP_WRITE[0]) && DMA_CHAN[3:0] == 4'h0,
 	                                  (DMA_TO_DSP_WRITE[1] || DMA_TO_DSP_WRITE[0]) && DMA_CHAN[3:0] == 4'h1,
@@ -1379,19 +1380,19 @@ module CLIO
 	CLIO_DSP_FIFO EIFIFO10 (.CLK(CLK), .EN(EN), .RST(FIFOINIT[10]), .DATA(EIFIFO_DATA), .WRREQ(EIFIFO_WRREQ[10] & IO_EN & CE_R), .RDREQ(EIFIFO10_OE & DSP_EN & CE_R), .Q(EIFIFO_Q[10]), .COUNT(EIFIFO_COUNT[10]));
 	CLIO_DSP_FIFO EIFIFO11 (.CLK(CLK), .EN(EN), .RST(FIFOINIT[11]), .DATA(EIFIFO_DATA), .WRREQ(EIFIFO_WRREQ[11] & IO_EN & CE_R), .RDREQ(EIFIFO11_OE & DSP_EN & CE_R), .Q(EIFIFO_Q[11]), .COUNT(EIFIFO_COUNT[11]));
 	CLIO_DSP_FIFO EIFIFO12 (.CLK(CLK), .EN(EN), .RST(FIFOINIT[12]), .DATA(EIFIFO_DATA), .WRREQ(EIFIFO_WRREQ[12] & IO_EN & CE_R), .RDREQ(EIFIFO12_OE & DSP_EN & CE_R), .Q(EIFIFO_Q[12]), .COUNT(EIFIFO_COUNT[12]));
-	wire [ 3: 0] EIFIFO_STAT[15] = '{{EIFIFO_COUNT[0]},
-	                                 {EIFIFO_COUNT[1]},
-												{EIFIFO_COUNT[2]},
-												{EIFIFO_COUNT[3]},
-											   {EIFIFO_COUNT[4]},
-											   {EIFIFO_COUNT[5]},
-											   {EIFIFO_COUNT[6]},
-											   {EIFIFO_COUNT[7]},
-											   {EIFIFO_COUNT[8]},
-											   {EIFIFO_COUNT[9]},
-	                                 {EIFIFO_COUNT[10]},
-											   {EIFIFO_COUNT[11]},
-											   {EIFIFO_COUNT[12]},
+	wire [ 3: 0] EIFIFO_STAT[15] = '{{EIFIFO_COUNT[0]  + 4'(EIFIFO_SUPPLY[0])},
+	                                 {EIFIFO_COUNT[1]  + 4'(EIFIFO_SUPPLY[1])},
+												{EIFIFO_COUNT[2]  + 4'(EIFIFO_SUPPLY[2])},
+												{EIFIFO_COUNT[3]  + 4'(EIFIFO_SUPPLY[3])},
+											   {EIFIFO_COUNT[4]  + 4'(EIFIFO_SUPPLY[4])},
+											   {EIFIFO_COUNT[5]  + 4'(EIFIFO_SUPPLY[5])},
+											   {EIFIFO_COUNT[6]  + 4'(EIFIFO_SUPPLY[6])},
+											   {EIFIFO_COUNT[7]  + 4'(EIFIFO_SUPPLY[7])},
+											   {EIFIFO_COUNT[8]  + 4'(EIFIFO_SUPPLY[8])},
+											   {EIFIFO_COUNT[9]  + 4'(EIFIFO_SUPPLY[9])},
+	                                 {EIFIFO_COUNT[10] + 4'(EIFIFO_SUPPLY[10])},
+											   {EIFIFO_COUNT[11] + 4'(EIFIFO_SUPPLY[11])},
+											   {EIFIFO_COUNT[12] + 4'(EIFIFO_SUPPLY[12])},
 												{4'b0000},
 												{4'b0000}};
 	
@@ -1426,6 +1427,7 @@ module CLIO
 			EIFIFO_OE_LATCH <= '{13{0}};
 			EOFIFO_WE_LATCH <= '{4{0}};
 			EIFIFO_BUF <= '{13{'0}};
+			EIFIFO_SUPPLY <= '{13{0}};
 //			EIFIFO_BUF_EMPTY <= '{13{0}};
 		end
 		else if (EN && CE_R) begin
@@ -1448,17 +1450,21 @@ module CLIO
 				EOFIFO_WE_LATCH[ 2] <= EOFIFO2_WE;
 				EOFIFO_WE_LATCH[ 3] <= EOFIFO3_WE;
 				
-				// the next word, if the FIFO has one (or gets one now, the FIFO's
-				// bypass); an empty FIFO keeps giving the word it holds
-				if ((EIFIFO_OE || EIFIFO_OE2) && DSP_EI_OE &&
-				    (EIFIFO_COUNT[DSP_EI_ADDR[3:0]] != 4'd0 || (EIFIFO_WRREQ[DSP_EI_ADDR[3:0]] && IO_EN))) begin
-					EIFIFO_BUF[DSP_EI_ADDR[3:0]] <= EIFIFO_Q[DSP_EI_ADDR[3:0]];
+				// the word handed over, if the FIFO has one (or gets one now, the
+				// FIFO's bypass): an empty FIFO keeps giving it (DSP_EI_DATA below);
+				// a read or peek takes the CPU's supplied word instead
+				if ((EIFIFO_OE || EIFIFO_OE2) && DSP_EI_OE) begin
+					if (EIFIFO_SUPPLY[DSP_EI_ADDR[3:0]])
+						EIFIFO_SUPPLY[DSP_EI_ADDR[3:0]] <= 0;
+					else if (EIFIFO_COUNT[DSP_EI_ADDR[3:0]] != 4'd0 || (EIFIFO_WRREQ[DSP_EI_ADDR[3:0]] && IO_EN))
+						EIFIFO_BUF[DSP_EI_ADDR[3:0]] <= EIFIFO_Q[DSP_EI_ADDR[3:0]];
 //					EIFIFO_BUF_EMPTY[DSP_EI_ADDR[3:0]] <= 1;
 				end
 			end
 			if (IO_EN) begin
 				if (EIFIFO_BUF_WE) begin
 					EIFIFO_BUF[DSP_ADDR[3:0]] <= DSP_DI;
+					EIFIFO_SUPPLY[DSP_ADDR[3:0]] <= 1;
 //					EIFIFO_BUF_EMPTY[DSP_ADDR[3:0]] <= 0;
 				end
 			end
@@ -1526,7 +1532,20 @@ module CLIO
 	assign DSP_EI_DATA = EIRAM_OE ? EIRAM_DATA : 
 						      EIFIFO_STAT_OE ? {12'b0000_0000_0000,EIFIFO_STAT[DSP_EI_ADDR[3:0]]} :
 						      EOFIFO_STAT_OE ? {12'b0000_0000_0000,EOFIFO_STAT[DSP_EI_ADDR[1:0]]} :
-						      EIFIFO_OE || EIFIFO_OE2 ? EIFIFO_BUF[DSP_EI_ADDR[3:0]] :
+						      // Game Bub port: an input FIFO read (0x0F0, popped) or peek (0x070)
+						      // gives the word the CPU last put at 0x070 (once, without a pop:
+						      // the audio folio's FIFOHEAD, zeroed with every FIFO reset, and a
+						      // streamer's discard read of it), else the word at the head of the
+						      // FIFO (or the one arriving now), an empty FIFO the word it last
+						      // handed over (Opera opera_dsp.c CPUSupply / opera_clio_fifo_ei).
+						      // The original gave the word held from the previous read always,
+						      // one word late, so the first word after a reset was the CPU's
+						      // only if the DMA had filled the FIFO before the discard read:
+						      // Killing Time's EZFlix decoder got its code table and stream
+						      // shifted by a word when it had not.
+						      EIFIFO_OE || EIFIFO_OE2 ? (EIFIFO_SUPPLY[DSP_EI_ADDR[3:0]] ? EIFIFO_BUF[DSP_EI_ADDR[3:0]] :
+						                                 EIFIFO_COUNT[DSP_EI_ADDR[3:0]] != 4'd0 || (EIFIFO_WRREQ[DSP_EI_ADDR[3:0]] && IO_EN) ?
+						                                 EIFIFO_Q[DSP_EI_ADDR[3:0]] : EIFIFO_BUF[DSP_EI_ADDR[3:0]]) :
 								NOISE_OE ? NOISE[15:0] :
 						      AUDLOCK_OE ? {AUDLOCK,15'b000_0000_0000_0000} :
 						      SEMASTAT_OE ? {12'b0000_0000_0000,DSP_SEMAPHORE_STAT} :

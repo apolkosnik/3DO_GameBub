@@ -43,7 +43,12 @@
 
 module tb_boot;
 	string outdir = "build/sim";   // +out=<dir>: frames/, cpu_trace.txt
-	initial void'($value$plusargs("out=%s", outdir));
+	// the directory is made here: a missing one made every $fopen fail
+	// silently (a 5-hour bus-trace run wrote nothing)
+	initial begin
+		void'($value$plusargs("out=%s", outdir));
+		void'($system({"mkdir -p ", outdir}));
+	end
 	reg clk_mem = 0;
 	reg clk_sys = 0;
 	reg clk_vid = 0;

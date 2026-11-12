@@ -1,0 +1,874 @@
+diff --git a/libopera/opera_arm.c b/libopera/opera_arm.c
+index a0dbc3a..66675dc 100644
+--- a/libopera/opera_arm.c
++++ b/libopera/opera_arm.c
+@@ -47,9 +47,292 @@
+ #include "opera_swi_hle_0x5XXXX.h"
+ 
+ #include <stdint.h>
++#include <stdio.h>
+ #include <stdlib.h>
+ #include <string.h>
+ 
++/*
++  VRAM access logging instrumentation (scratchpad build only).
++  Enabled by OPERA_VRAM_LOG=<path>; optional OPERA_VRAM_LOG_FRAMES=<min>-<max>
++  limits logging to that libretro frame range.  Every CPU data access
++  (mreadw/mwritew/mreadb/mwriteb) that lands in VRAM (DRAM_SIZE..RAM_SIZE)
++  writes one 12-byte little-endian record:
++    u32 frame; u32 (addr & 0xFFFFFF) | (flags << 24); u32 value
++  flags: bit0 = write, bit1 = 8-bit access.
++  Instruction fetches (mfetchw) and non-CPU writers (opera_io_write / DMA)
++  do not pass through these hooks.
++*/
++uint32_t opera_vram_log_frame = 0;
++static FILE    *g_VRAM_LOG       = NULL;
++static int      g_VRAM_LOG_STATE = 0; /* 0 = unchecked, 1 = on, -1 = off */
++static uint32_t g_VRAM_LOG_FMIN  = 0;
++static uint32_t g_VRAM_LOG_FMAX  = 0xFFFFFFFF;
++
++static
++void
++vram_log_close(void)
++{
++  if(g_VRAM_LOG)
++    fclose(g_VRAM_LOG);
++  g_VRAM_LOG = NULL;
++}
++
++/*
++  Optional raw dump of VRAM (host byte order of the DRAM array, i.e. '<u4'
++  words are ARM words on a little-endian host) to OPERA_VRAM_DUMP=<path>.
++  Called from retro_unload_game while DRAM is still allocated.
++*/
++void
++opera_vram_dump(void)
++{
++  char const *dump = getenv("OPERA_VRAM_DUMP");
++
++  if(dump && *dump && DRAM)
++    {
++      FILE *f = fopen(dump,"wb");
++      if(f)
++        {
++          fwrite(&DRAM[DRAM_SIZE],1,VRAM_SIZE,f);
++          fclose(f);
++        }
++    }
++}
++
++static
++void
++vram_log_init(void)
++{
++  char const *path  = getenv("OPERA_VRAM_LOG");
++  char const *range = getenv("OPERA_VRAM_LOG_FRAMES");
++
++  g_VRAM_LOG_STATE = -1;
++  if(!path || !*path)
++    return;
++  g_VRAM_LOG = fopen(path,"wb");
++  if(!g_VRAM_LOG)
++    return;
++  setvbuf(g_VRAM_LOG,NULL,_IOFBF,(1 << 20));
++  if(range && *range)
++    sscanf(range,"%u-%u",&g_VRAM_LOG_FMIN,&g_VRAM_LOG_FMAX);
++  atexit(vram_log_close);
++  g_VRAM_LOG_STATE = 1;
++}
++
++static
++void
++vram_log(uint32_t const flags_,
++         uint32_t const addr_,
++         uint32_t const val_)
++{
++  uint32_t rec[3];
++
++  if(g_VRAM_LOG_STATE <= 0)
++    {
++      if(g_VRAM_LOG_STATE == 0)
++        vram_log_init();
++      if(g_VRAM_LOG_STATE < 0)
++        return;
++    }
++
++  if((opera_vram_log_frame < g_VRAM_LOG_FMIN) ||
++     (opera_vram_log_frame > g_VRAM_LOG_FMAX))
++    return;
++
++  rec[0] = opera_vram_log_frame;
++  rec[1] = ((addr_ & 0x00FFFFFF) | (flags_ << 24));
++  rec[2] = val_;
++  fwrite(rec,sizeof(rec),1,g_VRAM_LOG);
++}
++
++void
++opera_vram_log_flush(void)
++{
++  if(g_VRAM_LOG)
++    fflush(g_VRAM_LOG);
++}
++
++/*
++  Instruction / data trace instrumentation (scratchpad build only).
++  OPERA_ITRACE=<path>   one 20-byte LE record per executed opera_arm_execute:
++      u32 pc; u32 opcode; u32 cpsr_before; u32 info; u32 cycles
++      info: bit0 condition passed, bit1 SWI taken, bit2 undefined/coproc trap,
++            bit3 data abort, bit4 FIQ taken after this instruction,
++            bits 8-15 data accesses made by this instruction,
++            bits 16-31 libretro frame (low 16 bits)
++  OPERA_DTRACE=<path>   one 20-byte LE record per CPU data access (any address)
++      u32 seq (index of the itrace record); u32 pc; u32 addr (unmasked);
++      u32 value; u32 flags: bit0 write, bit1 8-bit, bit2 XBUS DMA block
++      (addr = target, value = length), bits 8-31 frame
++  OPERA_TRACE_FRAMES=<min>-<max> frame window (default: all)
++  OPERA_REGDUMP=<path> OPERA_REGDUMP_FRAME=<n> [OPERA_REGDUMP_N=<k>]
++      text dump of r0-r15/CPSR at the first k screen (0x200000-0x2EFFFF)
++      writes in frame n.
++*/
++static FILE    *g_ITRACE        = NULL;
++static FILE    *g_DTRACE        = NULL;
++static FILE    *g_REGDUMP       = NULL;
++static int      g_TRACE_STATE   = 0;  /* 0 = unchecked, 1 = on, -1 = off */
++static uint32_t g_TRACE_FMIN    = 0;
++static uint32_t g_TRACE_FMAX    = 0xFFFFFFFF;
++static uint32_t g_TRACE_SEQ     = 0;
++static uint32_t g_cur_pc        = 0;
++static uint32_t g_cur_cmd       = 0;
++static uint32_t g_insn_accesses = 0;
++static uint32_t g_REGDUMP_FRAME = 0xFFFFFFFF;
++static int      g_REGDUMP_LEFT  = 0;
++/*
++  OPERA_SNAP=<prefix> OPERA_SNAP_FRAME=<n> OPERA_SNAP_PC=<hex> [OPERA_SNAP_N=<k>]
++      before executing the instruction at PC in frame n (first k hits, default 1):
++      <prefix>.ram  = DRAM then VRAM, raw (DRAM_SIZE + VRAM_SIZE bytes; every
++                      aligned 4-byte group is one ARM word, little-endian host
++                      order, i.e. numpy '<u4' gives the ARM word at byte offset*4)
++      <prefix>.regs = text: itrace seq of this instruction, frame, pc, cpsr,
++                      r0-r15 of the current mode, the banked registers and SPSRs
++*/
++static char const *g_SNAP_PREFIX = NULL;
++static uint32_t    g_SNAP_FRAME  = 0xFFFFFFFF;
++static uint32_t    g_SNAP_PC     = 0xFFFFFFFF;
++static int         g_SNAP_LEFT   = 0;
++static int         g_SNAP_HIT    = 0;
++static void snap_check(void);
++
++static
++void
++trace_close(void)
++{
++  if(g_ITRACE)
++    fclose(g_ITRACE);
++  if(g_DTRACE)
++    fclose(g_DTRACE);
++  if(g_REGDUMP)
++    fclose(g_REGDUMP);
++  g_ITRACE = g_DTRACE = g_REGDUMP = NULL;
++}
++
++static
++void
++trace_init(void)
++{
++  char const *ip = getenv("OPERA_ITRACE");
++  char const *dp = getenv("OPERA_DTRACE");
++  char const *rp = getenv("OPERA_REGDUMP");
++  char const *range = getenv("OPERA_TRACE_FRAMES");
++  char const *rf = getenv("OPERA_REGDUMP_FRAME");
++  char const *rn = getenv("OPERA_REGDUMP_N");
++
++  g_TRACE_STATE = -1;
++  if(ip && *ip)
++    {
++      g_ITRACE = fopen(ip,"wb");
++      if(g_ITRACE)
++        setvbuf(g_ITRACE,NULL,_IOFBF,(1 << 20));
++    }
++  if(dp && *dp)
++    {
++      g_DTRACE = fopen(dp,"wb");
++      if(g_DTRACE)
++        setvbuf(g_DTRACE,NULL,_IOFBF,(1 << 20));
++    }
++  if(rp && *rp && rf && *rf)
++    {
++      g_REGDUMP = fopen(rp,"w");
++      g_REGDUMP_FRAME = (uint32_t)strtoul(rf,NULL,0);
++      g_REGDUMP_LEFT = (rn && *rn) ? atoi(rn) : 16;
++    }
++  if(range && *range)
++    sscanf(range,"%u-%u",&g_TRACE_FMIN,&g_TRACE_FMAX);
++  {
++    char const *sp = getenv("OPERA_SNAP");
++    char const *sf = getenv("OPERA_SNAP_FRAME");
++    char const *spc = getenv("OPERA_SNAP_PC");
++    char const *sn = getenv("OPERA_SNAP_N");
++    if(sp && *sp && sf && *sf && spc && *spc)
++      {
++        g_SNAP_PREFIX = sp;
++        g_SNAP_FRAME  = (uint32_t)strtoul(sf,NULL,0);
++        g_SNAP_PC     = (uint32_t)strtoul(spc,NULL,16);
++        g_SNAP_LEFT   = (sn && *sn) ? atoi(sn) : 1;
++      }
++  }
++  if(g_ITRACE || g_DTRACE || g_REGDUMP || g_SNAP_LEFT)
++    {
++      atexit(trace_close);
++      g_TRACE_STATE = 1;
++    }
++}
++
++static
++OPERA_FORCEINLINE
++int
++trace_in_window(void)
++{
++  return ((g_TRACE_STATE > 0) &&
++          (opera_vram_log_frame >= g_TRACE_FMIN) &&
++          (opera_vram_log_frame <= g_TRACE_FMAX));
++}
++
++static
++void
++itrace_emit(uint32_t const pc_,
++            uint32_t const cmd_,
++            uint32_t const cpsr_,
++            uint32_t const info_,
++            uint32_t const cycles_)
++{
++  uint32_t rec[5];
++
++  if(!trace_in_window())
++    return;
++  g_TRACE_SEQ++;
++  if(!g_ITRACE)
++    return;
++  rec[0] = pc_;
++  rec[1] = cmd_;
++  rec[2] = cpsr_;
++  rec[3] = (info_ | ((g_insn_accesses & 0xFF) << 8) |
++            ((opera_vram_log_frame & 0xFFFF) << 16));
++  rec[4] = cycles_;
++  fwrite(rec,sizeof(rec),1,g_ITRACE);
++}
++
++static void regdump_emit(uint32_t const flags_,
++                         uint32_t const addr_,
++                         uint32_t const val_);
++
++static
++void
++dtrace_emit(uint32_t const flags_,
++            uint32_t const addr_,
++            uint32_t const val_)
++{
++  uint32_t rec[5];
++
++  g_insn_accesses++;
++  if(!trace_in_window())
++    return;
++  if(g_DTRACE)
++    {
++      rec[0] = g_TRACE_SEQ;
++      rec[1] = g_cur_pc;
++      rec[2] = addr_;
++      rec[3] = val_;
++      rec[4] = (flags_ | (opera_vram_log_frame << 8));
++      fwrite(rec,sizeof(rec),1,g_DTRACE);
++    }
++  if(g_REGDUMP && (g_REGDUMP_LEFT > 0) && (flags_ & 1) &&
++     (opera_vram_log_frame == g_REGDUMP_FRAME) &&
++     (addr_ >= 0x200000) && (addr_ < 0x2F0000))
++    regdump_emit(flags_,addr_,val_);
++}
++
++void
++opera_dtrace_dma(uint32_t const addr_,
++                 uint32_t const len_)
++{
++  if(g_TRACE_STATE > 0)
++    dtrace_emit(4,addr_,len_);
++}
++
+ #define ARM_INITIAL_PC  0x00000000
+ #define ARM_ARRAY_COUNT(A_) ((uint32_t)(sizeof(A_) / sizeof((A_)[0])))
+ 
+@@ -1606,9 +1889,22 @@ opera_arm_execute(void)
+   uint32_t pc_tmp;
+   int isexeption;
+ 
++  uint32_t trace_pc;
++  uint32_t trace_cpsr;
++  uint32_t trace_info = 0;
++
+   isexeption = false;
++  if(g_TRACE_STATE == 0)
++    trace_init();
++  if(g_SNAP_LEFT > 0)
++    snap_check();
++  trace_pc = CPU.USER[15];
++  trace_cpsr = CPU.CPSR;
+   cmd = mfetchw(CPU.USER[15]);
+   CPU.USER[15] += 4;
++  g_cur_pc = trace_pc;
++  g_cur_cmd = cmd;
++  g_insn_accesses = 0;
+ 
+   CYCLES = -SCYCLE;
+   if((cmd == 0xE5101810) && (CPU.CPSR == 0x80000093))
+@@ -1617,6 +1913,7 @@ opera_arm_execute(void)
+   if(((cond_flags_cross[cmd >> 28] >> (CPU.CPSR >> 28)) & 1) &&
+      (isexeption == false))
+     {
++      trace_info = 1;
+       switch((cmd >> 24) & 0xF)
+         {
+         case 0x0:               //Multiply
+@@ -1914,9 +2211,22 @@ opera_arm_execute(void)
+         }
+     }
+ 
++  if(trace_info & 1)
++    {
++      switch(CPU.USER[15])
++        {
++        case 0x00000004: trace_info |= 4; break;  /* undefined / coprocessor */
++        case 0x00000008: trace_info |= 2; break;  /* SWI */
++        case 0x00000010: trace_info |= 8; break;  /* data abort */
++        default: break;
++        }
++    }
++
+   if(g_SOFT_RESET_PENDING)
+     {
+       g_SOFT_RESET_PENDING = false;
++      if(g_TRACE_STATE > 0)
++        itrace_emit(trace_pc,cmd,trace_cpsr,trace_info,(uint32_t)(-CYCLES));
+       return -CYCLES;
+     }
+ 
+@@ -1930,21 +2240,28 @@ opera_arm_execute(void)
+       SETM(0x11);
+       CPU.USER[14] = (CPU.USER[15] + 4);
+       CPU.USER[15] = 0x0000001C;
++      trace_info |= 16;
+     }
+ 
++  if(g_TRACE_STATE > 0)
++    itrace_emit(trace_pc,cmd,trace_cpsr,trace_info,(uint32_t)(-CYCLES));
++
+   return -CYCLES;
+ }
+ 
+ static
+ void
+-mwritew(uint32_t const addr_,
+-        uint32_t const val_)
++mwritew_impl(uint32_t const addr_,
++             uint32_t const val_)
+ {
+   uint32_t const addr = (addr_ & ~3);
+ 
+   if(addr < g_ROM_OVERLAY_CLEAR_LIMIT)
+     set_rom_overlay(false);
+ 
++  if((addr >= DRAM_SIZE) && (addr < RAM_SIZE))
++    vram_log(1,addr,val_);
++
+   mwritew_internal(addr,val_);
+ }
+ 
+@@ -2011,13 +2328,18 @@ mwritew_internal(uint32_t const addr_,
+ 
+ static
+ uint32_t
+-mreadw(uint32_t const addr_)
++mreadw_impl(uint32_t const addr_)
+ {
+   int32_t index;
+   uint32_t const addr = (addr_ & ~3);
+ 
+   if(addr < g_CPU_DIRECT_RAM_LIMIT)
+-    return opera_mem_read32(addr);
++    {
++      uint32_t const v = opera_mem_read32(addr);
++      if(addr >= DRAM_SIZE)
++        vram_log(0,addr,v);
++      return v;
++    }
+ 
+   if(addr < g_ROM_OVERLAY_READ_LIMIT)
+     return *(uint32_t*)&ROM[addr & ROM1_SIZE_MASK];
+@@ -2072,8 +2394,8 @@ mreadw(uint32_t const addr_)
+ 
+ static
+ void
+-mwriteb(uint32_t const addr_,
+-        uint8_t  const val_)
++mwriteb_impl(uint32_t const addr_,
++             uint8_t  const val_)
+ {
+   int32_t index;
+ 
+@@ -2082,6 +2404,8 @@ mwriteb(uint32_t const addr_,
+ 
+   if(addr_ < RAM_SIZE)
+   {
++    if(addr_ >= DRAM_SIZE)
++      vram_log(3,addr_,val_);
+     opera_mem_write8(addr_,val_);
+     return;
+   }
+@@ -2099,12 +2423,17 @@ mwriteb(uint32_t const addr_,
+ 
+ static
+ uint32_t
+-mreadb(uint32_t const addr_)
++mreadb_impl(uint32_t const addr_)
+ {
+   int32_t index;
+ 
+   if(addr_ < g_CPU_DIRECT_RAM_LIMIT)
+-    return opera_mem_read8(addr_);
++    {
++      uint32_t const v = opera_mem_read8(addr_);
++      if(addr_ >= DRAM_SIZE)
++        vram_log(2,addr_,v);
++      return v;
++    }
+ 
+   if(addr_ < g_ROM_OVERLAY_READ_LIMIT)
+     {
+@@ -2198,6 +2527,120 @@ readusr(uint32_t const n_)
+   return 0;
+ }
+ 
++/* Register dump at a traced screen write (see OPERA_REGDUMP). */
++static
++void
++regdump_emit(uint32_t const flags_,
++             uint32_t const addr_,
++             uint32_t const val_)
++{
++  int i;
++
++  g_REGDUMP_LEFT--;
++  fprintf(g_REGDUMP,"seq %u frame %u pc %08x op %08x %s addr %08x val %08x cpsr %08x regs",
++          g_TRACE_SEQ,opera_vram_log_frame,g_cur_pc,g_cur_cmd,
++          (flags_ & 2) ? "STRB" : "STR",addr_,val_,CPU.CPSR);
++  for(i = 0; i < 16; i++)
++    fprintf(g_REGDUMP," %08x",CPU.USER[i]);
++  fprintf(g_REGDUMP,"\n");
++  fflush(g_REGDUMP);
++}
++
++/* RAM + register snapshot before the instruction at OPERA_SNAP_PC (see OPERA_SNAP). */
++static
++void
++snap_check(void)
++{
++  char path[4096];
++  FILE *f;
++  int i;
++
++  if((opera_vram_log_frame != g_SNAP_FRAME) || (CPU.USER[15] != g_SNAP_PC))
++    return;
++  g_SNAP_LEFT--;
++  g_SNAP_HIT++;
++  if(g_SNAP_HIT == 1)
++    snprintf(path,sizeof(path),"%s.ram",g_SNAP_PREFIX);
++  else
++    snprintf(path,sizeof(path),"%s_%d.ram",g_SNAP_PREFIX,g_SNAP_HIT);
++  f = fopen(path,"wb");
++  if(f)
++    {
++      fwrite(DRAM,1,DRAM_SIZE + VRAM_SIZE,f);
++      fclose(f);
++    }
++  if(g_SNAP_HIT == 1)
++    snprintf(path,sizeof(path),"%s.regs",g_SNAP_PREFIX);
++  else
++    snprintf(path,sizeof(path),"%s_%d.regs",g_SNAP_PREFIX,g_SNAP_HIT);
++  f = fopen(path,"w");
++  if(!f)
++    return;
++  fprintf(f,"# Opera CPU state before executing the instruction at pc (frame = libretro frame,\n"
++            "# seq = index of this instruction in OPERA_ITRACE / the seq field of OPERA_DTRACE).\n"
++            "# RAM file: DRAM (%u bytes) then VRAM (%u bytes), ARM words little-endian.\n",
++          (unsigned)DRAM_SIZE,(unsigned)VRAM_SIZE);
++  fprintf(f,"seq %u\nframe %u\npc %08x\ncpsr %08x\nmode %02x\n",
++          g_TRACE_SEQ,opera_vram_log_frame,CPU.USER[15],CPU.CPSR,CPU.CPSR & 0x1F);
++  for(i = 0; i < 16; i++)
++    fprintf(f,"r%d %08x\n",i,CPU.USER[i]);
++  fprintf(f,"# banked (Opera layout): CASH = r8-r14 of the bank not in use (user/sys bank\n"
++            "# when in FIQ mode, otherwise the FIQ-side copy is in FIQ[]), SVC/ABT/IRQ/UND = r13,r14\n");
++  for(i = 0; i < 7; i++)
++    fprintf(f,"cash%d %08x\n",i,CPU.CASH[i]);
++  for(i = 0; i < 7; i++)
++    fprintf(f,"fiq%d %08x\n",i,CPU.FIQ[i]);
++  fprintf(f,"svc13 %08x\nsvc14 %08x\n",CPU.SVC[0],CPU.SVC[1]);
++  fprintf(f,"abt13 %08x\nabt14 %08x\n",CPU.ABT[0],CPU.ABT[1]);
++  fprintf(f,"irq13 %08x\nirq14 %08x\n",CPU.IRQ[0],CPU.IRQ[1]);
++  fprintf(f,"und13 %08x\nund14 %08x\n",CPU.UND[0],CPU.UND[1]);
++  for(i = 0; i < 6; i++)
++    fprintf(f,"spsr%d %08x\n",i,CPU.SPSR[i]);
++  fprintf(f,"nfiq %u\n",(unsigned)CPU.nFIQ);
++  fclose(f);
++}
++
++/* Tracing wrappers around the CPU data accessors (see OPERA_DTRACE). */
++static
++void
++mwritew(uint32_t const addr_,
++        uint32_t const val_)
++{
++  if(g_TRACE_STATE > 0)
++    dtrace_emit(1,addr_,val_);
++  mwritew_impl(addr_,val_);
++}
++
++static
++uint32_t
++mreadw(uint32_t const addr_)
++{
++  uint32_t const v = mreadw_impl(addr_);
++  if(g_TRACE_STATE > 0)
++    dtrace_emit(0,addr_,v);
++  return v;
++}
++
++static
++void
++mwriteb(uint32_t const addr_,
++        uint8_t  const val_)
++{
++  if(g_TRACE_STATE > 0)
++    dtrace_emit(3,addr_,val_);
++  mwriteb_impl(addr_,val_);
++}
++
++static
++uint32_t
++mreadb(uint32_t const addr_)
++{
++  uint32_t const v = mreadb_impl(addr_);
++  if(g_TRACE_STATE > 0)
++    dtrace_emit(2,addr_,v);
++  return v;
++}
++
+ void
+ opera_io_write(uint32_t const addr_,
+                uint32_t const val_)
+diff --git a/libopera/opera_arm.h b/libopera/opera_arm.h
+index e63d2d7..76353d5 100644
+--- a/libopera/opera_arm.h
++++ b/libopera/opera_arm.h
+@@ -45,6 +45,12 @@ void     opera_arm_sync_memory_map(void);
+ 
+ void     opera_io_write(const uint32_t addr_, const uint32_t val_);
+ 
++/* VRAM access logging instrumentation (OPERA_VRAM_LOG) */
++extern uint32_t opera_vram_log_frame;
++void     opera_vram_log_flush(void);
++void     opera_vram_dump(void);
++void     opera_dtrace_dma(const uint32_t addr_, const uint32_t len_);
++
+ uint32_t opera_arm_state_size(void);
+ uint32_t opera_arm_state_size_v1(void);
+ uint32_t opera_arm_state_save(void *buf_);
+diff --git a/libopera/opera_clio.c b/libopera/opera_clio.c
+index 176594a..c5ee665 100644
+--- a/libopera/opera_clio.c
++++ b/libopera/opera_clio.c
+@@ -399,6 +399,7 @@ clio_handle_dma(uint32_t val_)
+ 
+       trg = opera_madam_peek(0x540);
+       len = opera_madam_peek(0x544);
++      opera_dtrace_dma(trg,(uint32_t)len);
+       CLIO.regs[0x304] &= ~XBUS_DMA_ENABLE_MASK;
+       CLIO.regs[0x400] &= ~0x80;
+ 
+diff --git a/libopera/opera_dsp.c b/libopera/opera_dsp.c
+index 7972c2e..1fd3629 100644
+--- a/libopera/opera_dsp.c
++++ b/libopera/opera_dsp.c
+@@ -38,6 +38,8 @@
+ #include "prng16.h"
+ 
+ #include <string.h>
++#include <stdio.h>
++#include <stdlib.h>
+ 
+ #if 0 //20 bit ALU
+ #define ALUSIZEMASK 0xFFFFF000
+@@ -253,6 +255,125 @@ typedef union dsp_alu_flags_u dsp_alu_flags_t;
+ 
+ static dsp_t DSP;
+ 
++/*
++  DSP trace instrumentation (scratchpad build only).
++  OPERA_DSP_TRACE=<prefix> OPERA_DSP_FRAMES=<min>-<max>
++    <prefix>_snap.bin   at the first DSP tick of frame min: NMem[2048] u16, IMem[1024] u16
++    <prefix>_snap.txt   the DSP registers at that tick (text)
++    <prefix>_ticks.bin  per DSP tick (opera_dsp_loop call) in the window, 16 B LE:
++                        u32 tick, u32 frame, u32 first itrace index, u32 instruction count
++    <prefix>_itrace.bin per executed instruction, 16 B LE: u32 tick, u16 pc, u16 opcode,
++                        u32 Y after the barrel shifter, u32 flags (bit0 zero, bit1 negative,
++                        bit2 carry, bit3 overflow, bit4 exact, bits 16-25 writeback address)
++    <prefix>_io.bin     per dsp_write (any address) and per dsp_read of 0x70-0x7C / 0xD0-0xFC,
++                        and per CPU write to I memory (2) / N memory (3), 16 B LE:
++                        u32 tick, u32 itrace index, u16 addr, u16 kind (0 read, 1 write, 2, 3), u32 value
++*/
++extern uint32_t opera_vram_log_frame;
++static FILE    *g_DSPT_SNAP   = NULL;
++static FILE    *g_DSPT_TICKS  = NULL;
++static FILE    *g_DSPT_ITRACE = NULL;
++static FILE    *g_DSPT_IO     = NULL;
++static int      g_DSPT_STATE  = 0;      /* 0 unchecked, 1 on, -1 off */
++static uint32_t g_DSPT_FMIN   = 0;
++static uint32_t g_DSPT_FMAX   = 0xFFFFFFFF;
++static uint32_t g_DSPT_TICK   = 0;
++static uint32_t g_DSPT_INSN   = 0;
++static int      g_DSPT_SNAPPED = 0;
++static int      g_DSPT_IN     = 0;
++
++static void
++dspt_close(void)
++{
++  if(g_DSPT_TICKS) fclose(g_DSPT_TICKS);
++  if(g_DSPT_ITRACE) fclose(g_DSPT_ITRACE);
++  if(g_DSPT_IO) fclose(g_DSPT_IO);
++  g_DSPT_TICKS = g_DSPT_ITRACE = g_DSPT_IO = NULL;
++}
++
++static void
++dspt_init(void)
++{
++  char const *p = getenv("OPERA_DSP_TRACE");
++  char const *r = getenv("OPERA_DSP_FRAMES");
++  char path[4096];
++
++  g_DSPT_STATE = -1;
++  if(!p || !*p)
++    return;
++  if(r && *r)
++    sscanf(r,"%u-%u",&g_DSPT_FMIN,&g_DSPT_FMAX);
++  snprintf(path,sizeof(path),"%s_ticks.bin",p);  g_DSPT_TICKS  = fopen(path,"wb");
++  snprintf(path,sizeof(path),"%s_itrace.bin",p); g_DSPT_ITRACE = fopen(path,"wb");
++  snprintf(path,sizeof(path),"%s_io.bin",p);     g_DSPT_IO     = fopen(path,"wb");
++  if(g_DSPT_ITRACE) setvbuf(g_DSPT_ITRACE,NULL,_IOFBF,(1 << 20));
++  if(g_DSPT_IO) setvbuf(g_DSPT_IO,NULL,_IOFBF,(1 << 20));
++  atexit(dspt_close);
++  g_DSPT_STATE = 1;
++}
++
++static void
++dspt_snapshot(void)
++{
++  char const *p = getenv("OPERA_DSP_TRACE");
++  char path[4096];
++  FILE *f;
++  int i;
++
++  g_DSPT_SNAPPED = 1;
++  snprintf(path,sizeof(path),"%s_snap.bin",p);
++  f = fopen(path,"wb");
++  if(f)
++    {
++      fwrite(DSP.NMem,sizeof(DSP.NMem[0]),2048,f);
++      fwrite(DSP.IMem,sizeof(DSP.IMem[0]),1024,f);
++      fclose(f);
++    }
++  snprintf(path,sizeof(path),"%s_snap.txt",p);
++  f = fopen(path,"w");
++  if(!f)
++    return;
++  fprintf(f,"tick %u\nframe %u\nitrace_index %u\n",g_DSPT_TICK,opera_vram_log_frame,g_DSPT_INSN);
++  fprintf(f,"PC %u\nAudioOutStatus %04x\nSema4Status %04x\nSema4Data %04x\nDSPPCNT %d\nDSPPRLD %d\nAUDCNT %d\nINT %04x\n",
++          DSP.dregs.PC,DSP.dregs.AudioOutStatus,DSP.dregs.Sema4Status,DSP.dregs.Sema4Data,
++          DSP.dregs.DSPPCNT,DSP.dregs.DSPPRLD,DSP.dregs.AUDCNT,DSP.dregs.INT);
++  fprintf(f,"RBASEx4 %u\nREGi %d\nnOP_MASK %04x\nRunning %d\nGenFIQ %d\n",
++          DSP.RBASEx4,DSP.REGi,DSP.flags.nOP_MASK,DSP.flags.Running,DSP.flags.GenFIQ);
++  for(i = 0; i < 16; i++)
++    fprintf(f,"CPUSupply%d %d\n",i,DSP.CPUSupply[i]);
++  fclose(f);
++}
++
++static void
++dspt_io(uint16_t addr_, uint16_t write_, uint32_t val_)
++{
++  uint32_t rec[4];
++  if(!g_DSPT_IN || !g_DSPT_IO)
++    return;
++  rec[0] = g_DSPT_TICK;
++  rec[1] = g_DSPT_INSN;
++  rec[2] = (addr_ | ((uint32_t)write_ << 16));
++  rec[3] = val_;
++  fwrite(rec,sizeof(rec),1,g_DSPT_IO);
++}
++
++static void
++dspt_insn(uint32_t pc_, uint32_t raw_, uint32_t y_, uint32_t flags_, uint32_t exact_, uint32_t wb_)
++{
++  uint32_t rec[4];
++  if(!g_DSPT_IN)
++    return;
++  g_DSPT_INSN++;
++  if(!g_DSPT_ITRACE)
++    return;
++  rec[0] = g_DSPT_TICK;
++  rec[1] = ((pc_ & 0xFFFF) | (raw_ << 16));
++  rec[2] = y_;
++  rec[3] = (((flags_ & 1) ? 1 : 0) | ((flags_ >> 8) & 1) << 1 | ((flags_ >> 16) & 1) << 2 |
++            ((flags_ >> 24) & 1) << 3 | ((exact_ & 1) << 4) | ((wb_ & 0x3FF) << 16));
++  fwrite(rec,sizeof(rec),1,g_DSPT_ITRACE);
++}
++
+ static
+ INLINE
+ uint32_t
+@@ -310,10 +431,22 @@ SUB_VFLAG(const uint32_t a_,
+           (~a_ &  b_ &  y_ & TOPBIT));
+ }
+ 
+-/* DSP IREAD (includes EI, I) */
++static uint16_t dsp_read_impl(uint32_t addr_);
++
++/* DSP IREAD (includes EI, I): traced wrapper (see OPERA_DSP_TRACE) */
+ static
+ uint16_t
+ dsp_read(uint32_t addr_)
++{
++  uint16_t const v = dsp_read_impl(addr_);
++  if(g_DSPT_IN && (((addr_ >= 0x70) && (addr_ <= 0x7C)) || ((addr_ >= 0xD0) && (addr_ <= 0xFC))))
++    dspt_io((uint16_t)addr_,0,v);
++  return v;
++}
++
++static
++uint16_t
++dsp_read_impl(uint32_t addr_)
+ {
+   uint16_t val;
+ 
+@@ -413,11 +546,23 @@ dsp_read(uint32_t addr_)
+   return DSP.IMem[addr_ & 0x7F];
+ }
+ 
+-/* DSP IWRITE (includes EO,I) */
++static void dsp_write_impl(uint32_t addr_, uint16_t val_);
++
++/* DSP IWRITE (includes EO,I): traced wrapper (see OPERA_DSP_TRACE) */
+ static
+ void
+ dsp_write(uint32_t addr_,
+           uint16_t val_)
++{
++  if(g_DSPT_IN)
++    dspt_io((uint16_t)(addr_ & 0x3FF),1,val_);
++  dsp_write_impl(addr_,val_);
++}
++
++static
++void
++dsp_write_impl(uint32_t addr_,
++               uint16_t val_)
+ {
+   addr_ &= 0x3FF;
+   switch(addr_)
+@@ -1052,12 +1197,20 @@ opera_dsp_loop(void)
+   uint32_t BOP; /* 1st & 2nd operand */
+   dsp_alu_flags_t flags;
+ 
++  if(g_DSPT_STATE == 0)
++    dspt_init();
++  g_DSPT_IN = ((g_DSPT_STATE > 0) && (opera_vram_log_frame >= g_DSPT_FMIN) && (opera_vram_log_frame <= g_DSPT_FMAX));
++  if(g_DSPT_IN && !g_DSPT_SNAPPED)
++    dspt_snapshot();
++
+   if(DSP.flags.Running)
+     {
+       uint32_t AOP    = 0;      /* 1st operand */
+       uint32_t RBSR   = 0;	/* return address */
+       int      fExact = 0;
+       bool     work   = true;
++      uint32_t trace_pc = 0;
++      uint32_t tick_insn0 = g_DSPT_INSN;
+ 
+       opera_dsp_reset();
+ 
+@@ -1070,6 +1223,7 @@ opera_dsp_loop(void)
+           ITAG_t inst;
+ 
+           inst.raw = DSP.NMem[DSP.dregs.PC++];
++          trace_pc = (DSP.dregs.PC - 1);
+           if(inst.aif.PAD)
+             { // Control instruction
+               switch((inst.raw >> 7) & 0xFF)
+@@ -1432,8 +1586,16 @@ opera_dsp_loop(void)
+                 dsp_write(DSP.flags.WRITEBACK,((int32_t)Y) >> 16);
+             }
+ 
++          dspt_insn(trace_pc,inst.raw,Y,flags.raw,(uint32_t)fExact,inst.aif.PAD ? 0 : DSP.flags.WRITEBACK);
+         } while(work);
+ 
++      if(g_DSPT_IN && g_DSPT_TICKS)
++        {
++          uint32_t rec[4];
++          rec[0] = g_DSPT_TICK; rec[1] = opera_vram_log_frame; rec[2] = tick_insn0; rec[3] = (g_DSPT_INSN - tick_insn0);
++          fwrite(rec,sizeof(rec),1,g_DSPT_TICKS);
++        }
++
+ 
+       if(1 & DSP.flags.GenFIQ)
+         {
+@@ -1446,6 +1608,8 @@ opera_dsp_loop(void)
+         DSP.dregs.DSPPCNT += DSP.dregs.DSPPRLD;
+     }
+ 
++  if(g_DSPT_IN)
++    g_DSPT_TICK++;
+   return ((DSP.IMem[0x3FF] << 16) | DSP.IMem[0x3FE]);
+ }
+ 
+@@ -1455,6 +1619,8 @@ opera_dsp_mem_write(uint16_t addr_,
+                      uint16_t val_)
+ {
+   //mwriteh(addr,val);
++  if(g_DSPT_IN)
++    dspt_io((uint16_t)(addr_ & 0x3FF),3,val_);   /* CPU write to N memory */
+   DSP.NMem[addr_ & 0x3FF] = val_;
+ }
+ 
+@@ -1469,6 +1635,8 @@ void
+ opera_dsp_imem_write(uint16_t addr_,
+                       uint16_t val_)
+ {
++  if(g_DSPT_IN)
++    dspt_io((uint16_t)(addr_ & 0x3FF),2,val_);   /* CPU write to I memory */
+   if((addr_ >= 0x70) && (addr_ <= 0x7C))
+     {
+       DSP.CPUSupply[addr_ - 0x70] = 1;
+diff --git a/libretro.c b/libretro.c
+index 57c2455..40330e1 100644
+--- a/libretro.c
++++ b/libretro.c
+@@ -547,6 +547,7 @@ retro_unload_game(void)
+                       g_OPTS.nvram_version);
+   game_info_path_free();
+ 
++  opera_vram_dump();
+   opera_3do_destroy();
+   opera_mem_destroy();
+ 
+@@ -806,6 +807,7 @@ retro_run(void)
+ 
+   lr_input_update(g_OPTS.active_devices);
+ 
++  opera_vram_log_frame++;
+   opera_3do_process_frame();
+   if(ode_reset_if_requested())
+     return;

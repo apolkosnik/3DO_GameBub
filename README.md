@@ -449,9 +449,10 @@ dock gamepad's right stick and buttons stand in. `tb_lightgun` checks
 the packets through `host_mouse` and `HPS2PAD` (a packet, the clamp and the 96-count
 reads, two packets adding, a button alone and one held from before the mouse was
 switched on, dy -32768 clamped up rather than wrapped, the device off); test ROM test 20
-reads the mouse through MADAM's player bus DMA. The dock firmware builds (its bluepad32
-submodule at a public commit, with the dock's CMake giving bluepad32 the FreeRTOS CYW43
-arch instead of its own); neither firmware has run on hardware yet.
+reads the mouse through MADAM's player bus DMA. On hardware a USB mouse works in Lemmings
+with the v0.5 bitstream and both firmware builds (the dock firmware's bluepad32 submodule
+is at a public commit, with the dock's CMake giving bluepad32 the FreeRTOS CYW43 arch
+instead of its own).
 
 ### Light gun (groundwork)
 
@@ -596,8 +597,24 @@ of the test BIOS makes them from the CPU (see *Simulation*).
 * The output FIFOs' status (0x3C0-0x3CC) returned input FIFOs 0-3 again.
 * A 32-bit read of the DSP's output memory returned the even word twice; it now returns
   the even word in bits 31-16 and the odd one in bits 15-0, as 32-bit writes store them.
-* An empty input FIFO keeps giving the DSP the word it holds. Each read took the FIFO's
-  next word even when it had none, so a drained sample read as a stale RAM word.
+* A DSP read of an input FIFO (0x0F0-0x0FC, popped) or a peek (0x070-0x07C) gives the
+  word the CPU last wrote at 0x070+n, once and without a pop, else the word at the head
+  of the FIFO; an empty FIFO keeps giving the word it last handed over (Opera's
+  CPUSupply and FIFO read; MAME only differs for the CPU's word). The audio folio zeroes
+  that word with every FIFO reset (its FIFOHEAD), and a streamer's DSP program discards
+  one read per channel after a reset to take it. The original gave the word of the
+  *previous* read every time (one word late), so the CPU's word came out first only if
+  the DMA had already filled the FIFO when the discard read happened: when it had not,
+  Killing Time's DSP decoder (a 4-bit code to delta-pair expander for the EZFlix intro,
+  its 16-entry table loaded through input FIFO 3) got a zero table entry and the rest
+  shifted by one, and the whole intro came out embossed with wrong symbols. Each read
+  also took the FIFO's next word even when it had none, so a drained sample read as a
+  stale RAM word.
+* A DSP read of a data word an instruction writes in the same clock gets the new word:
+  the MOVE's, or an ALU result whose write waits for the memory port behind a MOVE's
+  write. Killing Time's DSP program increments its interrupt counter (ADD [108] + 1),
+  moves another word, then moves [108] to the CPU interrupt register: the ADD's write
+  landed in the clock of that read, which took the old count.
 * The DSP's frame counter keeps the reload value the DSP wrote. Every frame start set it
   back to 565, so a program's own frame rate held for one frame. It is 565 from
   power-on, and a CPU reset leaves it (Opera).
@@ -666,9 +683,20 @@ transfer to memory with no next buffer.
 `tb_clio` checks these on the CLIO module, accessed as MADAM does, with DSP programs
 and a DMA refill, and the FIFO modules against a reference queue (before the timer and
 interrupt fixes 30 of 63 checks fail; before the FIFO and DSP fixes 4,886 of 5,729;
-before the DSP core, empty-FIFO and frame fixes 46 of 5,788), and test 10 of the test
-BIOS from the CPU. Its sections 8 and 9 check the shifts and the expansion bus control
-(the testbench takes the expansion DMA's words as MADAM does).
+before the DSP core, empty-FIFO and frame fixes 46 of 5,788; before the input FIFO
+head and same-clock read fixes 9 of 5,867), and test 10 of the test BIOS from the CPU.
+Its sections 8 and 9 check the shifts and the expansion bus control (the testbench
+takes the expansion DMA's words as MADAM does), 6c the input FIFO head word and 7g the
+same-clock read, through both address ranges of the data memory (its 256 words are at
+0x100-0x1FF and again at 0x200-0x2FF).
+
+`tb_dsp_kt` runs the real CLIO on a game's DSP program with the I memory, the input
+FIFO words and the CPU's writes (DSP memory, FIFO resets, DMA enables) of an
+instrumented Opera run, playing MADAM for the DMA (buffer ends included), and logs the
+DSP's writes and FIFO reads tick by tick for a comparison with Opera's per-instruction
+trace. With Killing Time's intro program (9,560 ticks, two symbol-table reloads) every
+tick's writes now match Opera's; before the fixes the first FIFO read of every tick
+was a word late. The trace files are not in the repository (they hold the game's code).
 
 **Matrix engine (fix to `MADAM.sv`).** MADAM's matrix multiply summed signed products in
 an expression made unsigned by an unsigned `'0` (SystemVerilog takes the signedness of
@@ -965,9 +993,14 @@ sim/run_tb.sh tb_viddma        # MADAM video DMA: line-start / mid-line acknowle
                                # choice, field line across VDL entries, VDL entries with ListLen 0
 sim/run_tb.sh tb_lightgun      # the light gun (count, buttons, off screen; NTSC, PAL) and the mouse
                                # (packets, clamp, 96-count reads) on the control port
+sim/run_tb.sh tb_dsp_kt +nmem=... +imem=... +fifo=... +cpu=... +ticks=N +log=...
+                               # the CLIO DSP on a game's program and input from an instrumented Opera
+                               # run (see the CLIO section), for a tick-by-tick comparison with Opera;
+                               # the Opera patch and the scripts are in sim/tools/dsp_kt/
 sim/run_tb.sh tb_clio          # CLIO interrupt summary, timer cascade, timer controls, TimerSlack,
                                # DSP output memory and FIFO status, FIFOs (DSP reads during DMA refills),
                                # DSP instructions without operands, frame start state, empty input FIFOs,
+                               # the input FIFO head word (CPU's, then the FIFO's), same-clock reads,
                                # frame reload value, audio lock, shifts with operand control,
                                # XBUS control read-back and DMA reset flush, indirect operands,
                                # CSTAT writes, ADBIO read-back

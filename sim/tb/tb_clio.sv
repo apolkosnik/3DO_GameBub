@@ -28,7 +28,15 @@
 //      (Portfolio clio.h clio_FIFOStatusDSPPtoDMA), the input FIFOs' at
 //      0x380-0x3BC. A DSP program (Portfolio StartupCode's MOVE opcodes)
 //      writes the output memory and one word into each output FIFO.
-//   6. The FIFOs (CLIO_DSP_FIFO, CLIO_DMA_FIFO): (a) each module under
+//   6. The FIFOs (CLIO_DSP_FIFO, CLIO_DMA_FIFO): (c) a DSP read of an input
+//      FIFO (0x0F0, popped) or a peek (0x070) gives the word the CPU last
+//      wrote at 0x070 (once, nothing popped: the audio folio's FIFOHEAD,
+//      zeroed with every FIFO reset), else the word at the FIFO's head, an
+//      empty FIFO the word last handed over (Opera CPUSupply / fifo_ei; the
+//      original gave the word of the previous read, one word late, so a
+//      streamer's discard read after a reset lost the FIFO's first word
+//      unless the DMA had filled it already: Killing Time's DSP stream
+//      decoder got its code table and stream shifted); (a) each module under
 //      random requests, including reads of an empty and writes to a full
 //      FIFO and both at once there, against a queue: every word read, the
 //      count and the pointers; (b) in CLIO, a DSP program reading input
@@ -52,6 +60,11 @@
 //      not counted in the instruction's operands (WO 94/16383), so the
 //      output address after it is still read and written, once; the stored
 //      control is the operand's value, reused under OPMASK.
+//  7g. A word read right after an instruction writes it is the new word:
+//      an ALU writeback a MOVE's write delays lands in the clock of the next
+//      instruction's read (Killing Time's DSP interrupt counter: ADD [108]+1;
+//      MOVE; MOVE 3EE <- [108]; the original read the old word), also through
+//      the data memory's second address range (0x208 for 0x108).
 //  7f. Indirect operands (D_I): the operand is read through the pointer the
 //      operand address holds (Opera, MAME), alone and with a direct operand;
 //      the output after it is written once.
@@ -545,6 +558,53 @@ module tb_clio;
 		rd_check("output memory 0 after input FIFO 0 drained (the last DMA word)", 16'h3C00, 32'(fifo0_in[$]));
 		check("input FIFO 0 empty", {28'h0, dut.EIFIFO_COUNT[0]}, 32'h0);
 
+		// ---------------- 6c. an input FIFO read gives the CPU's head word, then the FIFO's ----------------
+		// MADAM fills input FIFO 0 with six words (DSP stopped), the CPU writes
+		// the head word 0x070 (the audio folio's FIFOHEAD, zeroed with every
+		// FIFO reset; a streamer's one discard read takes it), then the DSP
+		// program moves to the output memory: 0 <- 0x070 (the CPU's word, not
+		// popped), 1 <- 0x0F0 (the FIFO's first word, popped), 2 <- 0x070 (the
+		// next, not popped), 3..7 <- 0x0F0 (the rest), 8 <- 0x0F0 and 9 <- 0x070
+		// (empty: the last word again). The original gave the word of the
+		// previous read every time, so the FIFO's first word came out only at
+		// the second read, and the CPU's at the first only with the FIFO empty.
+		begin
+			int waited;
+			wr(16'h17FC, 32'h0);
+			wr(16'h0300, 32'h000F1FFF);
+			wr(16'h0308, 32'hFFFFFFFF);
+			code(0, 16'h9B00); code(1, 16'h8070);
+			code(2, 16'h9B01); code(3, 16'h80F0);
+			code(4, 16'h9B02); code(5, 16'h8070);
+			for (int i = 3; i < 9; i++) begin code(2 * i, 16'h9B00 + 16'(i)); code(2 * i + 1, 16'h80F0); end
+			code(18, 16'h9B09); code(19, 16'h8070);
+			code(20, 16'h8380); code(21, 16'h8000); code(22, 16'h8000);
+			wr(16'h0304, 32'h1);                                   // DMA to input FIFO 0: CLIO asks for words
+			waited = 0;
+			while (dut.DMA_ST != 2 && waited < 40) begin mclk(); waited++; end
+			if (waited == 40) begin errors++; $display("[%0t] TB ERROR: 6c: CLIO's DMA did not start (state %0d)", $realtime, dut.DMA_ST); end
+			for (int i = 0; i < 3; i++) begin                      // MADAM: three 32-bit words, code 7
+				mclk(); #1 mem_di = {16'hA100 + 16'(2 * i), 16'hA101 + 16'(2 * i)}; clc = 3'h2;
+				mclk(); #1 clc = 3'h0;
+				mclk(5);
+			end
+			mclk(); #1 clc = 3'h7;
+			mclk(); #1 clc = 3'h0;
+			mclk(8);
+			wr(16'h0308, 32'h1);                                   // no more refills
+			check("6c: input FIFO 0 holds six words", {28'h0, dut.EIFIFO_COUNT[0]}, 32'h6);
+			wr(16'h35C0, 32'h1234);                                // the CPU's head word (0x070)
+			dsp_run(120);
+			check("6c: input FIFO 0 empty after the program", {28'h0, dut.EIFIFO_COUNT[0]}, 32'h0);
+			rd_check("6c: 0x070 first: the CPU's head word", 16'h3C00, 32'h1234);
+			rd_check("6c: first 0x0F0 read: the FIFO's first word", 16'h3C04, 32'hA100);
+			rd_check("6c: 0x070 after one read: the next word", 16'h3C08, 32'hA101);
+			for (int i = 1; i < 6; i++)
+				rd_check($sformatf("6c: 0x0F0 read %0d: word %0d", i + 1, i), 16'h3C08 + 16'(4 * i), 32'hA100 + 32'(i));
+			rd_check("6c: 0x0F0 read of the empty FIFO: the last word", 16'h3C20, 32'hA105);
+			rd_check("6c: 0x070 on the empty FIFO: the last word", 16'h3C24, 32'hA105);
+		end
+
 		// ---------------- 7a. instructions without operands ----------------
 		// INC = 0x0060, DEC = 0x0070: ACC +- 1 in the ALU's LSB, 1/16 of an
 		// output word (the ALU is 20 bits, words enter it shifted left by 4;
@@ -714,6 +774,40 @@ module tb_clio;
 			rd_check("shift control from memory: output", 16'h3C00, 32'h0110);
 			rd_check("shift control reused under OPMASK: output", 16'h3C04, 32'h0110);
 		end
+		dsp_en = 0;
+
+		// ---------------- 7g. a result read right after it is written ----------------
+		// An ALU writeback that a MOVE's write delays by a clock lands in the clock
+		// of the next instruction's read of it (Killing Time's DSP interrupt counter:
+		// ADD [108]+1; MOVE; MOVE 3EE <- [108]); the original read the old word.
+		// (A read in the very next instruction is not checked: the DSP's pipeline
+		// has not computed the result yet; Killing Time's program never does it.)
+		dsp_en = 1;
+		wr(16'h17FC, 32'h0);
+		code(0, 16'h9908); code(1, 16'hC041);                       // MOVE 108 <- 0x41
+		code(2, 16'h4620); code(3, 16'h8908); code(4, 16'hC001);    // ADD [108 WB] + 1
+		code(5, 16'h9909); code(6, 16'h8009);                       // MOVE 109 <- [009]
+		code(7, 16'h9B00); code(8, 16'h8108);                       // output 0 <- [108]
+		code(9, 16'h4620); code(10, 16'h8908); code(11, 16'hC001);  // ADD [108 WB] + 1
+		code(12, 16'h8000);                                         // NOP
+		code(13, 16'h9B01); code(14, 16'h8108);                     // output 1 <- [108]
+		code(15, 16'h4620); code(16, 16'h8908); code(17, 16'hC001); // ADD [108 WB] + 1
+		code(18, 16'h2400); code(19, 16'h8108);                     // TRA A1 <- [108] (not checked)
+		code(20, 16'h9B02); code(21, 16'h8108);                     // output 2 <- [108]
+		// the data memory's 256 words are at 0x100-0x1FF and again at 0x200-0x2FF
+		code(22, 16'h4620); code(23, 16'h8908); code(24, 16'hC001); // ADD [108 WB] + 1
+		code(25, 16'h9909); code(26, 16'h8009);                     // MOVE 109 <- [009]
+		code(27, 16'h9B03); code(28, 16'h8208);                     // output 3 <- [208]
+		code(29, 16'h4620); code(30, 16'h8A08); code(31, 16'hC001); // ADD [208 WB] + 1
+		code(32, 16'h9909); code(33, 16'h8009);                     // MOVE 109 <- [009]
+		code(34, 16'h9B04); code(35, 16'h8108);                     // output 4 <- [108]
+		code(36, 16'h8380); code(37, 16'h8000); code(38, 16'h8000);
+		dsp_run(300);
+		rd_check("7g: the word two instructions after its writeback (a MOVE between)", 16'h3C00, 32'h42);
+		rd_check("7g: the word two instructions after its writeback (a NOP between)", 16'h3C04, 32'h43);
+		rd_check("7g: the word two instructions after its writeback (an ALU read between)", 16'h3C08, 32'h44);
+		rd_check("7g: the word written at 0x108, read at 0x208", 16'h3C0C, 32'h45);
+		rd_check("7g: the word written at 0x208, read at 0x108", 16'h3C10, 32'h46);
 		dsp_en = 0;
 
 		// ---------------- 11. ADBIO ----------------

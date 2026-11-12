@@ -944,7 +944,25 @@ module CLIO_DSP
 	assign EO_WE = (WRADDR[9:8] == 2'h3) && WREN;
 	
 	
-	assign RDDATA = IRAM_OE ? IRAM_DATA : EI_DATA;
+	// Game Bub port: a read of the word an instruction is writing in this
+	// clock (the MOVE's word, or an ALU result whose write waits for the
+	// port behind a MOVE's) gets the new word. The original read the memory
+	// (undefined for the same address in hardware, old in simulation): an
+	// instruction two after an ALU writeback read the old value when a MOVE
+	// between them had delayed the writeback to the clock of its read
+	// (Killing Time's DSP interrupt counter).
+	// The data memory has 256 words: 0x100-0x1FF and 0x200-0x2FF are the same
+	// words (address bits 7-0), so a write to either is forwarded to a read of
+	// either, and only data memory writes are (an output word at 0x308 is not
+	// the data word 0x108).
+	wire         ALU_WRITE_DUE  = (DO_WRITE[COMP_NUM] && COMP_ST == COMP_IDLE) || (DO_WRITE[~COMP_NUM] && COMP_ST == COMP_CALC);
+	wire [ 9: 0] ALU_WRITE_ADDR = COMP_ST == COMP_IDLE ? WRITE[COMP_NUM] : WRITE[~COMP_NUM];
+	function automatic bit iram_addr(input [9:0] a);
+		return a[9:8] == 2'h1 || a[9:8] == 2'h2;
+	endfunction
+	wire         RD_FWD_MOVE    = MOVE_WRITE_EN && iram_addr(WRITE[~ARITH_NUM]) && RDADDR[7:0] == WRITE[~ARITH_NUM][7:0];
+	wire         RD_FWD_ALU     = ALU_WRITE_DUE && iram_addr(ALU_WRITE_ADDR)   && RDADDR[7:0] == ALU_WRITE_ADDR[7:0];
+	assign RDDATA = IRAM_OE ? (RD_FWD_MOVE ? MOVE : RD_FWD_ALU ? ACC[19:4] : IRAM_DATA) : EI_DATA;
 	
 endmodule
 

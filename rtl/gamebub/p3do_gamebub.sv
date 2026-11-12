@@ -125,6 +125,14 @@ module p3do_gamebub #(
 	wire [ 1:0] region_sel;
 	wire        bios_pal;
 	wire        button_layout;
+	wire        stat_run, stat_stall;   // statistics for the firmware (gb_host 0x1000/0x1004)
+	wire [ 1:0] controller;      // control port after the pad: 1 light gun, 2 mouse (gb_host 0x1014)
+	wire        mouse_pkt;       // a mouse motion write (0x1030)
+	wire [31:0] mouse_motion;    // {dy, dx}
+	wire [ 2:0] mouse_buttons;   // (0x1034)
+	wire [24:0] ps2_mouse;       // the motion as PS/2 packets for HPS2PAD (host_mouse.sv)
+	wire [31:0] lg_aim;          // {y, x}, 0..65535 (0x1018)
+	wire [ 2:0] lg_buttons;      // {off screen, option, trigger} (0x101C)
 	wire [ 1:0] vram_mem;
 	wire        disc_stream, disc_change;
 	wire        toc_we, sb_we;
@@ -168,6 +176,14 @@ module p3do_gamebub #(
 		.bios_pal        (bios_pal),
 		.button_layout   (button_layout),
 		.vram_mem        (vram_mem),
+		.stat_run        (stat_run),
+		.stat_stall      (stat_stall),
+		.controller      (controller),
+		.mouse_pkt       (mouse_pkt),
+		.mouse_motion    (mouse_motion),
+		.mouse_buttons   (mouse_buttons),
+		.lg_aim          (lg_aim),
+		.lg_buttons      (lg_buttons),
 		.disc_stream     (disc_stream),
 		.disc_change     (disc_change),
 		.toc_we          (toc_we),
@@ -291,6 +307,8 @@ module p3do_gamebub #(
 	end
 
 	reg pause;
+	assign stat_run   = !reset_3do && !pause;
+	assign stat_stall = !reset_3do &&  pause;
 	reg sec_paused;
 
 	// NTSC / PAL: the "Region" setting, or by BIOS (MiSTer's checksums of
@@ -312,6 +330,10 @@ module p3do_gamebub #(
 	// 56 us, more than the time from the scanout start, so from the scanout
 	// start on (copies start right after a line's transfers).
 	reg  [ 1:0] vram_mem_r = 2'd0;   // the "VRAM memory" setting (see vsram below)
+	// either VRAM half running a transfer, in clk_sys (MADAM_CPUIF holds the
+	// CPU's next SPORT access until it is over)
+	reg  [ 1:0] sport_busy_s;
+	reg  [ 1:0] vram_hold_s;     // a hint or demand fill runs (vram_rtcache d_fill_hold, clk_mem -> clk_sys)
 	wire [10:0] sport_hold_start = vram_mem_r == 2'd0 ? 11'd1469 - 11'd1105 :
 	                               vram_mem_r == 2'd1 ? 11'd10 : 11'd1469 - 11'd737;
 
@@ -348,6 +370,8 @@ module p3do_gamebub #(
 		.VID_DMA(VID_DMA),
 		.VID_GUARD(VID_GUARD),
 		.SPORT_HOLD_START(sport_hold_start),
+		.SPORT_BUSY(sport_busy_s[1]),
+		.VRAM_HOLD(vram_hold_s[1]),
 		.RGB({R,G,B}),
 		.HS_N(HS_N), .VS_N(VS_N), .HBLK_N(HBL_N), .VBLK_N(VBL_N), .DCLK(DCLK),
 		.ACLK_CE(ACLK_CE),
@@ -482,6 +506,11 @@ module p3do_gamebub #(
 		input_buttons_right
 	};
 
+	host_mouse hmouse (
+		.clk(clk_sys), .rst(reset_3do), .pkt(mouse_pkt), .dx(mouse_motion[15:0]), .dy(mouse_motion[31:16]),
+		.buttons(mouse_buttons), .ps2_mouse(ps2_mouse)
+	);
+
 	HPS2PAD pad (
 		.RST(reset_3do),
 		.CLK(clk_sys),
@@ -494,15 +523,22 @@ module p3do_gamebub #(
 		.PAD_SEL(3'd1),
 		.ARCADE_SEL(2'd0),
 		.STICK_EN(1'b0),
-		.MOUSE_EN(1'b0),
+		.MOUSE_EN(controller == 2'd2),
 		.ARCADE_SERVICE(1'b0),
+		.LG_EN(controller == 2'd1),
+		.LG_PAL(PAL),
+		.lg_x(lg_aim[15:0]),
+		.lg_y(lg_aim[31:16]),
+		.lg_trigger(lg_buttons[0]),
+		.lg_option(lg_buttons[1]),
+		.lg_offscreen(lg_buttons[2]),
 		.joystick_0(joy0),
 		.joystick_1('0),
 		.joystick_2('0),
 		.joystick_3('0),
 		.joy0_x0('0), .joy0_y0('0), .joy0_x1('0), .joy0_y1('0),
 		.joy1_x0('0), .joy1_y0('0), .joy1_x1('0), .joy1_y1('0),
-		.ps2_mouse('0)
+		.ps2_mouse(ps2_mouse)
 	);
 
 	/////////////////////////  SDRAM  ////////////////////////////////////////
@@ -660,7 +696,11 @@ module p3do_gamebub #(
 	wire [17: 0] v_laddr, v_raddr;
 	wire         v_lwr, v_rwr, v_lrd, v_rrd, v_lfw;
 	wire         v_lte, v_rte;
-	wire         v_lbusy, v_rbusy, v_lnp, v_rnp;
+	wire         v_lbusy, v_rbusy, v_lnp, v_rnp, v_lcpu, v_rcpu;
+	// a CPU transfer still running in either half (MADAM_CPUIF SPORT_BUSY;
+	// not the video's own transfers, which end right after a line's request)
+	always @(posedge clk_sys) sport_busy_s <= {sport_busy_s[0], v_lcpu | v_rcpu};
+	always @(posedge clk_sys) vram_hold_s <= {vram_hold_s[0], ddr_fill_hold};
 	wire [31: 0] v_lq, v_rq;
 	wire [17: 0] ddr_bladdr, ddr_braddr;
 	wire         ddr_blwr, ddr_brwr, ddr_blrd, ddr_brrd, ddr_bfw;
@@ -679,7 +719,7 @@ module p3do_gamebub #(
 		.ESQ(v_lq), .ESTE(v_lte),
 		.BRAM4_OFFS(BRAM4_OFFS), .BRAM2_OFFS(BRAM2_OFFS), .BRAM1_OFFS(BRAM1_OFFS),
 		.SP_CPU(VRAM_SP_CPU),
-		.DP(RAM_DO[15:0]), .PEER_BUSY(v_rbusy), .XBUSY(v_lbusy),
+		.DP(RAM_DO[15:0]), .PEER_BUSY(v_rbusy), .XBUSY(v_lbusy), .XBUSY_CPU(v_lcpu),
 		.DBG_WAIT_CNT()
 	);
 
@@ -693,7 +733,7 @@ module p3do_gamebub #(
 		.ESQ(v_rq), .ESTE(v_rte),
 		.BRAM4_OFFS(BRAM4_OFFS), .BRAM2_OFFS(BRAM2_OFFS), .BRAM1_OFFS(BRAM1_OFFS),
 		.SP_CPU(VRAM_SP_CPU),
-		.DP(RAM_DO[31:16]), .PEER_BUSY(v_lbusy), .XBUSY(v_rbusy),
+		.DP(RAM_DO[31:16]), .PEER_BUSY(v_lbusy), .XBUSY(v_rbusy), .XBUSY_CPU(v_rcpu),
 		.DBG_WAIT_CNT()
 	);
 
@@ -707,7 +747,7 @@ module p3do_gamebub #(
 
 	/////////////////////////  "DDR" (VRAM overflow, ROMs, NVRAM)  ///////////
 	wire [31: 0] ddr_io_do;
-	wire         ddr_io_busy, ddr_busy, ddr_bbusy, ddr_byield, ddr_bwait;
+	wire         ddr_io_busy, ddr_busy, ddr_bbusy, ddr_byield, ddr_bwait, ddr_bplain, ddr_fill_hold;
 	// MADAM_SPORT VID_GUARD in clk_mem: no prefetch fill while a line's video
 	// transfers are due (vram_rtcache.sv)
 	reg  [ 1: 0] vid_guard_m;
@@ -783,6 +823,7 @@ module p3do_gamebub #(
 		.bfw   (ddr_bfw),
 		.byield(ddr_byield),
 		.bwait (ddr_bwait),
+		.bplain(ddr_bplain),
 		.ba(ddr_ba),
 		.bin(ddr_bin),
 		.bout(ddr_bout),
@@ -801,7 +842,7 @@ module p3do_gamebub #(
 		.r_esrd(v_rrd), .r_esnp(v_rnp), .r_esaddr(v_raddr), .r_eswr(v_rwr), .r_este(v_rte), .r_esq(v_rq),
 		.d_bladdr(ddr_bladdr), .d_blrd(ddr_blrd), .d_blwr(ddr_blwr), .d_bfw(ddr_bfw),
 		.d_braddr(ddr_braddr), .d_brrd(ddr_brrd), .d_brwr(ddr_brwr),
-		.d_blte(ddr_blte), .d_brte(ddr_brte), .d_bout(ddr_bout), .d_ba(ddr_ba), .d_bbusy(ddr_bbusy), .d_byield(ddr_byield), .d_bwait(ddr_bwait),
+		.d_blte(ddr_blte), .d_brte(ddr_brte), .d_bout(ddr_bout), .d_ba(ddr_ba), .d_bbusy(ddr_bbusy), .d_byield(ddr_byield), .d_bwait(ddr_bwait), .d_bplain(ddr_bplain), .d_fill_hold(ddr_fill_hold),
 		.pf_hold(vid_guard_m[1]),
 		.ddr_we(DDRAM_WE && !DDRAM_BUSY), .ddr_addr(DDRAM_ADDR),
 		.ddr_din(DDRAM_DIN), .ddr_be(DDRAM_BE), .ddr_burstcnt(DDRAM_BURSTCNT),

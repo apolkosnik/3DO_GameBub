@@ -76,6 +76,33 @@
 @      frame buffer read and write) drawn into it. tb_top checks every line's
 @      transfers: the CEL engine's SDRAM accesses pause the 3DO and must not
 @      hold a line's video request past its scanout. Before 8.
+@  19. The light gun on the control port (Game Bub registers 0x1014-0x101C,
+@      set by tb_top): read by MADAM's player bus DMA as Portfolio reads it;
+@      the pad word, the gun's 40 bits (ID 0x4D, trigger, the scan count of
+@      the aimed pixel, line pulses), then no more devices. Before 8.
+@  20. The mouse on the control port (Controller setting 2, a motion packet
+@      and the buttons from the Game Bub registers 0x1030/0x1034, set by
+@      tb_top after test 19's transfer): the pad word, the mouse's 32 bits
+@      (ID 0x49, buttons, dy, dx), then no more devices. Before 8.
+@  21. A software video decoder's in-place decode into screens outside the
+@      FPGA, as Killing Time's EZFlix intro does it (Opera, instrumented:
+@      every access a 32-bit CPU access, the screens 0x20E800 and 0x234000
+@      alternating per picture, the shown one never decoded into): pass 1
+@      stores 8-word groups of samples into the screen, alternate groups
+@      on alternate line pairs, reading back a word written ~30 accesses
+@      before; pass 2 loads each 4-word group of samples (written a pass
+@      earlier) and 2-10 accesses later stores pixels over them and into the
+@      next line pair, so the next group's first two words are read after
+@      they were overwritten. 16 line pairs x 128 columns at the screen's
+@      start (its first half-row is the one the read-transfer cache fetches
+@      again every frame for the VDL's previous frame buffer). Three
+@      pictures with the video DMA on (the VDL as the OS lays a screen out:
+@      16 lines without video DMA, then 240 lines): into the screen not
+@      shown (twice, switching the VDL between them) and into the shown
+@      one. After each:
+@      every word read back (random reads), and two rows copied through the
+@      CPU's read transfer (the read-transfer cache) and compared. Runs from
+@      DRAM (copied there), before 8.
 @   8. CLIO software reset (CSTAT bits 4 and 5, the BIOS's DIPIR reset): the
 @      ARM must start at 0 in SVC mode with IRQ and FIQ disabled (CPSR I and F
 @      set, flags kept), the interrupted CPSR in SPSR_svc and the interrupted
@@ -110,6 +137,12 @@
 	.equ CD_CODE,    0x00018000	@ DRAM: test 14's block check code, copied there
 	.equ CD_DATA,    0x0001A000	@ DRAM: the CD block being checked (test 14)
 	.equ VID_CODE,   0x0001C000	@ DRAM: test 15's code, copied there
+	.equ EZ_CODE,    0x00020000	@ DRAM: test 21's code, copied there
+	.equ EZ_TMP,     0x00023000	@ DRAM: test 21's words to store next
+	.equ EZ_SEED,    0x00023040	@ DRAM: test 21's picture number
+	.equ EZ_LR,      0x00023044	@ DRAM: test 21's return address
+	.equ EZ_MCTL,    0x00023048	@ DRAM: MCTL before test 21
+	.equ EZ_LR2,     0x0002304C	@ DRAM: test 21's helpers' return address
 
 @ call the block check code in DRAM (cdblk_code)
 	.macro CDBLK
@@ -857,6 +890,55 @@ entry:
 	mov	r12, #18
 	bl	cel_shown
 
+	@ ---- 19. light gun on the control port (player bus DMA) ----
+	mov	r12, #19
+	bl	pbus_dma
+	ldr	r1, =0x80004D80		@ pad word, gun ID, trigger, count[19]
+	ldr	r2, =0x50D93FFF		@ count[18:0], hits, then 1s
+	bl	pbus_check
+
+	@ ---- 20. mouse on the control port ----
+	@ tb_top switches the Controller setting to the mouse and sets the left
+	@ button after test 19's transfer, and writes one motion packet (dx +5,
+	@ dy -3) when this test enables its transfer: the control port is
+	@ latched every field (MADAM_PLAYER's PBCLK, lines 0-15), which takes
+	@ the mouse's motion whether or not a DMA reads it, so the packet must
+	@ come in the field before the one the DMA reads. A frame start, then
+	@ lines 30..150 for the enable (the next latch is a whole field away).
+	mov	r12, #20
+	ldr	r8, =0x03400000
+	ldr	r7, =0x1FF
+	ldr	r0, [r8, #0x34]
+	and	r0, r0, r7
+20:	ldr	r6, [r8, #0x34]
+	and	r6, r6, r7
+	cmp	r6, r0
+	mov	r0, r6
+	bcs	20b
+21:	ldr	r6, [r8, #0x34]
+	and	r6, r6, r7
+	cmp	r6, #30
+	bcc	21b
+	cmp	r6, #150
+	bhi	21b
+	bl	pbus_dma
+	ldr	r1, =0x8000498F		@ pad word, mouse ID 0x49, left button, dy -3 (bits 19:10) ...
+	ldr	r2, =0xF405FFFF		@ ... dy, dx +5 (bits 9:0), then 1s (one count per unit written)
+	bl	pbus_check
+
+	@ ---- 21. in-place video decode into screens outside the FPGA ----
+	mov	r12, #21
+	ldr	r3, =EZ_CODE
+	ldr	r4, =ROM_BASE + ez_code
+	ldr	r5, =ROM_BASE + ez_code_end
+22:	ldr	r6, [r4], #4
+	str	r6, [r3], #4
+	cmp	r4, r5
+	bcc	22b
+	ldr	r3, =EZ_CODE
+	mov	lr, pc
+	mov	pc, r3
+
 	@ ---- 8. CLIO software reset ----
 	mov	r12, #8
 	ldr	r0, =PON_CPSR		@ power-on: SVC mode, IRQ and FIQ disabled, flags clear
@@ -931,6 +1013,11 @@ report:
 	bl	put_word		@ 0x108: address
 	mov	r8, r11
 	bl	put_word		@ 0x10C: checks
+	ldr	r1, =EZ_TMP		@ 0x110, 0x114: the value found and the one
+	ldr	r8, [r1]		@ expected, where a test left them there
+	bl	put_word
+	ldr	r8, [r1, #4]
+	bl	put_word
 	ldr	r0, =NVRAM_BASE + 0x100 * 4
 	mov	r8, r7
 	bl	put_word		@ 0x100: PASS/FAIL
@@ -1106,6 +1193,68 @@ cel_shown:
 	str	r9, [r5, #8]		@ MCTL back
 	add	r11, r11, #1
 	mov	pc, r13
+	.ltorg
+
+@ tests 19 and 20: the control port read by MADAM's player bus DMA (MCTL bit 15, the
+@ ControlPort registers at 0x570: to RAM, length in bytes - 4, from RAM), as
+@ Portfolio reads it every field. The first word written is the port's
+@ leftover ("control-port sludge", Portfolio ControlPort.c); the data
+@ follow it. tb_top sets the Game Bub registers first:
+@ Controller pad + light gun (0x1014), aim x 0x4000, y 0x8000 (pixel 80, 120
+@ of 320 x 240), trigger held (0x101C). Expected: the pad word 8000 (no
+@ button), the gun's 40 bits 4D 80 50 D9 3F (count 0x286C9 = ceil((120 *
+@ 12707 + 80 * 10300 / 320) / 10) + 12835, 31 line pulses), then 1s (no
+@ more devices). Test 20: the mouse (ID 0x49) with the left button, dy -3
+@ and dx +5 in 10 bits each (HPS2PAD moves one count per unit written).
+pbus_dma:
+	mov	r13, lr
+	ldr	r5, =0x03300000
+	ldr	r4, =0x00032000		@ the buffer the port is read into
+	ldr	r6, =0x00032100		@ the data shifted out to the port: all 1s
+	mov	r7, #8
+	mvn	r1, #0
+	mov	r2, #0
+1:	str	r2, [r4], #4
+	str	r1, [r6], #4
+	subs	r7, r7, #1
+	bne	1b
+	ldr	r4, =0x00032000
+	ldr	r6, =0x00032100
+	str	r4, [r5, #0x570]	@ to RAM
+	mov	r1, #0x1C		@ 32 bytes
+	str	r1, [r5, #0x574]
+	str	r6, [r5, #0x578]	@ from RAM
+	ldr	r9, [r5, #8]
+	orr	r1, r9, #0x8000		@ MCTL PLAYXEN
+	str	r1, [r5, #8]
+2:	ldr	r1, [r5, #8]		@ MADAM clears it at the end of the transfer
+	tst	r1, #0x8000
+	bne	2b
+	str	r9, [r5, #8]
+	mov	pc, r13
+
+@ the words after the first (the port's leftover, Portfolio ControlPort.c;
+@ Opera DMAPBus) of the buffer pbus_dma read: r1, r2, then all 1s (no more
+@ devices). r11 += 3.
+pbus_check:
+	ldr	r4, =0x00032000
+	ldr	r3, [r4, #4]
+	cmp	r3, r1
+	movne	r2, r3
+	bne	fail
+	add	r11, r11, #1
+	ldr	r3, [r4, #8]
+	cmp	r3, r2
+	movne	r2, r3
+	bne	fail
+	add	r11, r11, #1
+	ldr	r3, [r4, #12]
+	mvn	r1, #0
+	cmp	r3, r1
+	movne	r2, r3
+	bne	fail
+	add	r11, r11, #1
+	mov	pc, lr
 	.ltorg
 
 @ test 17's cels: flags, HDX, HDY, VDX, VDY, pixels drawn. The winding is
@@ -1573,3 +1722,386 @@ vid_pass:
 
 	.ltorg
 vid_code_end:
+
+@ ---- test 21, copied to EZ_CODE and run there (position independent, its
+@ own literal pool). r11 = checks; a mismatch goes to fail with its address
+@ in r2.
+@ The picture: line pairs 0-15 of the screen (1280 bytes each: a word is a
+@ pixel of each line of the pair), columns 16-143. Values are functions of
+@ the word's address and the picture number (EZ_SEED): v0 (the area before
+@ the picture), v1 (pass 1's samples), v2 (pass 2's pixels).
+@ Pass 1: for line pairs q, q+1 (q even), group g = 0..15 of 8 words at
+@ column 16 + 8g goes to line pair q + (g & 1): alternate 8-word groups on
+@ alternate line pairs. After group g, the first word of group g - 2 (the
+@ same line pair) is read back.
+@ Pass 2: for every line pair p and 4-word subgroup at column C = 16 + 4s
+@ that holds samples (its 8-word group is p's: (s >> 1) & 1 == p & 1), the
+@ 4 words are loaded, then 4 pixels are stored into line pair p + 1 at C
+@ and 4 into p at C + 2: the second subgroup of a group has its first two
+@ words overwritten before it is loaded. Final content, columns 16-143 of
+@ line pair p, group g = (col - 16) / 8, w = (col - 16) & 7: a group of p's
+@ samples holds v1 in w < 2 and v2 after; another group v2 in w < 2 (p's
+@ own stores), after that v2 (line pair p - 1's stores) or v0 on line pair
+@ 0.
+@ Screens: A 0x20E800, B 0x234000 (rows 0x41D, 0x468); scratch row 0xB4
+@ (0x25A000) for the copies.
+	.align 4
+ez_code:
+	ldr	r3, =EZ_LR
+	str	lr, [r3]
+	@ The VDL as the OS lays a screen out: entry 0 at 0x2FC000, 16 lines
+	@ without video DMA (the lines before the picture), then entry 1 at
+	@ 0x2FC100: ENVIDDMA, LDCURR, LDPREV, 240 lines of A shown, B the
+	@ previous frame buffer, next entry 0. Entry 1 then ends in the vertical
+	@ blanking, where its refetch (and the hint fills of the next frame's
+	@ first half-rows) have time; from line 5 it ended on a shown line, and
+	@ the two hint fills (current and previous frame buffer, ~6-8 us each)
+	@ cannot both end before that line's video transfer request.
+	ldr	r10, =0x002FC000
+	ldr	r6, =0x00000010
+	str	r6, [r10]
+	ldr	r6, =0x002FC100
+	str	r6, [r10, #12]
+	ldr	r10, =0x002FC100
+	ldr	r6, =0x002180F0
+	str	r6, [r10]
+	ldr	r6, =0x0020E800
+	str	r6, [r10, #4]
+	ldr	r6, =0x00234000
+	str	r6, [r10, #8]
+	ldr	r6, =0x002FC000
+	str	r6, [r10, #12]
+	ldr	r10, =0x03300000
+	ldr	r6, =0x002FC000
+	str	r6, [r10, #0x580]
+	ldr	r6, [r10, #8]
+	ldr	r3, =EZ_MCTL
+	str	r6, [r3]
+	orr	r6, r6, #0x6000		@ MCTL CLUTXEN, VSCTXEN
+	str	r6, [r10, #8]
+	bl	ez_frame
+	@ picture 1 into B, not shown
+	mov	r4, #1
+	ldr	r0, =0x00234000
+	bl	ez_picture
+	@ B shown, A previous; picture 2 into A
+	ldr	r1, =0x00234000
+	ldr	r2, =0x0020E800
+	bl	ez_show
+	mov	r4, #2
+	ldr	r0, =0x0020E800
+	bl	ez_picture
+	@ A shown, B previous; picture 3 into A, the shown screen
+	ldr	r1, =0x0020E800
+	ldr	r2, =0x00234000
+	bl	ez_show
+	mov	r4, #3
+	ldr	r0, =0x0020E800
+	bl	ez_picture
+	@ video DMA off again
+	ldr	r10, =0x03300000
+	ldr	r3, =EZ_MCTL
+	ldr	r6, [r3]
+	str	r6, [r10, #8]
+	ldr	r3, =EZ_LR
+	ldr	pc, [r3]
+
+@ the VDL's current (r1) and previous (r2) frame buffers (entry 1), taken at
+@ the next frame start
+ez_show:
+	ldr	r10, =0x002FC100
+	str	r1, [r10, #4]
+	str	r2, [r10, #8]
+@ wait for the next frame start: CLIO's line count (0x03400034, bits 8-0)
+@ goes back to the top
+ez_frame:
+	ldr	r8, =0x03400000
+	ldr	r4, =0x1FF
+	ldr	r5, [r8, #0x34]
+	and	r5, r5, r4
+81:	ldr	r6, [r8, #0x34]
+	and	r6, r6, r4
+	cmp	r6, r5
+	mov	r5, r6
+	bcs	81b
+	mov	pc, lr
+
+@ v0, v1, v2 of the word at r1 -> r3 (r10 used)
+ez_v0:
+	ldr	r10, =0xA5A5A5A5
+	eor	r3, r1, r10
+	ldr	r10, =EZ_SEED
+	ldr	r10, [r10]
+	eor	r3, r3, r10, lsl #24
+	mov	pc, lr
+ez_v1:
+	ldr	r10, =0x9E3779B1
+	mul	r3, r1, r10
+	ldr	r10, =0x1E221E22
+	eor	r3, r3, r10
+	ldr	r10, =EZ_SEED
+	ldr	r10, [r10]
+	eor	r3, r3, r10, lsl #24
+	mov	pc, lr
+ez_v2:
+	ldr	r10, =0x2545F491
+	mul	r3, r1, r10
+	ldr	r10, =0x7FFF7FFF
+	eor	r3, r3, r10
+	ldr	r10, =EZ_SEED
+	ldr	r10, [r10]
+	eor	r3, r3, r10, lsl #24
+	mov	pc, lr
+
+@ EZ_TMP = v1 of the 8 words at r2 (r1, r3, r6, r7, r10 used; the return
+@ address in EZ_LR2)
+ez_vals8:
+	ldr	r3, =EZ_LR2
+	str	lr, [r3]
+	ldr	r6, =EZ_TMP
+	mov	r7, #8
+	mov	r1, r2
+82:	bl	ez_v1
+	str	r3, [r6], #4
+	add	r1, r1, #4
+	subs	r7, r7, #1
+	bne	82b
+	ldr	r3, =EZ_LR2
+	ldr	pc, [r3]
+
+@ EZ_TMP = v2 of the 4 words at r2 (r1, r3, r6, r7, r10 used)
+ez_vals4:
+	ldr	r3, =EZ_LR2
+	str	lr, [r3]
+	ldr	r6, =EZ_TMP
+	mov	r7, #4
+	mov	r1, r2
+83:	bl	ez_v2
+	str	r3, [r6], #4
+	add	r1, r1, #4
+	subs	r7, r7, #1
+	bne	83b
+	ldr	r3, =EZ_LR2
+	ldr	pc, [r3]
+
+@ the final content of column r1 (16-143) of line pair r9, word address r2
+@ -> r3 (r1, r4, r5, r10 used)
+ez_rule:
+	ldr	r3, =EZ_LR2
+	str	lr, [r3]
+	sub	r4, r1, #16
+	and	r5, r4, #7		@ w
+	mov	r4, r4, lsr #3		@ g
+	eor	r4, r4, r9
+	mov	r1, r2
+	tst	r4, #1
+	bne	84f			@ not a group of p's samples
+	cmp	r5, #2
+	bcc	ez_v1x			@ the samples' first two words
+	b	ez_v2x
+84:	cmp	r5, #2
+	bcc	ez_v2x			@ p's own stores
+	cmp	r9, #0
+	bne	ez_v2x			@ line pair p - 1's stores
+	bl	ez_v0
+	b	ez_ret
+ez_v1x:
+	bl	ez_v1
+	b	ez_ret
+ez_v2x:
+	bl	ez_v2
+ez_ret:
+	ldr	r10, =EZ_LR2
+	ldr	pc, [r10]
+
+@ one picture (number r4) into the screen at r0: pre-fill, pass 1, pass 2,
+@ every word read back, two rows copied through the CPU's read transfer and
+@ compared. r11 += 5. (~80 ms of 3DO time: ~10k accesses outside the FPGA
+@ and four frame waits)
+ez_picture:
+	mov	r13, lr
+	ldr	r3, =EZ_SEED
+	str	r4, [r3]
+	@ v0 into line pairs 0-16, columns 16-145
+	mov	r9, #0
+85:	mov	r8, #16
+86:	mov	r3, #1280
+	mul	r2, r9, r3
+	add	r2, r2, r0
+	add	r2, r2, r8, lsl #2
+	mov	r1, r2
+	bl	ez_v0
+	str	r3, [r2]
+	add	r8, r8, #1
+	cmp	r8, #146
+	bcc	86b
+	add	r9, r9, #1
+	cmp	r9, #17
+	bcc	85b
+	@ pass 1
+	mov	r9, #0			@ q
+87:	mov	r8, #0			@ g
+88:	mov	r3, #1280
+	mul	r2, r9, r3
+	tst	r8, #1
+	addne	r2, r2, #1280
+	add	r2, r2, r0
+	add	r2, r2, #64
+	add	r2, r2, r8, lsl #5
+	bl	ez_vals8
+	ldr	r3, =EZ_TMP
+	ldmia	r3, {r1, r3, r4, r5, r6, r7, r10, r14}
+	stmia	r2, {r1, r3, r4, r5, r6, r7, r10, r14}
+	cmp	r8, #2
+	bcc	89f
+	sub	r1, r2, #64		@ the first word of group g - 2, this line pair
+	ldr	r6, [r1]
+	bl	ez_v1
+	cmp	r6, r3
+	movne	r2, r1
+	ldrne	pc, =ROM_BASE + fail
+89:	add	r8, r8, #1
+	cmp	r8, #16
+	bcc	88b
+	add	r9, r9, #2
+	cmp	r9, #16
+	bcc	87b
+	add	r11, r11, #1
+	@ pass 2
+	mov	r9, #0			@ p
+90:	mov	r8, #0			@ s
+91:	mov	r4, r8, lsr #1
+	eor	r4, r4, r9
+	tst	r4, #1
+	bne	95f			@ no samples in this subgroup
+	mov	r3, #1280
+	mul	r2, r9, r3
+	add	r2, r2, r0
+	add	r2, r2, #64
+	add	r2, r2, r8, lsl #4
+	ldmia	r2, {r4, r5, r6, r7}
+	@ expected: the first two words v2 in a group's second subgroup
+	@ (stored over after the first was loaded), v1 otherwise; the last two v1
+	mov	r1, r2
+	tst	r8, #1
+	beq	92f
+	bl	ez_v2
+	b	93f
+92:	bl	ez_v1
+93:	cmp	r4, r3
+	movne	r2, r1
+	ldrne	pc, =ROM_BASE + fail
+	add	r1, r1, #4
+	tst	r8, #1
+	beq	94f
+	bl	ez_v2
+	b	96f
+94:	bl	ez_v1
+96:	cmp	r5, r3
+	movne	r2, r1
+	ldrne	pc, =ROM_BASE + fail
+	add	r1, r1, #4
+	bl	ez_v1
+	cmp	r6, r3
+	movne	r2, r1
+	ldrne	pc, =ROM_BASE + fail
+	add	r1, r1, #4
+	bl	ez_v1
+	cmp	r7, r3
+	movne	r2, r1
+	ldrne	pc, =ROM_BASE + fail
+	@ the pixels: 4 words into line pair p + 1 at C, 4 into p at C + 2
+	add	r2, r2, #1280
+	bl	ez_vals4
+	ldr	r3, =EZ_TMP
+	ldmia	r3, {r4, r5, r6, r7}
+	stmia	r2, {r4, r5, r6, r7}
+	sub	r2, r2, #1280
+	add	r2, r2, #8
+	bl	ez_vals4
+	ldr	r3, =EZ_TMP
+	ldmia	r3, {r4, r5, r6, r7}
+	stmia	r2, {r4, r5, r6, r7}
+95:	add	r8, r8, #1
+	cmp	r8, #32
+	bcc	91b
+	add	r9, r9, #1
+	cmp	r9, #16
+	bcc	90b
+	add	r11, r11, #1
+	@ every word of the picture read back
+	mov	r9, #0
+97:	mov	r8, #16
+98:	mov	r3, #1280
+	mul	r2, r9, r3
+	add	r2, r2, r0
+	add	r2, r2, r8, lsl #2
+	ldr	r6, [r2]
+	mov	r1, r8
+	bl	ez_rule
+	cmp	r6, r3
+	bne	ez_fail
+	add	r8, r8, #1
+	cmp	r8, #144
+	bcc	98b
+	add	r9, r9, #1
+	cmp	r9, #16
+	bcc	97b
+	add	r11, r11, #1
+	@ rows 0 (line pairs 0 and 1) and 5 (8 and 9) of the screen copied
+	@ through the CPU's read transfer into the scratch row, then compared
+	mov	r8, #0
+99:	sub	r4, r0, #0x00200000
+	mov	r4, r4, lsr #9
+	add	r4, r4, #0x03200000
+	add	r4, r4, r8, lsl #2
+	ldr	r6, [r4]		@ read transfer of the row
+	ldr	r4, =0x03200000 + 4 * 0xB4
+	mvn	r6, #0
+	str	r6, [r4]		@ write transfer into the scratch row, all bits
+	cmp	r8, #0
+	moveq	r9, #0			@ the row's first line pair, kept in
+	movne	r9, #8			@ EZ_TMP + 8 (the helpers use r14)
+	ldr	r4, =EZ_TMP
+	str	r9, [r4, #8]
+	mov	r6, #0			@ word of the row
+100:	mov	r1, r6
+	ldr	r9, =EZ_TMP
+	ldr	r9, [r9, #8]
+	cmp	r1, #320
+	subcs	r1, r1, #320
+	addcs	r9, r9, #1
+	cmp	r1, #16
+	bcc	101f
+	cmp	r1, #144
+	bcs	101f
+	ldr	r2, =0x0025A000
+	add	r2, r2, r6, lsl #2
+	ldr	r7, [r2]
+	mov	r3, #1280		@ the word's address in the screen (the rule's)
+	mul	r2, r9, r3
+	add	r2, r2, r0
+	add	r2, r2, r1, lsl #2
+	bl	ez_rule
+	cmp	r7, r3
+	movne	r6, r7
+	bne	ez_fail
+101:	add	r6, r6, #1
+	cmp	r6, #512
+	bcc	100b
+	add	r11, r11, #1
+	cmp	r8, #0
+	moveq	r8, #5
+	beq	99b
+	mov	pc, r13
+
+@ the value found (r6) and the one expected (r3) into EZ_TMP for the
+@ result record, then fail with the address in r2
+ez_fail:
+	ldr	r1, =EZ_TMP
+	str	r6, [r1]
+	str	r3, [r1, #4]
+	ldr	pc, =ROM_BASE + fail
+
+	.ltorg
+ez_code_end:

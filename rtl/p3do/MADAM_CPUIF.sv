@@ -39,6 +39,8 @@ module MADAM_CPUIF
 	input              CLIO_RDY,
 	input              WAIT,
 	input              SPORT_HOLD,   // Game Bub port: hold SPORT accesses (MADAM_SPORT)
+	input              SPORT_BUSY,   // Game Bub port: a VRAM half still runs a CPU transfer (clk_sys)
+	input              VRAM_HOLD,    // Game Bub port: hold the CPU's random VRAM accesses (a hint or demand fill runs)
 	
 	output reg         MCLK
 );
@@ -74,6 +76,8 @@ module MADAM_CPUIF
 	
 	wire        CPU_SPORT = (A >= 32'h03200000 && A <= 32'h032FFFFF);
 	wire        CPU_PB = AG_PBI && ~|A[31:24];
+	// Game Bub port: a random VRAM access (held while VRAM_HOLD, see below)
+	wire        CPU_VRAM = (A >= 32'h00200000 && A <= 32'h002FFFFF);
 	bit         STRETCH;
 	bit         BREAK;
 	bit         PAUSE;
@@ -97,10 +101,25 @@ module MADAM_CPUIF
 				if (!GRANT && !BREAK) BREAK <= 1;
 				else if (GRANT && CPU_PB && !(ICYCLE && SEQ) && !STRETCH && !BREAK) BREAK <= 1;
 				else if (GRANT && CPU_SPORT && !STRETCH && !BREAK) STRETCH <= 1;
+				// Game Bub port: a random VRAM access waits in a stretch cycle
+				// while the read-transfer cache fills a half-row for the display
+				// (a VDL hint or a demand fill, ~4 us, once a frame or on a
+				// miss). Issued then, it would wait in ddram.sv behind the fill
+				// with the whole 3DO paused, MADAM with it, and a line's video
+				// transfer request due meanwhile came after the line had started.
+				// Plain prefetch fills let the access in between their chunks.
+				else if (GRANT && CPU_VRAM && VRAM_HOLD && !STRETCH && !BREAK) STRETCH <= 1;
 				else if (GRANT) BREAK <= 0;
 				// Game Bub port: a SPORT access stays in its stretch cycle
 				// while MADAM_SPORT holds them (a line's video transfers due)
-				if (GRANT && CPU_SPORT && STRETCH && SPORT_HOLD) STRETCH <= 1;
+				// Game Bub port: a SPORT access also waits while a VRAM half
+				// still runs a CPU transfer: issued then, it would queue in the
+				// VRAM module and start when that ends, inside SPORT_HOLD (a
+				// page copy's read transfer, issued before the hold behind
+				// the previous copy's 40 us write transfer, started 600
+				// dots later and held a line's transfers past its scanout)
+				if (GRANT && CPU_SPORT && STRETCH && (SPORT_HOLD || SPORT_BUSY)) STRETCH <= 1;
+				if (GRANT && CPU_VRAM && STRETCH && VRAM_HOLD) STRETCH <= 1;
 			end
 		end
 	end 

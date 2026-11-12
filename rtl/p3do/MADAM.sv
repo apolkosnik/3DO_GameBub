@@ -93,6 +93,8 @@ module MADAM
 	output             VID_DMA,      // Game Bub port: the bus is in a video DMA sequence (line or mid-line transfers)
 	output             VID_GUARD,    // Game Bub port: a line's video transfers are due (MADAM_SPORT)
 	input      [10: 0] SPORT_HOLD_START, // Game Bub port: see MADAM_SPORT
+	input              SPORT_BUSY,       // Game Bub port: a VRAM half runs a transfer (MADAM_CPUIF)
+	input              VRAM_HOLD,        // Game Bub port: hold the CPU's random VRAM accesses (MADAM_CPUIF)
 	
 	input              DBG_SPR_EN,
 	input      [ 7: 0] DBG_EXT
@@ -552,7 +554,9 @@ module MADAM
 		.CLIO_SEL(CPU_CLIO_SEL),
 		.CLIO_RDY(~CREADY_N & ~CLIO_HOLD),   // GameBub: CLIO_HOLD, see MADAM_EXTPIF
 		.WAIT(0),
-		.SPORT_HOLD(SPORT_HOLD)              // GameBub: see MADAM_SPORT
+		.SPORT_HOLD(SPORT_HOLD),             // GameBub: see MADAM_SPORT
+		.SPORT_BUSY(SPORT_BUSY),
+		.VRAM_HOLD(VRAM_HOLD)
 	);
 	
 	MADAM_EXTPIF EXTPIF

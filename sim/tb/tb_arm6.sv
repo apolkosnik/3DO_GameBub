@@ -16,6 +16,12 @@
 // nTRANS of every access to 0xA000-0xA0FF is written to the word at the same
 // offset from 0xA100, where the program reads it back (LDRT/STRT checks).
 //
+// +fiq / +irq: nFIQ / nIRQ are taken low at pseudo-random points and released
+// when the core fetches the vector (0x1C / 0x18), as an interrupt source
+// acknowledged by its handler; for sim/tb/arm6_fiq.S (+bin=build/sim/arm6_fiq.bin),
+// which runs a decoder-like kernel with and without them and compares. The
+// counts the program kept (0x9000, 0x9004) are printed.
+//
 // Copyright (c) 2026 Adam Polkosnik
 // SPDX-License-Identifier: GPL-3.0-or-later
 
@@ -29,6 +35,7 @@ module tb_arm6;
 	always @(negedge clk) phase <= ~phase;
 	reg rst_n = 0, nreset = 0;
 	reg en = 1;
+	reg nfiq = 1, nirq = 1;
 
 	wire [31:0] a, dout;
 	wire        nrw, nwb, nmreq, seq, nopc, ntrans, lock;
@@ -38,7 +45,7 @@ module tb_arm6;
 	ARM6_CORE dut (
 		.CLK(clk), .RST_N(rst_n), .EN(en), .BIGEND(1'b1),
 		.CE_R(phase), .CE_F(~phase),
-		.nRESET(nreset), .nFIQ(1'b1), .nIRQ(1'b1),
+		.nRESET(nreset), .nFIQ(nfiq), .nIRQ(nirq),
 		.EDI(32'd0), .A(a), .DI(din), .DO(dout), .nRW(nrw), .nWB(nwb),
 		.nMREQ(nmreq), .SEQ(seq), .nOPC(nopc), .nTRANS(ntrans), .LOCK(lock), .DBE(1'b1)
 	);
@@ -65,6 +72,24 @@ module tb_arm6;
 		end
 	end
 	always @(posedge clk) if (!en) paused_clks++;
+
+	// interrupts: nFIQ/nIRQ taken low on one clock in 512 (each its own
+	// phase of the second LFSR) and released on the fetch of the vector
+	bit        fiq_on, irq_on;
+	bit [15:0] lfsr2 = 16'h7A3B;
+	int        fiq_asserted = 0, irq_asserted = 0;
+	initial begin fiq_on = $test$plusargs("fiq"); irq_on = $test$plusargs("irq"); end
+	always @(posedge clk) begin
+		lfsr2 <= {lfsr2[14:0], lfsr2[15] ^ lfsr2[13] ^ lfsr2[12] ^ lfsr2[10]};
+		if (rst_n && nreset && !done) begin
+			if (fiq_on && nfiq && lfsr2[8:0] == 9'h000) begin nfiq <= 0; fiq_asserted++; end
+			if (irq_on && nirq && lfsr2[9:1] == 9'h0A5) begin nirq <= 0; irq_asserted++; end
+		end
+		if (rst_n && nreset && !phase && en && mreq_now && !nrw) begin
+			if (a[15:0] == 16'h001C) nfiq <= 1;
+			if (a[15:0] == 16'h0018) nirq <= 1;
+		end
+	end
 
 	task automatic load(input string f);
 		int fd, n;
@@ -132,6 +157,12 @@ module tb_arm6;
 			end
 		end
 		$display("tb_arm6: %0d EN pauses, %0d clocks paused", pauses, paused_clks);
+		if (fiq_on || irq_on) begin
+			$display("tb_arm6: FIQs asserted %0d, taken by the program %0d; IRQs asserted %0d, taken %0d",
+			         fiq_asserted, mem[32'h9000 >> 2], irq_asserted, mem[32'h9004 >> 2]);
+			if (fiq_on && mem[32'h9000 >> 2] < 20) begin errors++; $display("tb_arm6: TB ERROR: too few FIQs taken"); end
+			if (irq_on && mem[32'h9004 >> 2] < 20) begin errors++; $display("tb_arm6: TB ERROR: too few IRQs taken"); end
+		end
 		$display("tb_arm6: %0d results checked, %0d errors", checks, errors);
 		// a failure ends with a non-zero exit status ($fatal), so scripts see it
 		if (errors == 0 && checks > 0) begin $display("tb_arm6: PASS"); $finish; end

@@ -110,6 +110,8 @@ module vram_rtcache #(
 	input              d_bbusy,
 	output             d_byield,           // the fill may wait for the slow bus between 32-beat chunks
 	output             d_bwait,            // ... and waits there now (pf_hold)
+	output             d_bplain,           // ... and is a plain prefetch (random VRAM accesses go between chunks)
+	output             d_fill_hold,        // a hint or demand fill runs: hold the CPU's random VRAM accesses (MADAM_CPUIF)
 	input              pf_hold,            // a line's video transfers are due (MADAM_SPORT VID_GUARD, clk_mem)
 
 	// snoop: ddram.sv DDRAM write commands
@@ -245,6 +247,13 @@ module vram_rtcache #(
 	// not while a demand waits (ddram.sv runs one fill at a time).
 	wire        dem_wait = dem_pend[0] || dem_pend[1];
 	assign d_bwait = d_byield && fill_plain && pf_hold && !dem_wait;
+	// ... until a VDL hint waits for it: finished unbroken, it delays the
+	// hint fill less (the hint comes ~165 dots before the line's request)
+	assign d_bplain = fill_busy && fill_plain && !hint_pend && !(pf_v[0] && pf_hint[0]) && !(pf_v[1] && pf_hint[1]);
+	// a hint or demand fill is running: MADAM_CPUIF holds the CPU's random
+	// VRAM accesses (an access pending behind the fill paused the 3DO, MADAM
+	// with it, past the line's video transfer request)
+	assign d_fill_hold = fill_busy && !fill_plain;
 	wire        pf_quiet = req_age >= 8'(PF_HOLDOFF);
 
 	// VDL framebuffer hint: waits for a cycle without a request (requests

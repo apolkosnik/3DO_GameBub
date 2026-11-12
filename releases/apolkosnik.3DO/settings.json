@@ -3,7 +3,7 @@
 		{
 			"id": 1,
 			"label": "CD Speed",
-			"address": "0x00001000",
+			"address": "0x00001020",
 			"type": "list",
 			"items": [
 				{
@@ -81,9 +81,26 @@
 			"default": "0x0"
 		},
 		{
+			"id": 6,
+			"label": "Controller",
+			"address": "0x00001014",
+			"type": "list",
+			"items": [
+				{
+					"label": "Pad",
+					"value": "0x0"
+				},
+				{
+					"label": "Pad + mouse",
+					"value": "0x2"
+				}
+			],
+			"default": "0x0"
+		},
+		{
 			"id": 2,
 			"label": "Reset",
-			"address": "0x00001004",
+			"address": "0x00001024",
 			"type": "action",
 			"value": "0x1"
 		}

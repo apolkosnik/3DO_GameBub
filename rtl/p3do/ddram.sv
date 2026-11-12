@@ -52,6 +52,7 @@ module ddram
 	input          bfw,
 	input          byield,   // Game Bub port: the burst read may wait for the slow bus between 32-beat chunks
 	input          bwait,    // Game Bub port: ... and its next chunk waits (a line's video transfers are due)
+	input          bplain,   // Game Bub port: ... and it is a plain prefetch (random VRAM accesses go between chunks too)
 	output reg [ 9: 2] ba,
 	input  [63: 0] bin,
 	output [63: 0] bout,
@@ -72,10 +73,24 @@ module ddram
 	// Game Bub port: a burst read that may yield (byield) goes in 32-beat
 	// chunks; between them a slow-bus access (BIOS ROM, NVRAM: the 3DO is
 	// paused while it waits) goes first, and while bwait is high (a line's
-	// video transfers are due) the next chunk waits. brd_chunk: this burst
-	// is chunked; brd_part: a chunked burst read is part way through.
+	// video transfers are due) the next chunk waits. In a plain prefetch
+	// fill (bplain) a random VRAM access goes between the chunks too: a game
+	// decoding video writes VRAM all the time, and each write waited behind
+	// the whole fill (~4 us, two fills a line) with the 3DO paused. Not in
+	// the VDL's frame buffer hint fills (nor demand fills): the next write
+	// comes right after each one is served, so the 3DO stayed paused all the
+	// same, and the fill, twice as long, ran past the line's transfer
+	// request (MADAM_SPORT HCOUNT 1469; the hint comes at ~1305 and an
+	// unbroken fill ends ~1405), which MADAM then issued after the line had
+	// started. brd_chunk: this burst is chunked; brd_part: a chunked burst
+	// read is part way through.
 	reg            brd_chunk, brd_part;   // cleared by rst
-	wire           brd_yield = brd_part && byield && (io_write_pend2 || io_read_busy || bwait);
+	wire           rnd_pend  = write_lpend || write_rpend || read_lbusy || read_rbusy;
+	wire           brd_yield = brd_part && byield && (io_write_pend2 || io_read_busy || bwait || (bplain && rnd_pend));
+	// Game Bub port: a random access already waiting is served before a new
+	// burst read starts (the burst had priority: a CPU write latched just
+	// before a hint fill waited the whole fill, the 3DO paused with it)
+	wire           brd_start = !brd_part && !rnd_pend;
 	reg            burst_write_lbusy = 0,burst_write_rbusy = 0;
 	reg            read_lbusy = 0,read_rbusy = 0;
 	reg            write_lpend = 0,write_rpend = 0;
@@ -367,7 +382,7 @@ module ddram
 						brte <= 1;
 						state       <= 4'd1;
 					end
-					else if (burst_read_lbusy && !brd_yield) begin 
+					else if (burst_read_lbusy && !brd_yield && (brd_part || brd_start)) begin
 						burst_lact <= 1;
 						if (burst_read_rbusy && burst_raddr == burst_laddr) burst_ract <= 1;
 						vram_fw_baddr <= burst_laddr[19:3];
@@ -380,7 +395,7 @@ module ddram
 						rpos        <= {1'b0,burst_laddr[9:3]};
 						state       <= 4'd2;
 					end
-					else if (burst_read_rbusy && !brd_yield) begin 
+					else if (burst_read_rbusy && !brd_yield && (brd_part || brd_start)) begin
 						burst_ract <= 1;
 						vram_fw_baddr <= burst_raddr[19:3];
 						vram_fw_brd <= 1;

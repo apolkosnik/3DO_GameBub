@@ -38,6 +38,7 @@ module P3DO_VRAM #(parameter USE_BRAM = 0) (
 	input  [15: 0] DP,
 	input          PEER_BUSY,
 	output         XBUSY,
+	output         XBUSY_CPU,    // Game Bub port: ... and it is the CPU's (MADAM_CPUIF SPORT_BUSY)
 
 	output bit [ 7: 0] DBG_WAIT_CNT
 );
@@ -530,5 +531,6 @@ module P3DO_VRAM #(parameter USE_BRAM = 0) (
 	
 	assign QSF = SR_RA[8];
 	assign XBUSY = RT_EXEC | MWT_EXEC | FW_EXEC | MRD_EXEC;
+	assign XBUSY_CPU = XBUSY & XFER_CPU;
 
 endmodule

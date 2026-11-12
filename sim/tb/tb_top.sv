@@ -545,7 +545,7 @@ module tb_top;
 		if ({nvram[0], nvram[1], nvram[2], nvram[3]} != 32'h015A5A5A || nvram[6] != 8'h02)
 			fail($sformatf("NVRAM not formatted: %02h %02h %02h %02h .. %02h", nvram[0], nvram[1], nvram[2], nvram[3], nvram[6]));
 
-		host_wr(32'h0000_1000, 32'h2);       // setting: CD speed "Fast (0.5 ms)"
+		host_wr(32'h0000_1020, 32'h2);       // setting: CD speed "Fast (0.5 ms)"
 		check_buttons(0);                    // "Buttons": the default, then the other layout and back
 		host_wr(32'h0000_100C, 32'h1);
 		check_buttons(1);
@@ -553,6 +553,17 @@ module tb_top;
 		check_buttons(0);
 		$display("[%0t] Buttons setting: %0d pad words checked", $realtime, pad_checks);
 		host_wr(32'h0000_1010, 32'(sram_mode));   // "VRAM memory", taken while the 3DO is in reset
+		// light gun after the pad (test ROM test 19): aim x 0x4000, y 0x8000,
+		// trigger held
+		host_wr(32'h0000_1014, 32'h1);
+		host_wr(32'h0000_1018, 32'h8000_4000);
+		host_wr(32'h0000_101C, 32'h1);
+		begin
+			bit [31:0] q0, q1, q2;
+			host_rd(32'h0000_1014, q0); host_rd(32'h0000_1018, q1); host_rd(32'h0000_101C, q2);
+			if (q0 != 32'h1 || q1 != 32'h8000_4000 || q2 != 32'h1)
+				fail($sformatf("light gun registers read %08h %08h %08h", q0, q1, q2));
+		end
 		begin
 			bit [31:0] q;
 			host_rd(32'h0000_1010, q);
@@ -573,7 +584,7 @@ module tb_top;
 		// SRAM safe timing; tests 15-17 wait for frame starts)
 		for (int t = 0; t < 9000 && !done; t++) begin
 			#100us;
-			read_nvram(16'h110);
+			read_nvram(16'h118);
 			if (nvram_size != 0) nvram_changed = 1;
 			if ({nvram[256], nvram[257], nvram[258], nvram[259]} == "PASS" ||
 			    {nvram[256], nvram[257], nvram[258], nvram[259]} == "FAIL") done = 1;
@@ -587,7 +598,12 @@ module tb_top;
 			checks = {nvram[268], nvram[269], nvram[270], nvram[271]};
 			$display("[%0t] test ROM: %s test=%0d addr=%08h checks=%0d", $realtime,
 			         {nvram[256], nvram[257], nvram[258], nvram[259]}, test, addr, checks);
-			if ({nvram[256], nvram[257], nvram[258], nvram[259]} != "PASS") fail("test ROM reported FAIL");
+			if ({nvram[256], nvram[257], nvram[258], nvram[259]} != "PASS") begin
+				// a test may leave the value it found and the one it expected (test 21)
+				$display("[%0t] test ROM: found %08h, expected %08h", $realtime,
+				         {nvram[272], nvram[273], nvram[274], nvram[275]}, {nvram[276], nvram[277], nvram[278], nvram[279]});
+				fail("test ROM reported FAIL");
+			end
 			// tests 1-8, test 9 (SPORT write masks): 3 regions x (13 checks of a
 			// row), test 10 (CLIO timers and interrupt summary): 10, test 11
 			// (matrix engine): 3
@@ -595,11 +611,30 @@ module tb_top;
 			// disc (audio track), 1 with a preloaded ISO (disc info only)
 			// test 15 (page copies with the video DMA on): 64 + 32 rows; test 16
 			// (relative VDL next pointer): 1; test 17 (cel culling): 5; test 18
-			// (cels drawn into a shown frame buffer): 1
-			if (checks != 64*4 + 1 + 64*5 + 2 + 16 + 1 + 2 + 4 + 1 + (stream_mode ? 25 : 1) + 3 * 13 * 512 + 10 + 3 + 64 + 16 + 96 + 1 + 5 + 1)
+			// (cels drawn into a shown frame buffer): 1; test 19 (light gun): 3;
+			// test 20 (mouse): 3; test 21 (in-place video decode): 3 pictures x 5
+			if (checks != 64*4 + 1 + 64*5 + 2 + 16 + 1 + 2 + 4 + 1 + (stream_mode ? 25 : 1) + 3 * 13 * 512 + 10 + 3 + 64 + 16 + 96 + 1 + 5 + 1 + 3 + 3 + 15)
 				fail($sformatf("unexpected number of checks %0d", checks));
 			for (int i = 0; i < 16; i++)
 				if (nvram[8'h80 + i] != 8'(8'hA5 + 8'h13 * i)) fail($sformatf("NVRAM byte %02h = %02h", 8'h80 + i, nvram[8'h80 + i]));
+		end
+
+		// statistics (the Game Bub firmware reads and clears 0x1000 stalls and
+		// 0x1004 run cycles when the game pauses): both counted while the 3DO
+		// runs, cleared by a write; the settings moved off them (CD speed at
+		// 0x1020) read back
+		begin
+			bit [31:0] st, cy, st2, cy2, sp;
+			host_rd(32'h0000_1000, st); host_rd(32'h0000_1004, cy);
+			$display("[%0t] statistics: %0d clocks paused, %0d run (%0.1f%% run)", $realtime, st, cy,
+			         100.0 * real'(cy) / (real'(cy) + real'(st) + 1.0));
+			if (cy == 0 || st == 0) fail($sformatf("statistics counters %0d / %0d", st, cy));
+			host_wr(32'h0000_1000, 32'h0); host_wr(32'h0000_1004, 32'h0);
+			host_rd(32'h0000_1000, st2); host_rd(32'h0000_1004, cy2);
+			if (st2 >= st || cy2 >= cy || cy2 > 32'd1000)
+				fail($sformatf("statistics not cleared: %0d / %0d after %0d / %0d", st2, cy2, st, cy));
+			host_rd(32'h0000_1020, sp);
+			if (sp != 32'h2) fail($sformatf("CD speed setting (0x1020) reads %0d, written 2", sp));
 		end
 
 		// video timing towards the framework
@@ -649,6 +684,53 @@ module tb_top;
 			$display("[%0t] VDL reg %02h <= %06h (%s, line %0d)", $realtime, dut.p3do.madam.AG.DMA_STACK_WADDR,
 			         {dut.p3do.madam.AG.DMA_STACK_IN, 2'b00}, dut.p3do.madam.AG.BUS_STATE_FF.name(), dut.p3do.madam.SPORT.VCOUNT);
 
+	// Test ROM test 20: after the first control port transfer (test 19, the
+	// light gun) the Controller setting goes to the mouse (2) with the left
+	// button held; when the ROM enables its next transfer (MCTL bit 15 set
+	// again, at a line in the first half of a field) one motion packet
+	// (dx +5, dy -3) is written: the port is latched every field, which
+	// takes the motion, so it must come in the field before the DMA reads.
+	bit pb_mctl_q = 0, pb_mouse_set = 0, pb_motion_set = 0;
+	always @(posedge clk_sys) begin
+		if (!dut.p3do.madam.MCTL[15] && pb_mctl_q && !pb_mouse_set) begin
+			pb_mouse_set <= 1;
+			fork
+				begin
+					host_wr(32'h0000_1014, 32'h2);
+					host_wr(32'h0000_1034, 32'h1);
+					$display("[%0t] mouse: Controller 2, left button written", $realtime);
+				end
+			join_none
+		end
+		if (dut.p3do.madam.MCTL[15] && !pb_mctl_q && pb_mouse_set && !pb_motion_set) begin
+			pb_motion_set <= 1;
+			fork
+				begin
+					host_wr(32'h0000_1030, {16'hFFFD, 16'h0005});
+					$display("[%0t] mouse: motion dx +5 dy -3 written (line %0d)", $realtime, dut.p3do.madam.SPORT.VCOUNT);
+				end
+			join_none
+		end
+		pb_mctl_q <= dut.p3do.madam.MCTL[15];
+	end
+
+	// +pbus_trace: the control port DMA (ControlPort registers 0x570-0x57C,
+	// MADAM register stack 0x5C-0x5F; the player's bus states; MCTL bit 15)
+	bit pbus_trace = 0;
+	initial pbus_trace = $test$plusargs("pbus_trace");
+	bit pb_mctl_d = 0;
+	always @(posedge clk_mem) if (pbus_trace) begin
+		if (dut.p3do.madam.AG.EN && dut.p3do.madam.AG.CE_R && dut.p3do.madam.AG.DMA_STACK_WE &&
+		    dut.p3do.madam.AG.DMA_STACK_WADDR[6:2] == 5'h17)
+			$display("[%0t] PBUS reg %02h <= %06h (%s)", $realtime, dut.p3do.madam.AG.DMA_STACK_WADDR,
+			         {dut.p3do.madam.AG.DMA_STACK_IN, 2'b00}, dut.p3do.madam.AG.BUS_STATE_FF.name());
+		if (dut.p3do.madam.PLAYER.DATA_WR && dut.p3do.madam.AG.EN && dut.p3do.madam.AG.CE_R)
+			$display("[%0t] PBUS DMA write %08h at %06h", $realtime, dut.p3do.madam.PLAYER.MDTO, {dut.p3do.madam.AG.ADDR_FF_1, 2'b00});
+		if (dut.p3do.madam.MCTL[15] != pb_mctl_d)
+			$display("[%0t] PBUS MCTL[15] = %b (line %0d)", $realtime, dut.p3do.madam.MCTL[15], dut.p3do.madam.SPORT.VCOUNT);
+		pb_mctl_d <= dut.p3do.madam.MCTL[15];
+	end
+
 	// line's transfers are scheduled (MADAM_SPORT VIDEO_TRANS_PEND) to its
 	// scanout (VIDEO_TRANS_EXEC) both VRAM halves must have had a read
 	// transfer that is not the CPU's (as tb_boot). A late line shows the
@@ -667,6 +749,45 @@ module tb_top;
 	int vl_np;
 	bit vl_hold0;
 	string vl_st0, vl_st_max, vl_st_last, vl_why;
+	string cx_last = "none";   // the last CPU SPORT transfer's start (see cx_max below)
+	bit cx_log = 0;            // +cx_log: every CPU SPORT transfer's start
+	initial cx_log = $test$plusargs("cx_log");
+
+	// +fill_log=<from_ms>: from that time, on lines 243-247 of each field, the
+	// read-transfer cache's fills (issue and end, kind), the VDL frame buffer
+	// hints, the video transfer requests, ddram.sv's random VRAM accesses as
+	// they are latched and served, and the 3DO's pause edges, with the line
+	// and dot (the late lines of test 21: a hint fill while the CPU writes VRAM)
+	int fl_ms = -1;
+	initial void'($value$plusargs("fill_log=%d", fl_ms));
+	function automatic bit fl_on();
+		return fl_ms >= 0 && $realtime >= fl_ms * 1ms && dut.p3do.madam.SPORT.VCOUNT >= 10'd243 && dut.p3do.madam.SPORT.VCOUNT <= 10'd247;
+	endfunction
+	function automatic string fl_pos();
+		return $sformatf("line %0d dot %0d", dut.p3do.madam.SPORT.VCOUNT, dut.p3do.madam.SPORT.HCOUNT);
+	endfunction
+	bit fl_fill_d = 0, fl_pause_d = 0, fl_wl_d = 0, fl_wr_d = 0, fl_rl_d = 0, fl_rr_d = 0, fl_hint_d = 0;
+	always @(posedge clk_mem) begin
+		if (fl_on()) begin
+			if (dut.rtcache.fill_issue)
+				$display("[%0t] fill_log: fill of half-row %03h issued (%s) into entry %0d, %s", $realtime, dut.rtcache.fill_h,
+				         !dut.rtcache.fill_yield ? "demand" : dut.rtcache.fill_plain ? "prefetch" : "hint", dut.rtcache.fill_e, fl_pos());
+			if (fl_fill_d && !dut.rtcache.fill_busy)
+				$display("[%0t] fill_log: fill ended, %s", $realtime, fl_pos());
+			if (dut.rtcache.hint && !fl_hint_d)
+				$display("[%0t] fill_log: VDL hint curr %05h (v %b) prev %05h (v %b), %s", $realtime, dut.rtcache.hint_curr, dut.rtcache.hint_curr_v,
+				         dut.rtcache.hint_prev, dut.rtcache.hint_prev_v, fl_pos());
+			if (dut.rtcache.l_esrd) $display("[%0t] fill_log: L read transfer request %05h%s, %s", $realtime, dut.rtcache.l_esaddr, dut.rtcache.l_esnp ? " (not display)" : "", fl_pos());
+			if (dut.rtcache.r_esrd) $display("[%0t] fill_log: R read transfer request %05h%s, %s", $realtime, dut.rtcache.r_esaddr, dut.rtcache.r_esnp ? " (not display)" : "", fl_pos());
+			if (dut.ddram.write_lpend && !fl_wl_d) $display("[%0t] fill_log: L random write latched %05h (ddram state %0d), %s", $realtime, dut.ddram.write_laddr, dut.ddram.state, fl_pos());
+			if (!dut.ddram.write_lpend && fl_wl_d) $display("[%0t] fill_log: L random write issued, %s", $realtime, fl_pos());
+			if (dut.ddram.read_lbusy && !fl_rl_d) $display("[%0t] fill_log: L random read miss %05h (ddram state %0d), %s", $realtime, dut.ddram.read_laddr, dut.ddram.state, fl_pos());
+			if (!dut.ddram.read_lbusy && fl_rl_d) $display("[%0t] fill_log: L random read served, %s", $realtime, fl_pos());
+			if (dut.pause != fl_pause_d) $display("[%0t] fill_log: 3DO %s, %s", $realtime, dut.pause ? "paused" : "running", fl_pos());
+		end
+		fl_fill_d = dut.rtcache.fill_busy; fl_pause_d = dut.pause; fl_hint_d = dut.rtcache.hint;
+		fl_wl_d = dut.ddram.write_lpend; fl_wr_d = dut.ddram.write_rpend; fl_rl_d = dut.ddram.read_lbusy; fl_rr_d = dut.ddram.read_rbusy;
+	end
 	bit vl_armed = 0, vl_l = 0, vl_r = 0, vl_pend_d = 0, vl_exec_d = 0, vl_rtl_d = 0, vl_rtr_d = 0, vl_mwt_d = 0;
 	always @(posedge clk_mem) begin
 		if (dut.reset_3do) vl_armed = 0;
@@ -707,6 +828,7 @@ module tb_top;
 						         $realtime, dut.p3do.madam.SPORT.VCOUNT, vl_l, vl_r, vl_t_ack, vl_np * 0.01, vl_hold0, vl_st0,
 						         vl_st_max.len() > 300 ? vl_st_max.substr(0, 299) : vl_st_max);
 						$display("            at scheduling: %s", vl_why);
+						$display("            last CPU SPORT transfer: %s", cx_last);
 				end
 			end
 		end
@@ -726,14 +848,21 @@ module tb_top;
 		b[0] = (dut.vram_l.RT_EXEC || dut.vram_l.MWT_EXEC || dut.vram_l.FW_EXEC || dut.vram_l.MRD_EXEC) && dut.vram_l.XFER_CPU;
 		b[1] = (dut.vram_r.RT_EXEC || dut.vram_r.MWT_EXEC || dut.vram_r.FW_EXEC || dut.vram_r.MRD_EXEC) && dut.vram_r.XFER_CPU;
 		for (int i = 0; i < 2; i++) begin
-			if (b[i] && !cx_busy[i]) cx_t[i] = $realtime;
+			if (b[i] && !cx_busy[i]) begin
+				cx_t[i] = $realtime;
+				cx_last = $sformatf("%s %s at line %0d dot %0d (SPORT_HOLD %b, start %0d)", i ? "R" : "L",
+				                    (i ? dut.vram_r.MWT_EXEC : dut.vram_l.MWT_EXEC) ? "write" : "read",
+				                    dut.p3do.madam.SPORT.VCOUNT, dut.p3do.madam.SPORT.HCOUNT,
+				                    dut.p3do.madam.SPORT.SPORT_HOLD, dut.p3do.madam.SPORT.SPORT_HOLD_START);
+				if (cx_log) $display("[%0t] CPU SPORT transfer: %s", $realtime, cx_last);
+			end
 			if (!b[i] && cx_busy[i] && $realtime - cx_t[i] > cx_max[i]) cx_max[i] = $realtime - cx_t[i];
 			cx_busy[i] = b[i];
 		end
 	end
 
 	initial begin
-		#1000ms;
+		#1500ms;   // the test ROM takes ~870 ms (~1 s in the SRAM safe timing mode)
 		$display("tb_top: TIMEOUT: cpu A=%08h, MADAM stretch %b, SPORT hold %b, line %0d, video DMA lines %0d, CPU write transfers %0d",
 		         dut.p3do.CPU_A, dut.p3do.madam.CPUIF.STRETCH, dut.p3do.madam.SPORT.SPORT_HOLD, dut.p3do.madam.SPORT.VCOUNT,
 		         vl_lines, vl_copies);

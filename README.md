@@ -376,6 +376,108 @@ Two causes:
   phase 19 checks the prefetch hold. `tb_top` counts late lines in the vertical blanking
   (not shown: the encoder shows 240 lines from line 22, PAL 45) apart; its late-line
   report says where the time went.
+* **Copies queued behind copies.** A CPU SPORT access is now also held while a VRAM half
+  still runs a CPU transfer (MADAM_CPUIF `SPORT_BUSY`, vram.sv `XBUSY_CPU`): issued
+  then, it waited in the VRAM module and started when the previous copy's write transfer
+  ended, inside `SPORT_HOLD` (a page copy's read transfer started 600 dots late and two
+  lines came out late in `tb_top`). Only the CPU's own transfers count: counting the
+  line's video transfer as well kept copies out of the short gap the safe SRAM timing
+  leaves them, one transfer in about 16 lines.
+* **CPU VRAM writes during fills.** A game decoding video (Killing Time's EZFlix intro:
+  ~50k CPU VRAM accesses a picture, 12 pictures a second) writes VRAM all the time.
+  A random VRAM access issued while the read-transfer cache fills a half-row waited in
+  ddram.sv behind the whole fill with the 3DO paused, MADAM with it, so a line's video
+  transfer request due meanwhile was issued after the line had started; and the next
+  access came right after each was served, so letting them in between a fill's chunks
+  just stretched the fill. Now: in a plain prefetch fill a waiting random access goes
+  between the 32-beat chunks (ddram.sv `bplain`; the CPU is paused ~2 µs instead of ~5
+  per prefetch, two a line) unless a VDL hint is waiting for the fill to end; during a
+  VDL hint or demand fill the CPU's random VRAM accesses wait in MADAM_CPUIF's stretch
+  cycle instead (`VRAM_HOLD`, from vram_rtcache's `d_fill_hold`: the CPU waits up to a
+  fill, ~5-8 µs, once a frame or on a miss, and MADAM runs on), and a random access
+  already waiting is served before a new fill starts (ddram.sv `brd_start`). Test ROM
+  test 21 decodes three pictures the way EZFlix does (see `sim/tb/testrom.S`) with the
+  video DMA on, its VDL laid out as the OS lays a screen out (16 lines without video
+  DMA, then 240): no shown line is late in any VRAM memory mode, and every word written
+  reads back right, both at random and through the cache. (With the 240 lines starting
+  at line 5 the entry's refetch fell on a shown line and its two hint fills, current and
+  previous frame buffer, could not both end before that line's request: a VDL entry
+  ending on a shown line with different frame buffers next costs one late line per
+  switch under heavy CPU VRAM traffic; the OS ends them in the vertical blanking.)
+
+### Firmware statistics registers
+
+The Game Bub firmware (the disc-streaming fork) reads two counters from every core when
+the game is paused, the clocks the core was stalled and ran (`0x1000`, `0x1004`), logs the
+run rate and writes 0 to both. The 3DO core had its CD Speed setting at `0x1000` and Reset
+at `0x1004`, so every pause set CD Speed back to "2x (Original)". The settings are now at
+`0x1020` (CD Speed) and `0x1024` (Reset), with the same ids, so saved values are kept;
+`0x1000`/`0x1004` count the clocks the 3DO was paused / ran, cleared by a write.
+**Copy the new `settings.json` with this core**: the old one sends CD Speed to the
+counter. `tb_top` checks that both count, clear on a write, and that CD Speed reads back
+at its new address.
+
+### Mouse
+
+The 3DO mouse (ID 0x49, after the pad) is on the control port when the **Controller**
+setting is "Pad + mouse" (register `0x1014` = 2). The device is MiSTer's (`hps2pad.sv`);
+`host_mouse.sv` turns the Game Bub registers into its PS/2 packets:
+
+* `0x1030` motion: `{dy, dx}`, signed 16-bit each, the movement since the previous write,
+  right and down positive; each write is one packet, clamped to -256..255 per axis. The
+  3DO mouse moves one count per unit written (MiSTer doubled them for the HPS's raw PS/2
+  deltas, which moved the cursor in steps of two; the firmware scales here) and the game
+  reads at most 96 counts per control port read, the rest waits for the next reads.
+* `0x1034` buttons: bit 0 left, bit 1 right, bit 2 middle, read as they stand (the
+  firmware writes them alone when a button changes with the mouse still; MiSTer's
+  `HPS2PAD` took the buttons from the last packet, so such a click would have reached
+  the game with the next movement, and one held from before the mouse was switched on
+  never).
+
+A real mouse on the dock drives it. The dock firmware (branch `usb-mouse` of the
+dock-firmware fork) takes USB mice (boot protocol, or any report descriptor) and
+Bluetooth mice (bluepad32) and sends each as a gamepad whose buttons word has bit 30 set,
+with the movement since the previous packet in the left stick fields (the dock's queue
+adds a new movement into a packet still waiting, so none is lost); up to 8 HID
+interfaces, so two mice and two controllers through a hub work. The handheld firmware
+(branch `mouse-3do` of the fork) sums the movement of every mouse into one 3DO mouse (one
+mouse count is one 3DO count), ORs their buttons, writes a packet for every report of
+the mouse as it arrives (paced to one per 8 ms at first, a 125 Hz mouse's reports fell
+into the 3DO's fields one or three at a time and the cursor stuttered; the stick's cursor
+is still paced to 8 ms), and keeps the mouse out of the merged pad; without a mouse a
+dock gamepad's right stick and buttons stand in. `tb_lightgun` checks
+the packets through `host_mouse` and `HPS2PAD` (a packet, the clamp and the 96-count
+reads, two packets adding, a button alone and one held from before the mouse was
+switched on, dy -32768 clamped up rather than wrapped, the device off); test ROM test 20
+reads the mouse through MADAM's player bus DMA. The dock firmware builds (its bluepad32
+submodule at a public commit, with the dock's CMake giving bluepad32 the FreeRTOS CYW43
+arch instead of its own); neither firmware has run on hardware yet.
+
+### Light gun (groundwork)
+
+The 3DO light gun (ID 0x4D: American Laser Games titles, Corpse Killer, Space Pirates
+and others) is in the core's control port, after the pad, for the GunCon 3 support that
+is being added to the Game Bub firmware. The gun reports no position: a 20-bit count from
+the start of the field to the moment its sensor saw the beam, and the number of line
+pulses it saw. `HPS2PAD` turns an aim position into that count as Portfolio's light gun
+driver decodes it (`count = ceil((y * 12707 + x * 10300 / 320) / 10) + 12835` for NTSC;
+PAL 12796 / 1051 / 388 / 58995, the SDK's defaults, not checked on a PAL gun). Opera
+rounds the division down, which put x = 0 at the end of the line above for the driver.
+Core registers (host memory interface):
+
+* `0x1014` Controller: 0 pad, 1 pad + light gun, 2 pad + mouse (the firmware sets 1 itself
+  when a GunCon 3 is connected).
+* `0x1018` aim: `{y, x}`, 0..65535 across the picture.
+* `0x101C` buttons: bit 0 trigger, bit 1 option, bit 2 off screen (no hit: count 0,
+  trigger set, as for a reload).
+
+The light gun is not offered by the Controller setting in `settings.json`: without the
+firmware driving it the gun would only report "off screen"; the firmware selects it when a
+gun is connected. `tb_lightgun` checks 541 control port transfers
+(NTSC and PAL, corners, edges, a grid, random aims, buttons, off screen) against the
+formula and Portfolio's decoding; test ROM test 19 reads the gun through MADAM's player
+bus DMA as Portfolio does (the first word is the port's leftover, as in Portfolio's
+ControlPort.c).
 
 `tb_boot` places the BIOS in the SDRAM directly; it now also gives `gb_host` the BIOS
 checksum that streaming the file would have left, so Region "By BIOS" picks PAL for a PAL
@@ -658,6 +760,17 @@ the fixes fails 30 of the checks. With every fix except the last three it fails 
 when paused) and crashes after the R15 writes. With the R15 fix alone added, it fails 4
 (the nTRANS checks), and 7 when paused.
 
+`tb_arm6 +fiq +irq` with `sim/tb/arm6_fiq.S` checks interrupts: a kernel modelled on
+Killing Time's EZFlix video decoder as Opera executes it (User mode, packed-byte
+AND/ORR/ADD/SUB with immediate shifts, masks in r8-r11, the stream read with
+`LDMIA r12!`, stores with `STMIA`/`STMDB`, `LDMIB` with writeback, LDM with the base and
+PC in the list, no stack) runs once with interrupts masked and once with the testbench
+taking nFIQ and nIRQ low at pseudo-random points, with the core also paused at random
+points. The FIQ handler alternates a short path with a task-switch-like one (the User bank
+saved with `STM ^`, every register clobbered, restored with `LDM ^`); both return with
+`SUBS PC, R14, #4`. The outputs must be the same (5 checksums); a handler that skips the
+restore fails it. The core passes (86 FIQs and 80 IRQs taken in the kernel).
+
 **Cel engine, pixel processor and display path (fixes to `MADAM_SE.sv`, `CLIO_VIDEO.sv`
 and `CLIO_CLUT.sv`).** Four audits of MADAM's cel engine and CLIO's display path against
 the 3DO documentation found fifteen differences, all fixed:
@@ -850,6 +963,8 @@ sim/run_tb.sh tb_gfx           # MADAM pixel processor, CLIO display control wor
                                # vs. the 3DO documentation
 sim/run_tb.sh tb_viddma        # MADAM video DMA: line-start / mid-line acknowledges, mid-line register
                                # choice, field line across VDL entries, VDL entries with ListLen 0
+sim/run_tb.sh tb_lightgun      # the light gun (count, buttons, off screen; NTSC, PAL) and the mouse
+                               # (packets, clamp, 96-count reads) on the control port
 sim/run_tb.sh tb_clio          # CLIO interrupt summary, timer cascade, timer controls, TimerSlack,
                                # DSP output memory and FIFO status, FIFOs (DSP reads during DMA refills),
                                # DSP instructions without operands, frame start state, empty input FIFOs,
@@ -861,6 +976,9 @@ sim/run_tb.sh tb_math          # MADAM matrix engine: 4x4, 3x3 and 3x3 with divi
 sim/run_tb.sh tb_arm6          # ARM60 core vs. datasheet: shifts, MSR, unaligned loads, STM/LDM ^,
                                # undefined instruction trap, R15 writes, LDRT/STRT nTRANS, with the
                                # core paused at random points (needs sim/build_testrom.sh first)
+sim/run_tb.sh tb_arm6 +bin=build/sim/arm6_fiq.bin +fiq +irq
+                               # ARM60 interrupts: a video-decoder-like kernel in User mode with FIQs
+                               # and IRQs injected at random points vs. the same kernel uninterrupted
 sim/run_tb.sh tb_sdram         # SDRAM controller vs. timing-checking SDRAM model, including the 3DO
                                # refreshing just as the controller's own refresh comes due
 sim/run_tb.sh tb_rtcache       # VRAM read-transfer cache and ddram.sv: coherence vs. reference VRAM model,
@@ -870,8 +988,10 @@ sim/run_tb.sh tb_rtcache       # VRAM read-transfer cache and ddram.sv: coherenc
                                # with the VRAM halves out of step, write masks in on-chip, SRAM and
                                # SDRAM rows, split transfers after writes; +sram_mode=0/1/2 (VRAM
                                # memory setting)
-sim/build_testrom.sh           # assemble the test BIOS (sim/tb/testrom.S) and sim/tb/arm6_isa.S
-sim/run_tb.sh tb_top           # whole core: boots the test BIOS; checks the Buttons setting
+sim/build_testrom.sh           # assemble the test BIOS (sim/tb/testrom.S), sim/tb/arm6_isa.S and
+                               # sim/tb/arm6_fiq.S
+sim/run_tb.sh tb_top           # whole core: boots the test BIOS (21 tests, among them an EZFlix-like
+                               # in-place video decode into screens in the SDRAM); checks the Buttons setting
 sim/run_tb.sh tb_top +be       # same with a big-endian host
 sim/run_tb.sh tb_top +stream   # same, with the disc read through a model of the streaming firmware
 ```

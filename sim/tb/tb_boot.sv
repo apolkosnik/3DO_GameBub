@@ -753,6 +753,53 @@ module tb_boot;
 	final $display("tb_boot: off-chip VRAM writes %0d (%0d latched while ddram.sv was busy), %0d lost, %0d issued with another address's flash-write lookup (%0d with a different flag)",
 	               vw_writes, vw_deferred, vw_lost, vw_fw_wrong, vw_fw_wrong_effect);
 
+	// ---------------- random VRAM reads vs the shadow ----------------
+	// Every random read of off-chip VRAM (CPU or CEL engine: RAS low, OE
+	// low, WE high, no DSF command; served from ddram.sv's block buffer
+	// through the VRAM module's Q) must return what the shadow (below) holds
+	// for the address when CAS rises, i.e. after the last write to it: a
+	// stale block buffer or a read served before a posted write shows here.
+	// TB errors; the first 20 are printed with ddram.sv's state.
+	int  vr_reads = 0, vr_bad = 0;
+	bit  vr_cas_d [2] = '{1, 1}, vr_ras_d [2] = '{1, 1}, vr_oe_d [2] = '{1, 1}, vr_dsf_d [2] = '{0, 0}, vr_int_d [2] = '{0, 0};
+	bit  [1:0] vr_we_d [2] = '{2'b11, 2'b11};
+	bit  [15:0] vr_q_d [2];
+	bit  [17:0] vr_a_d [2];
+	always @(posedge clk_mem) begin
+		for (int s = 0; s < 2; s++) begin
+			bit cas, ras, oe, dsf, isint;
+			bit [1:0] we;
+			bit [15:0] q;
+			bit [17:0] a;
+			if (s == 0) begin
+				cas = dut.vram_l.CAS_N; ras = dut.vram_l.RAS_N; oe = dut.vram_l.OE_N; we = dut.vram_l.WE_N; dsf = dut.vram_l.DSF1;
+				q = dut.vram_l.Q; a = dut.vram_l.A;
+				isint = dut.vram_l.USE_INT_RAM4 || dut.vram_l.USE_INT_RAM2 || dut.vram_l.USE_INT_RAM1;
+			end else begin
+				cas = dut.vram_r.CAS_N; ras = dut.vram_r.RAS_N; oe = dut.vram_r.OE_N; we = dut.vram_r.WE_N; dsf = dut.vram_r.DSF1;
+				q = dut.vram_r.Q; a = dut.vram_r.A;
+				isint = dut.vram_r.USE_INT_RAM4 || dut.vram_r.USE_INT_RAM2 || dut.vram_r.USE_INT_RAM1;
+			end
+			// CAS rising after a strobe with OE low and WE high, RAS low: a random read
+			if (cas && !vr_cas_d[s] && !vr_ras_d[s] && !vr_oe_d[s] && vr_we_d[s] == 2'b11 && !vr_dsf_d[s] && !vr_int_d[s] && !dut.reset_3do) begin
+				vr_reads++;
+				if (vr_q_d[s] !== shv[s][vr_a_d[s]]) begin
+					vr_bad++;
+					errors++;
+					if (vr_bad <= 20)
+						$display("[%0t] TB ERROR: random VRAM read %s %05h returned %04h, the shadow holds %04h (ddram state %0d, block valid %b of %05h, write pending L %b R %b to %05h, CPU A %08h, bus %s)",
+						         $realtime, s ? "R" : "L", vr_a_d[s], vr_q_d[s], shv[s][vr_a_d[s]], dut.ddram.state,
+						         s ? dut.ddram.read_rval : dut.ddram.read_lval, s ? dut.ddram.read_raddr : dut.ddram.read_laddr,
+						         dut.ddram.write_lpend, dut.ddram.write_rpend, dut.ddram.write_laddr, dut.p3do.CPU_A,
+						         dut.p3do.madam.ARB.BUS_ST.name());
+				end
+			end
+			vr_cas_d[s] = cas; vr_ras_d[s] = ras; vr_oe_d[s] = oe; vr_we_d[s] = we; vr_dsf_d[s] = dsf; vr_int_d[s] = isint;
+			vr_q_d[s] = q; vr_a_d[s] = a;
+		end
+	end
+	final $display("tb_boot: random VRAM reads of off-chip VRAM %0d, %0d returned other data than the shadow", vr_reads, vr_bad);
+
 	// ---------------- VRAM shadow model ----------------
 	// What the 3DO's VRAM holds by the VRAM bus semantics, per side (0 = L,
 	// bits 31..16; 1 = R, bits 15..0; 16-bit entries at word address
@@ -837,7 +884,34 @@ module tb_boot;
 		return 1;
 	endfunction
 
+	// +fb_probe=<x>,<y>,<from_ms>: the VRAM word that holds pixel x of line y
+	// (from the video read transfer issued for line y, the left half's), in
+	// the frame buffer shown and the one shown before it (double buffering:
+	// the game draws into the other one), and every write that reaches them: random (with the writer: MADAM's bus state,
+	// the CPU's address, the CEL engine's PIXC) and whole-row (copy, flash).
+	int        fbp_x = -1, fbp_y = -1, fbp_n = 0;
+	realtime   fbp_from = 0;
+	bit [17:0] fbp_a = '0, fbp_b = '0;   // the word in the shown and the previous frame buffer
+	bit        fbp_v = 0, fbp_bv = 0;
+	initial begin
+		int ms;
+		string s;
+		if ($value$plusargs("fb_probe=%s", s) && $sscanf(s, "%d,%d,%d", fbp_x, fbp_y, ms) == 3) begin
+			fbp_from = ms * 1ms;
+			$display("tb_boot: probing pixel %0d of line %0d from %0d ms", fbp_x, fbp_y, ms);
+		end
+	end
+	function automatic bit fbp_log();
+		if (!fbp_v || $realtime < fbp_from || fbp_n >= 200000) return 0;
+		fbp_n++;
+		return 1;
+	endfunction
+
 	task automatic sh_write(input int s, input [17:0] a, input [15:0] d, input [1:0] we_n);
+		if (fbp_v && (a == fbp_a || (fbp_bv && a == fbp_b)) && fbp_log())
+			$display("[%0t] PROBE %s write %05h <= %04h (lanes %b, was %04h): bus %s, CPU A %08h, CEL PIXC %08h, line %0d",
+			         $realtime, s ? "R" : "L", a, d, ~we_n, shv[s][a], dut.p3do.madam.ARB.BUS_ST.name(), dut.p3do.CPU_A,
+			         32'({dut.p3do.madam.SE.PPMPCB, dut.p3do.madam.SE.PPMPCA}), dut.p3do.madam.SPORT.VCOUNT);
 		if (!we_n[1]) shv[s][a][15:8] = d[15:8];
 		if (!we_n[0]) shv[s][a][ 7:0] = d[ 7:0];
 		if (sh_watched_word(a[17:9], a[8:0]) || sh_watched(a[17:9]))
@@ -855,6 +929,17 @@ module tb_boot;
 		end else begin
 			for (int i = pos; i <= last; i++) shs[s][i] = shv[s][{row, 9'(i)}];
 			if (sh_copy_open[s]) sh_copy_hit[s] = 1;   // inside a copy
+		end
+		if (fbp_x >= 0 && !sh_cpu[s] && s == 0 && !split && $realtime >= fbp_from &&
+		    dut.p3do.madam.SPORT.VCOUNT == 10'(fbp_y - 1) && dut.p3do.madam.SPORT.HCOUNT > 11'd1300) begin
+			bit [17:0] na;
+			na = 18'({row, pos}) + 18'(fbp_x);
+			if (!fbp_v || na != fbp_a)
+				$display("[%0t] PROBE pixel %0d of line %0d: word %05h (row %03h column %03h + %0d), now L %04h R %04h",
+				         $realtime, fbp_x, fbp_y, na, row, pos, fbp_x, shv[0][na], shv[1][na]);
+			if (fbp_v && na != fbp_a) begin fbp_b = fbp_a; fbp_bv = 1; end
+			fbp_a = na;
+			fbp_v = 1;
 		end
 		sh_rts++;
 		sh_rt_row[s] = row;
@@ -890,6 +975,9 @@ module tb_boot;
 	int        sh_copies_unif [2] = '{0, 0}, sh_copy_log_ms = -1, sh_copy_log_n = 0;
 	initial void'($value$plusargs("copy_log_ms=%d", sh_copy_log_ms));
 	task automatic sh_mwt_start(input int s, input [8:0] row, input bit split, input [15:0] mask, input bit cpu);
+		if (fbp_v && (row == fbp_a[17:9] || (fbp_bv && row == fbp_b[17:9])) && fbp_log())
+			$display("[%0t] PROBE %s write transfer into the row %03h (%s, mask %04h)", $realtime, s ? "R" : "L", row,
+			         cpu ? "CPU copy" : "video register", mask);
 		if (mask != 16'hFFFF) sh_masked++;
 		if (cpu) begin
 			bit unif;
@@ -924,6 +1012,8 @@ module tb_boot;
 	endtask
 
 	task automatic sh_fw_start(input int s, input [8:0] row, input [15:0] color, input [15:0] mask);
+		if (fbp_v && (row == fbp_a[17:9] || (fbp_bv && row == fbp_b[17:9])) && fbp_log())
+			$display("[%0t] PROBE %s flash write of the row %03h: %04h mask %04h", $realtime, s ? "R" : "L", row, color, mask);
 		for (int i = 0; i < 512; i++) shv[s][{row, 9'(i)}] = (color & mask) | (shv[s][{row, 9'(i)}] & ~mask);
 		sh_fws++;
 		if (mask != 16'hFFFF) sh_masked++;

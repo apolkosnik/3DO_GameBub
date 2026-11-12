@@ -124,7 +124,7 @@ module tb_rtcache;
 
 	// ---------------- cache + ddram.sv ----------------
 	wire [17:0] ddr_bladdr, ddr_braddr;
-	wire        ddr_blwr, ddr_brwr, ddr_blrd, ddr_brrd, ddr_bfw, ddr_blte, ddr_brte, ddr_bbusy, ddr_byield, ddr_bwait;
+	wire        ddr_blwr, ddr_brwr, ddr_blrd, ddr_brrd, ddr_bfw, ddr_blte, ddr_brte, ddr_bbusy, ddr_byield, ddr_bwait, ddr_bplain;
 	reg         pf_hold = 0;               // a line's video transfers are due (phase 19)
 	wire [63:0] ddr_bout;
 	wire [ 9:2] ddr_ba;
@@ -145,7 +145,7 @@ module tb_rtcache;
 		.r_esrd(v_rrd), .r_esnp(v_rnp), .r_esaddr(v_raddr), .r_eswr(v_rwr), .r_este(v_rte), .r_esq(v_rq),
 		.d_bladdr(ddr_bladdr), .d_blrd(ddr_blrd), .d_blwr(ddr_blwr), .d_bfw(ddr_bfw),
 		.d_braddr(ddr_braddr), .d_brrd(ddr_brrd), .d_brwr(ddr_brwr),
-		.d_blte(ddr_blte), .d_brte(ddr_brte), .d_bout(ddr_bout), .d_ba(ddr_ba), .d_bbusy(ddr_bbusy), .d_byield(ddr_byield), .d_bwait(ddr_bwait),
+		.d_blte(ddr_blte), .d_brte(ddr_brte), .d_bout(ddr_bout), .d_ba(ddr_ba), .d_bbusy(ddr_bbusy), .d_byield(ddr_byield), .d_bwait(ddr_bwait), .d_bplain(ddr_bplain), .d_fill_hold(),
 		.pf_hold(pf_hold),
 		.ddr_we(DDRAM_WE && !DDRAM_BUSY), .ddr_addr(DDRAM_ADDR),
 		.ddr_din(DDRAM_DIN), .ddr_be(DDRAM_BE), .ddr_burstcnt(DDRAM_BURSTCNT),
@@ -182,7 +182,7 @@ module tb_rtcache;
 		.busy(),
 		.bladdr(ddr_bladdr), .blwr(ddr_blwr), .blrd(ddr_blrd), .braddr(ddr_braddr), .brwr(ddr_brwr),
 		.brrd(ddr_brrd), .bfw(ddr_bfw), .ba(ddr_ba), .bin(ddr_bin), .bout(ddr_bout),
-		.blte(ddr_blte), .brte(ddr_brte), .bbusy(ddr_bbusy), .byield(ddr_byield), .bwait(ddr_bwait)
+		.blte(ddr_blte), .brte(ddr_brte), .bbusy(ddr_bbusy), .byield(ddr_byield), .bwait(ddr_bwait), .bplain(ddr_bplain)
 	);
 
 	wire        sec_req, sec_we, sec_wnext, sec_rvalid, sec_done, init_done;

@@ -4,7 +4,16 @@
 //  * HostV0 command channel: GetStatus, CoreRun/Halt, SetupComplete,
 //    NotifyFocus, FileWriteStart/End, FileReadStart/End.
 //  * HostV0 memory interface, address map:
-//      0x0000_1000..0x0000_10FF  core settings (settings.json)
+//      0x0000_1000, 0x0000_1004  statistics: clocks the 3DO was paused /
+//                                ran since the last write (the Game Bub
+//                                firmware's convention for every core: it
+//                                reads and clears them when the game pauses)
+//      0x0000_1008..0x0000_10FF  core settings (settings.json: CD speed at
+//                                0x1020, reset at 0x1024); the light
+//                                gun's aim (0x1018) and buttons (0x101C)
+//                                and the mouse's motion (0x1030) and
+//                                buttons (0x1034), written by the firmware
+//                                while running
 //      0x1000_0000 + o           CD image (ISO), o < 22 MiB          (file 0)
 //      0x2000_0000 + o           BIOS ROM, 1 MiB                     (file 1)
 //      0x2100_0000 + o           Kanji ROM, 1 MiB, optional          (file 2)
@@ -25,6 +34,8 @@
 module gb_host (
 	input              clk,              // clk_sys (framework system clock)
 	input              reset,
+	input              stat_run,         // the 3DO ran this clock (statistics, 0x1004)
+	input              stat_stall,       // the 3DO was paused this clock (0x1000)
 
 	// HostV0
 	input      [31: 0] mem_address,
@@ -52,6 +63,12 @@ module gb_host (
 	output reg [ 1: 0] region_sel,       // 0 by BIOS, 1 NTSC, 2 PAL
 	output reg         button_layout,    // "Buttons": 0 Y B A = 3DO A B C, 1 A B X = 3DO A B C
 	output reg [ 1: 0] vram_mem,         // "VRAM memory": 0 SRAM, 1 SRAM slow timing, 2 SDRAM only (vram_sram.sv)
+	output reg [ 1: 0] controller,       // "Controller" (0x1014): 0 pad, 1 pad + light gun, 2 pad + mouse
+	output reg [31: 0] lg_aim,           // light gun aim (0x1018): {y, x}, 0..65535 across the picture
+	output reg [ 2: 0] lg_buttons,       // light gun buttons (0x101C): {off screen, option, trigger}
+	output reg         mouse_pkt,        // a mouse motion write (0x1030), one clock
+	output reg [31: 0] mouse_motion,     // {dy, dx}, signed 16-bit each, down / right positive
+	output reg [ 2: 0] mouse_buttons,    // (0x1034) {middle, right, left}
 	output             bios_pal,         // the loaded BIOS is a PAL one (MiSTer checksums)
 
 	// disc streaming (fork firmware "disc" files, see docs/disc_streaming.md)
@@ -82,6 +99,18 @@ module gb_host (
 	input              sec_rvalid,
 	input              sec_done
 );
+
+	// statistics counters (0x1000 stalls, 0x1004 run cycles), cleared by a
+	// write; they stop at the maximum
+	reg  [31: 0] stat_stalls, stat_cycles;
+	reg  [ 1: 0] stat_clr;
+	always @(posedge clk) begin
+		if (reset || stat_clr[0]) stat_stalls <= '0;
+		else if (stat_stall && stat_stalls != '1) stat_stalls <= stat_stalls + 1'd1;
+		if (reset || stat_clr[1]) stat_cycles <= '0;
+		else if (stat_run && stat_cycles != '1) stat_cycles <= stat_cycles + 1'd1;
+	end
+
 	import gb3do_pkg::*;
 
 	localparam CMD_GET_STATUS      = 16'h0000;
@@ -261,6 +290,8 @@ module gb_host (
 		xdone_s <= {xdone_s[1:0], xdone_tgl};
 		mem_done <= 0;
 		core_reset_pulse <= 0;
+		stat_clr <= '0;
+		mouse_pkt <= 0;
 		disc_change <= 0;
 		if (nvram_wr) nvram_dirty <= 1;
 
@@ -282,6 +313,11 @@ module gb_host (
 			region_sel    <= 2'd0;
 			button_layout <= 0;
 			vram_mem      <= 2'd0;
+			controller    <= 2'd0;
+			mouse_motion  <= '0;
+			mouse_buttons <= '0;
+			lg_aim        <= 32'h8000_8000;
+			lg_buttons    <= 3'b100;
 			disc_stream   <= 0;
 			nvram_dirty   <= 0;
 			bios_sum_le   <= '0;
@@ -324,20 +360,34 @@ module gb_host (
 					// settings
 					if (mem_write) begin
 						case (mem_address[7:0])
-							8'h00: cd_speed <= mem_dataWrite[1:0];
-							8'h04: if (mem_dataWrite[0]) core_reset_pulse <= 1;
+							8'h00: stat_clr[0] <= 1;
+							8'h04: stat_clr[1] <= 1;
+							8'h20: cd_speed <= mem_dataWrite[1:0];
+							8'h24: if (mem_dataWrite[0]) core_reset_pulse <= 1;
 							8'h08: region_sel <= mem_dataWrite[1:0];
 							8'h0C: button_layout <= mem_dataWrite[0];
 							8'h10: vram_mem <= mem_dataWrite[1:0];
+							8'h14: controller <= mem_dataWrite[1:0];
+							8'h18: lg_aim <= mem_dataWrite;
+							8'h1C: lg_buttons <= mem_dataWrite[2:0];
+							8'h30: begin mouse_motion <= mem_dataWrite; mouse_pkt <= 1; end
+							8'h34: mouse_buttons <= mem_dataWrite[2:0];
 							default: ;
 						endcase
 						mem_dataRead <= 32'h0;
 					end else begin
 						case (mem_address[7:0])
-							8'h00: mem_dataRead <= {30'd0, cd_speed};
+							8'h00: mem_dataRead <= stat_stalls;
+							8'h04: mem_dataRead <= stat_cycles;
+							8'h20: mem_dataRead <= {30'd0, cd_speed};
 							8'h08: mem_dataRead <= {30'd0, region_sel};
 							8'h0C: mem_dataRead <= {31'd0, button_layout};
 							8'h10: mem_dataRead <= {30'd0, vram_mem};
+							8'h14: mem_dataRead <= {30'd0, controller};
+							8'h18: mem_dataRead <= lg_aim;
+							8'h1C: mem_dataRead <= {29'd0, lg_buttons};
+							8'h30: mem_dataRead <= mouse_motion;
+							8'h34: mem_dataRead <= {29'd0, mouse_buttons};
 							default: mem_dataRead <= 32'h0;
 						endcase
 					end

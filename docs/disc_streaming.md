@@ -50,7 +50,7 @@ core runs.
 
 ## In this core
 
-- `files.json`: the disc file has `"disc": true` and extensions `cue`, `bin`, `iso`.
+- `files.json`: the disc file has `"disc": true` and extensions `cue`, `bin`, `iso`, `chd` (a CHD is read by the handheld firmware; see [firmware/](../firmware/README.md)).
 - **Mode.** `gb_host.sv` tells the two modes apart by the file's length. Under 2 KiB is
   a TOC (streaming); anything else is an ISO image loaded into SDRAM (stock firmware, at
   most 22 MiB). A TOC is only used if its track count is 1–99 and matches its BCD copy,

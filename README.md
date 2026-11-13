@@ -75,6 +75,14 @@ a patch that reads 2048-byte-sector ISOs as well (see [firmware/](firmware/READM
 the unpatched firmware, convert first: `tools/iso2bin.py image.iso` writes `image.bin` and
 `image.cue` (with the sector headers, EDC and ECC of a pressed disc); select the `.cue`.
 
+The handheld firmware in the release zip also reads **CHD** images (`.chd`, version 5, as
+`chdman createcd` makes them, with its default codecs `cdlz`, `cdzl` and `cdfl`, the generic
+`lzma` and `zlib`, or none). A CHD made from a CUE/BIN or an ISO reads sector for sector as
+the image it was made from, CD audio tracks and pregaps included. CHDs compressed with zstd
+(`cdzs`, `zstd`), CHDs that need a parent CHD, and hunks larger than chdman's default 8
+frames are refused. See
+[firmware/](firmware/README.md#chd-images).
+
 Stock firmware cannot stream: it loads the selected file into SDRAM at startup, so only
 `.iso` images (2048-byte sectors) of up to 22 MiB work there. `tools/cue2iso.py
 image.cue` converts a CUE/BIN and tells you whether it fits. Commercial discs (100–650 MB)

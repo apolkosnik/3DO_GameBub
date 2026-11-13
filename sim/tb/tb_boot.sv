@@ -33,6 +33,8 @@
 //           +frame_every=<n> (default 10), +out=<dir> (default build/sim),
 //           +vram_watch=<row>, +sport_ms=<n>, +rt_log_ms=<n>, +pad_ctl=<file> (buttons
 //           pressed while it runs, see pad_btn), +frame_log, +frames_from=<n> +frames_to=<m>
+//           +dsp_trace_from_ms=<ms> (DSP/DMA trace, see below), +expect_disc_id=<hex> (the
+//           disc-info block's id, raw sector 0 bytes 0x58-0x5B; a TB error if it differs)
 //           (per-frame brightness log, every frame saved in a window; see save_frame)
 //           <out>/audio.raw: the audio output (s16le stereo, 44.1 kHz)
 //
@@ -43,11 +45,13 @@
 
 module tb_boot;
 	string outdir = "build/sim";   // +out=<dir>: frames/, cpu_trace.txt
-	// the directory is made here: a missing one made every $fopen fail
-	// silently (a 5-hour bus-trace run wrote nothing)
+	// the directory and its frames/ subdirectory are made here: a missing
+	// one made every $fopen fail silently (a 5-hour bus-trace run wrote
+	// nothing; a 5.7-hour frame run with only the top directory made saved
+	// no frames)
 	initial begin
 		void'($value$plusargs("out=%s", outdir));
-		void'($system({"mkdir -p ", outdir}));
+		void'($system({"mkdir -p ", outdir, "/frames"}));
 	end
 	reg clk_mem = 0;
 	reg clk_sys = 0;
@@ -398,9 +402,19 @@ module tb_boot;
 			if (sectors_sent <= 40 || sectors_sent % 100 == 0)
 				$display("[%0t] CD sector %0d (%s %0d)", $realtime, sectors_sent, dut.cdd.disc_stream ? "abs lba" : "lba", dut.cdd.disc_stream ? dut.cdd.snd_lba : 32'(dut.cdd.fetch_lba_sys));
 		end
-		if (!dut.cdd_dien && cdd_dien_d)
+		if (!dut.cdd_dien && cdd_dien_d) begin
 			$display("[%0t] CD disc-info block sent (id %08h, lead-out MSF %06h)", $realtime, dut.cdd.disc_id, dut.cdd.disc_msf[31:8]);
+			// +expect_disc_id=<hex>: the id the image's raw sector 0 holds at bytes
+			// 0x58-0x5B (Killing Time (USA): 0A9B739E); a TB error otherwise
+			if (expect_disc_id_set && dut.cdd.disc_id != expect_disc_id) begin
+				$display("[%0t] tb_boot: disc id %08h, expected %08h", $realtime, dut.cdd.disc_id, expect_disc_id);
+				errors++;
+			end
+		end
 	end
+	bit [31:0] expect_disc_id;
+	bit        expect_disc_id_set = 0;
+	initial expect_disc_id_set = $value$plusargs("expect_disc_id=%h", expect_disc_id);
 	// ---------------- CD data check (streamed and preloaded discs) ----------
 	// Every sector the drive back end sends to the CD controller is compared
 	// with the image at the LBA the BIOS asked for. A block of the length the
@@ -1934,6 +1948,91 @@ module tb_boot;
 		end
 	end
 
+	// DSP trace (+dsp_trace_from_ms=<ms>): <out>/dsp_trace.txt in tb_dsp_kt's
+	// log format, so sim/tools/dsp_kt/dspcmp.py compares the full system with
+	// Opera's DSP trace: "T <tick> i<in FIFO counts 0-4> o<out FIFO counts 0-2>"
+	// per audio frame, "S <mclk>" when the program sleeps, "W <addr> <data> <pc>"
+	// per DSP memory write, "R <ei addr> <data> <pc>" per EI read at 0xD0 and
+	// up, "F <ch> <word>" per input FIFO word handed to the DSP; and the DMA:
+	// "D <ch> <word>" a word the DMA put in an input FIFO, "L <ch>" one it lost
+	// (FIFO full), "U <ch>" a DSP read of an empty input FIFO (the held word),
+	// "E <ch> <word>" a word the DMA took from an output FIFO, "O <ch>" a DSP
+	// output write lost (FIFO full), "X <chan> <code>" the bus code 7, 3 or 4
+	// ending a DMA burst, "C M <reg> <val>" a CPU write of a MADAM DMA register
+	// (0x400-0x5FF) and "C C <reg> <val>" a CPU write of CLIO 0x300-0x30C,
+	// 0x1700-0x17FF (DSP control) or 0x1800-0x3FFF (DSP memory).
+	longint dsp_trace_from_ms = -1;
+	int     dt_fd = 0, dt_tick = -1, dt_mclk = 0, dt_lost_in = 0, dt_lost_out = 0, dt_empty_in = 0;
+	bit     dt_slept = 0, dt_audws_d = 0, dt_ei_oe_d = 0;
+	initial void'($value$plusargs("dsp_trace_from_ms=%d", dsp_trace_from_ms));
+	always @(posedge clk_sys) begin
+		if (dsp_trace_from_ms >= 0 && dt_fd == 0 && $time >= dsp_trace_from_ms * 1000000) begin
+			dt_fd = $fopen({outdir, "/dsp_trace.txt"}, "w");
+			$display("[%0t] DSP trace started (%s/dsp_trace.txt)", $realtime, outdir);
+		end
+		if (dt_fd != 0 && dut.p3do.clio.EN && dut.p3do.clio.CE_R) begin
+			dt_mclk++;
+			dt_audws_d <= dut.p3do.clio.AUDWS;
+			if (dut.p3do.clio.DSP_EN && dut.p3do.clio.DSP_RESET && dt_audws_d) begin
+				dt_tick++;
+				dt_mclk = 0;
+				dt_slept = 0;
+				$fdisplay(dt_fd, "T %0d i%0d,%0d,%0d,%0d,%0d o%0d,%0d,%0d", dt_tick,
+				          dut.p3do.clio.EIFIFO_COUNT[0], dut.p3do.clio.EIFIFO_COUNT[1], dut.p3do.clio.EIFIFO_COUNT[2],
+				          dut.p3do.clio.EIFIFO_COUNT[3], dut.p3do.clio.EIFIFO_COUNT[4],
+				          dut.p3do.clio.EOFIFO_COUNT[0], dut.p3do.clio.EOFIFO_COUNT[1], dut.p3do.clio.EOFIFO_COUNT[2]);
+			end
+			if (dut.p3do.clio.DSP_EN && dut.p3do.clio.DSP.SLEEP && !dt_slept && dt_mclk > 4) begin
+				dt_slept = 1;
+				$fdisplay(dt_fd, "S %0d", dt_mclk);
+			end
+			if (dut.p3do.clio.DSP_EN && dut.p3do.clio.DSP.WREN && dut.p3do.clio.DSP.WRADDR >= 10'h100)
+				$fdisplay(dt_fd, "W %03x %04x %03x", dut.p3do.clio.DSP.WRADDR, dut.p3do.clio.DSP.WRDATA, dut.p3do.clio.DSP_PC);
+			dt_ei_oe_d <= dut.p3do.clio.DSP.EI_OE;
+			if (dut.p3do.clio.DSP_EN && dut.p3do.clio.DSP.EI_OE && !dt_ei_oe_d) begin
+				if (dut.p3do.clio.DSP.EI_ADDR >= 8'hD0)
+					$fdisplay(dt_fd, "R %02x %04x %03x", dut.p3do.clio.DSP.EI_ADDR, dut.p3do.clio.DSP_EI_DATA, dut.p3do.clio.DSP_PC);
+				if (dut.p3do.clio.DSP.EI_ADDR >= 8'hF0 && dut.p3do.clio.DSP.EI_ADDR <= 8'hF4 &&
+				    dut.p3do.clio.EIFIFO_COUNT[dut.p3do.clio.DSP.EI_ADDR[3:0]] == 4'd0 &&
+				    !dut.p3do.clio.EIFIFO_SUPPLY[dut.p3do.clio.DSP.EI_ADDR[3:0]]) begin
+					dt_empty_in++;
+					$fdisplay(dt_fd, "U %0d", dut.p3do.clio.DSP.EI_ADDR[3:0]);
+				end
+			end
+			if (dut.p3do.clio.EIFIFO0.RD_OK) $fdisplay(dt_fd, "F 0 %04x", dut.p3do.clio.EIFIFO_Q[0]);
+			if (dut.p3do.clio.EIFIFO1.RD_OK) $fdisplay(dt_fd, "F 1 %04x", dut.p3do.clio.EIFIFO_Q[1]);
+			if (dut.p3do.clio.EIFIFO2.RD_OK) $fdisplay(dt_fd, "F 2 %04x", dut.p3do.clio.EIFIFO_Q[2]);
+			if (dut.p3do.clio.EIFIFO3.RD_OK) $fdisplay(dt_fd, "F 3 %04x", dut.p3do.clio.EIFIFO_Q[3]);
+			if (dut.p3do.clio.EIFIFO4.RD_OK) $fdisplay(dt_fd, "F 4 %04x", dut.p3do.clio.EIFIFO_Q[4]);
+			for (int ch = 0; ch < 5; ch++)
+				if (dut.p3do.clio.EIFIFO_WRREQ[ch] && dut.p3do.clio.IO_EN) begin
+					$fdisplay(dt_fd, "D %0d %04x", ch, dut.p3do.clio.EIFIFO_DATA);
+					if (dut.p3do.clio.EIFIFO_COUNT[ch] == 4'd8) begin dt_lost_in++; $fdisplay(dt_fd, "L %0d", ch); end
+				end
+			for (int ch = 0; ch < 3; ch++)
+				if (dut.p3do.clio.EOFIFO_RDREQ[ch] && dut.p3do.clio.IO_EN)
+					$fdisplay(dt_fd, "E %0d %04x", ch, dut.p3do.clio.EOFIFO_Q[ch]);
+			if (dut.p3do.clio.DSP_EN && dut.p3do.clio.EOFIFO0_WE && !dut.p3do.clio.EOFIFO0.WR_OK) begin dt_lost_out++; $fdisplay(dt_fd, "O 0"); end
+			if (dut.p3do.clio.DSP_EN && dut.p3do.clio.EOFIFO1_WE && !dut.p3do.clio.EOFIFO1.WR_OK) begin dt_lost_out++; $fdisplay(dt_fd, "O 1"); end
+			if (dut.p3do.clio.DSP_EN && dut.p3do.clio.EOFIFO2_WE && !dut.p3do.clio.EOFIFO2.WR_OK) begin dt_lost_out++; $fdisplay(dt_fd, "O 2"); end
+			if (dut.p3do.clio.IO_EN && (dut.p3do.clio.CLC == 3'h7 || dut.p3do.clio.CLC == 3'h3 || dut.p3do.clio.CLC == 3'h4) &&
+			    dut.p3do.clio.DMA_ST.name() != "DMA_IDLE")
+				$fdisplay(dt_fd, "X %02x %0d", dut.p3do.clio.DMA_CHAN, dut.p3do.clio.CLC);
+		end
+		if (dt_fd != 0 && dut.p3do.MCLK_PH2 && !dut.p3do.CPU_nMREQ && dut.p3do.CPU_nRW) begin
+			if (dut.p3do.CPU_A >= 32'h03300400 && dut.p3do.CPU_A <= 32'h033005FF)
+				$fdisplay(dt_fd, "C M %03x %08x", dut.p3do.CPU_A[11:0], dut.p3do.CPU_DO);
+			else if ((dut.p3do.CPU_A >= 32'h03400300 && dut.p3do.CPU_A <= 32'h0340030C) ||
+			         (dut.p3do.CPU_A >= 32'h03401700 && dut.p3do.CPU_A <= 32'h03403FFF))
+				$fdisplay(dt_fd, "C C %04x %08x", dut.p3do.CPU_A[15:0], dut.p3do.CPU_DO);
+		end
+	end
+	final if (dt_fd != 0) begin
+		$fclose(dt_fd);
+		$display("tb_boot: DSP trace: %0d ticks, input FIFO words lost %0d, empty input FIFO reads %0d, output FIFO words lost %0d",
+		         dt_tick + 1, dt_lost_in, dt_empty_in, dt_lost_out);
+	end
+
 	// framework video -> PPM frames
 	bit [17:0] fb [320*240];
 	int px = 0, ln = 0, frames = 0, frame_every;
@@ -1979,11 +2078,16 @@ module tb_boot;
 		$fflush(flog_fd);
 		fl_fb_seen = 0;
 	endtask
+	bit save_fail_said = 0;
 	task automatic save_frame(input int n);
 		int fd;
 		bit any;
 		fd = $fopen($sformatf("%s/frames/frame_%04d.ppm", outdir, n), "wb");
-		if (fd == 0) return;
+		if (fd == 0) begin
+			if (!save_fail_said) $display("[%0t] tb_boot: cannot open %s/frames/frame_%04d.ppm, frames are not saved", $realtime, outdir, n);
+			save_fail_said = 1;
+			return;
+		end
 		$fwrite(fd, "P6\n320 240\n255\n");
 		any = 0;
 		for (int i = 0; i < 320*240; i++) begin

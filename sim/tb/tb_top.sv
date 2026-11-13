@@ -168,6 +168,8 @@ module tb_top;
 	int        rom_len;
 	bit [7:0]  iso [int];
 	int        iso_len;
+	bit [31:0] disc_id_arg;                 // +disc_id: the ISO's volume unique identifier
+	bit        disc_id_set = 0;
 
 	function automatic [31:0] host_word(input [7:0] b0, input [7:0] b1, input [7:0] b2, input [7:0] b3);
 		host_word = host_be ? {b0, b1, b2, b3} : {b3, b2, b1, b0};
@@ -337,6 +339,40 @@ module tb_top;
 			end
 			audio_last = $realtime;
 			audio_last_lba = int'(dut.cdd.snd_lba);
+		end
+	end
+
+	// The disc-info block (cdd_emu -> 3DO_CDROM while CDD_DIEN): bytes
+	// 0x400-0x47F are the first 128 bytes of the RAW sector 0 (MiSTer's
+	// GetDiscInfo copies them from the raw sector, and 3DO.sv takes the
+	// per-game table key from 0x458-0x45B = raw bytes 0x58-0x5B, the volume
+	// unique identifier at user bytes 0x48-0x4B). Streamed: the sector's sync
+	// and header, then the user data; preloaded ISO: 16 zero bytes, then the
+	// user data. The port put the user data at 0x400, so the key came out 16
+	// bytes off (Killing Time's 0A9B739E read 00000001 and its DSP-pause
+	// entry never applied).
+	bit [15:0] info_words [int];
+	int        info_n = 0, info_blocks = 0;
+	bit        cdd_dien_d = 0;
+	function automatic [7:0] info_raw_byte(input int i);   // raw sector 0 byte i as the block carries it
+		if (stream_mode) return raw_byte(150, i);
+		return i < 16 ? 8'h00 : iso[i - 16];
+	endfunction
+	always @(posedge clk_sys) begin
+		cdd_dien_d <= dut.cdd_dien;
+		if (dut.cdd_dien && !cdd_dien_d) info_n = 0;
+		if (dut.cdd_dien && dut.cdd_wr) info_words[info_n++] = dut.cdd_data;
+		if (!dut.cdd_dien && cdd_dien_d) begin
+			info_blocks++;
+			if (info_n != 1024) fail($sformatf("disc-info block of %0d words, expected 1024", info_n));
+			for (int k = 0; k < 64; k++)
+				if (info_words[512 + k] != {info_raw_byte(2 * k + 1), info_raw_byte(2 * k)})
+					fail($sformatf("disc-info bytes 0x%03x-0x%03x: %02h %02h, expected raw sector 0 bytes %0d,%0d = %02h %02h",
+					               16'h400 + 2 * k, 16'h401 + 2 * k, info_words[512 + k][7:0], info_words[512 + k][15:8],
+					               2 * k, 2 * k + 1, info_raw_byte(2 * k), info_raw_byte(2 * k + 1)));
+			if (dut.disc_id != {iso[72], iso[73], iso[74], iso[75]})
+				fail($sformatf("disc id %08h, expected %02h%02h%02h%02h (user bytes 0x48-0x4B)", dut.disc_id, iso[72], iso[73], iso[74], iso[75]));
+			$display("[%0t] disc-info block %0d: id %08h", $realtime, info_blocks, dut.disc_id);
 		end
 	end
 
@@ -514,6 +550,12 @@ module tb_top;
 		iso_len = 4 * 2048;
 		for (int i = 0; i < iso_len; i++) iso[i] = 8'((i * 7 + (i >> 11)) & 8'hFF);
 		iso[0] = 8'h01; iso[1] = 8'h5A; iso[2] = 8'h5A; iso[3] = 8'h5A; iso[4] = 8'h5A; iso[5] = 8'h5A; iso[6] = 8'h01;
+		// +disc_id=<hex>: the volume unique identifier (user bytes 0x48-0x4B,
+		// MiSTer's per-game table key); 0A9B739E is Killing Time's
+		if ($value$plusargs("disc_id=%h", disc_id_arg)) begin
+			{iso[72], iso[73], iso[74], iso[75]} = disc_id_arg;
+			disc_id_set = 1;
+		end
 
 		repeat (20) @(posedge clk_sys);
 		reset <= 0;
@@ -663,6 +705,11 @@ module tb_top;
 			if (audio_secs != 5 || audio_gaps_1x != 2 || audio_gaps_2x != 1)
 				fail("CD-DA: expected 5 audio sectors, 2 gaps at 1x (the second across a READ that continues the stream), 1 at 2x");
 		end
+		// the disc-info block and the id the per-game table (p3do_gamebub) is keyed on
+		if (info_blocks == 0) fail("no disc-info block was sent");
+		if (disc_id_set && dut.disc_id != disc_id_arg)
+			fail($sformatf("disc id %08h, expected the +disc_id %08h", dut.disc_id, disc_id_arg));
+		$display("tb_top: disc id %08h", dut.disc_id);
 		// test ROM test 4 writes VRAM 0x2A0400 (block A: in the SRAM unless it is off)
 		if (sram_mode != 2 && sram.writes == 0) fail("no VRAM write reached the SRAM");
 		if (sram_mode == 2 && sram.writes != 0) fail("VRAM writes reached the SRAM with it off");

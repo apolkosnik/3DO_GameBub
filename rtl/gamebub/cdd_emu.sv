@@ -8,7 +8,10 @@
 // SDRAM by the host, and this module does what the HPS code did:
 //
 //  * on disc insertion, send the 2 KiB disc-info block (CDD_DIEN): disc type,
-//    track list in binary MSF, and the first 128 bytes of sector 0;
+//    track list in binary MSF, and at 0x400 the first 128 bytes of the RAW
+//    sector 0 (sync and header included, as GetDiscInfo copies them; the
+//    per-game table key is raw bytes 0x58-0x5B = user bytes 0x48-0x4B, the
+//    volume unique identifier; a preloaded ISO has no header: zeros there);
 //  * READ (0x10) / NEXT (0x20) requests from the controller: send one sector
 //    per request (CDD_DTEN), blk_len bytes as words + 1 checksum word, LBA =
 //    cmd-150, one sector every SECTOR_DELAY system clocks (MiSTer: one per
@@ -72,7 +75,7 @@ module cdd_emu (
 	output reg         core_req,         // HostV0 commandCore
 	input              core_done,
 	input              core_error,
-	output reg [31: 0] disc_id,          // bytes 0x58..0x5B of sector 0 (MiSTer hack table key)
+	output reg [31: 0] disc_id,          // raw sector 0 bytes 0x58..0x5B = user bytes 0x48..0x4B (MiSTer hack table key)
 	output reg [31: 0] disc_msf,         // bytes 4..7 of the info block
 	output reg         disc_info_valid,
 
@@ -456,7 +459,7 @@ module cdd_emu (
 				endcase
 			end
 		end
-		else if (k >= 10'd512 && k < 10'd576) info_word_toc = sw;              // sector 0, bytes 0..127
+		else if (k >= 10'd512 && k < 10'd576) info_word_toc = sw;              // raw sector 0, bytes 0..127
 	endfunction
 
 	// MSF of an absolute LBA (binary, like LBAToMSF in 3docdd.cpp)
@@ -630,16 +633,25 @@ module cdd_emu (
 				end
 
 				C_INFO_SEND: begin
-					// one word every two cycles; sector-0 data comes from sbuf
+					// one word every two cycles. Info bytes 0x400-0x47F are the RAW
+					// sector 0's bytes 0-127 (3docdd.cpp GetDiscInfo copies cd_buf, the
+					// raw sector; 3DO.sv takes the game id from info bytes 0x458-0x45B
+					// = raw bytes 0x58-0x5B): raw halfword j = widx - 0x200 is in the
+					// ring's raw 32-bit word j / 2 (streaming), or user halfword j - 8
+					// of the preloaded ISO (it has no sync/header: those 16 bytes read
+					// as zeros). Putting the user data at 0x400 shifted the id by 16
+					// bytes (Killing Time read 00000001, not 0A9B739E), so no entry of
+					// the per-game table (p3do_gamebub) ever matched.
 					rd_phase <= (rd_phase == 2'd2) ? 2'd0 : rd_phase + 1'd1;
 					if (rd_phase == 2'd0) begin
-						sbuf_ra <= (widx >= 11'h200 && widx < 11'h240) ? cdda(10'(widx - 11'h200), host_le) : 10'd0;
-						sbr_ra  <= rd_base + 13'(user_addr(10'(widx - 11'h200)));
+						sbuf_ra <= (widx >= 11'h208 && widx < 11'h240) ? cdda(10'(widx - 11'h208), host_le) : 10'd0;
+						sbr_ra  <= rd_base + ((widx >= 11'h200 && widx < 11'h240) ? 13'(widx[5:0] >> 1) : 13'd0);
 						// TOC word of the track entry this info word belongs to
 						toc_ra  <= (8'(widx[9:3]) - 8'd1 >= toc_tracks) ? 9'd2 : 9'(7 + 4 * (widx[9:3] - 1));
 					end else if (rd_phase == 2'd2) begin
 						bit [15:0] cw;
-						cw = disc_stream ? (zero_sector ? 16'h0000 : user_word(sbr_q, widx[0])) : cddw(sbuf_q, host_le);
+						cw = disc_stream ? (zero_sector ? 16'h0000 : user_word(sbr_q, widx[0])) :
+						     (widx >= 11'h200 && widx < 11'h208) ? 16'h0000 : cddw(sbuf_q, host_le);
 						if (disc_stream)
 							CDD_DATA <= info_word_toc(widx[9:0], toc_tracks, toc_leadout_bcd,
 							                          (8'(widx[9:3]) - 8'd1 >= toc_tracks) ? {8'h00, toc_leadout_bcd} : toc_q, cw);
@@ -647,8 +659,8 @@ module cdd_emu (
 							CDD_DATA <= {info_byte({widx[9:0], 1'b1}, leadout_msf, cw),
 							             info_byte({widx[9:0], 1'b0}, leadout_msf, cw)};
 						CDD_WR   <= 1;
-						if (widx == 11'h22C) disc_id[31:16] <= {cw[7:0], cw[15:8]};   // sector0 bytes 0x58,0x59
-						if (widx == 11'h22D) disc_id[15: 0] <= {cw[7:0], cw[15:8]};   // sector0 bytes 0x5A,0x5B
+						if (widx == 11'h22C) disc_id[31:16] <= {cw[7:0], cw[15:8]};   // raw sector 0 bytes 0x58,0x59 (user 0x48,0x49)
+						if (widx == 11'h22D) disc_id[15: 0] <= {cw[7:0], cw[15:8]};   // raw bytes 0x5A,0x5B (user 0x4A,0x4B)
 						widx <= widx + 1'd1;
 						if (widx == 11'h3FF) cst <= C_INFO_END;
 					end

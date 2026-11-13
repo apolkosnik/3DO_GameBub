@@ -383,6 +383,21 @@ Two causes:
   lines came out late in `tb_top`). Only the CPU's own transfers count: counting the
   line's video transfer as well kept copies out of the short gap the safe SRAM timing
   leaves them, one transfer in about 16 lines.
+* **Disc id for the per-game table.** MiSTer's 3DO.sv keys its per-game VRAM layout
+  table (and its DSP-pause list, see the CLIO list below) on the disc label's volume
+  unique identifier, which it takes from the disc-info block the HPS sends on insertion:
+  bytes 0x400-0x47F of that block are the first 128 bytes of the *raw* sector 0
+  (3docdd.cpp `GetDiscInfo`), and the id is at 0x458-0x45B, raw bytes 0x58-0x5B = user
+  bytes 0x48-0x4B. `cdd_emu.sv` put the user data at 0x400, so the id came out 16 bytes
+  off (Killing Time's `0A9B739E` read `00000001`) and no table entry ever matched: Alone
+  in the Dark, Psychic Detective, Quarantine, Seal of the Pharaoh, Space Hulk,
+  Bodyconscious Digital Rave and Live! 3DO Magazine ran with the default VRAM layout. The
+  block now carries the raw sector's first 128 bytes: streamed, the sector's sync and
+  header then its data; preloaded ISO, 16 zero bytes then the data. `tb_top` compares the
+  block's 128 bytes with the image and the id with the ISO's bytes 0x48-0x4B in every run
+  (`+disc_id=<hex>` puts another id into the test ISO); `tb_boot +expect_disc_id=<hex>`
+  checks the id a real image gives. MiSTer's DSP-pause entries (Blade Force, Decathlon,
+  Killing Time, Snow Job, BattleSport) are not applied here: see the CLIO list.
 * **CPU VRAM writes during fills.** A game decoding video (Killing Time's EZFlix intro:
   ~50k CPU VRAM accesses a picture, 12 pictures a second) writes VRAM all the time.
   A random VRAM access issued while the read-transfer cache fills a half-row waited in
@@ -610,6 +625,24 @@ of the test BIOS makes them from the CPU (see *Simulation*).
   shifted by one, and the whole intro came out embossed with wrong symbols. Each read
   also took the FIFO's next word even when it had none, so a drained sample read as a
   stale RAM word.
+* The DSP's output FIFOs hold 64 words (the hardware's 8), and a DMA from one is
+  requested whenever six words wait in it (MADAM takes three 32-bit words per burst), not
+  only in the clock after a DSP write that leaves six. A DSP write to a full output FIFO is
+  lost, and the port pauses the 3DO for its slow memory (the SDRAM: every uncached DRAM
+  access, a VRAM fill, a secondary-port transfer): MADAM and CLIO's DMA side stop while
+  the DSP runs on at its 44.1 kHz frame rate. Killing Time's EZFlix decoder writes 8
+  output words per audio frame per channel, so the 8-word FIFOs overflowed in every pause
+  longer than the two words of room left after a request, and the decoded pictures came
+  out smeared although the DSP itself computed them right (the lockstep harness, which
+  serves the DMA at once, matched Opera). MiSTer's answer, pausing the DSP with the 3DO
+  for that game and four others (3DO.sv `NEED_DSP_PAUSE`), fits its rare DDR3 pauses, not
+  this port's: tried here (build a23, once the disc id matched the table), the DSP fell
+  behind its frames, the audio was badly corrupted and the pictures still wrong (a decoder
+  counting DSP frames loses data with them). So the DSP is never paused here, and the
+  deeper FIFO holds a pause's worth of output; a late burst then drains the backlog one
+  request per burst. Confirmed on hardware (build a24): Killing Time's intro plays clean,
+  with normal audio. The DSP's output FIFO status (0xE0-0xE3) saturates at 15; the CPU's
+  0x3C0-0x3CC read the full count.
 * A DSP read of a data word an instruction writes in the same clock gets the new word:
   the MOVE's, or an ALU result whose write waits for the memory port behind a MOVE's
   write. Killing Time's DSP program increments its interrupt counter (ADD [108] + 1),
@@ -684,11 +717,18 @@ transfer to memory with no next buffer.
 and a DMA refill, and the FIFO modules against a reference queue (before the timer and
 interrupt fixes 30 of 63 checks fail; before the FIFO and DSP fixes 4,886 of 5,729;
 before the DSP core, empty-FIFO and frame fixes 46 of 5,788; before the input FIFO
-head and same-clock read fixes 9 of 5,867), and test 10 of the test BIOS from the CPU.
-Its sections 8 and 9 check the shifts and the expansion bus control (the testbench
-takes the expansion DMA's words as MADAM does), 6c the input FIFO head word and 7g the
-same-clock read, through both address ranges of the data memory (its 256 words are at
-0x100-0x1FF and again at 0x200-0x2FF).
+head and same-clock read fixes 9 of 5,867; before the 64-word output FIFOs 13 of
+5,894), and test 10 of the test BIOS from the CPU. Its sections 8 and 9 check the shifts
+and the expansion bus control (the testbench takes the expansion DMA's words as MADAM
+does), 6c the input FIFO head word and 7g the same-clock read, through both address
+ranges of the data memory (its 256 words are at 0x100-0x1FF and again at 0x200-0x2FF),
+5b the output FIFO depth (40 words written with the DMA off all wait, the status reads
+40, with the DMA on they come out six per burst with one request per burst and no
+further DSP write, and the DSP's flush (0x3FD) requests the rest), and 5c a pause of
+the 3DO while the DSP runs on: a Killing Time-like run of 24 output words with the 3DO
+paused (IO_EN low) for 800 MCLKs at the first DMA request finishes during the pause, all
+24 words wait, and come out in four bursts after it, each requested as six words remain
+(the flush, issued while the first request was pending, is ignored, as in the original).
 
 `tb_dsp_kt` runs the real CLIO on a game's DSP program with the I memory, the input
 FIFO words and the CPU's writes (DSP memory, FIFO resets, DMA enables) of an
@@ -696,7 +736,17 @@ instrumented Opera run, playing MADAM for the DMA (buffer ends included), and lo
 DSP's writes and FIFO reads tick by tick for a comparison with Opera's per-instruction
 trace. With Killing Time's intro program (9,560 ticks, two symbol-table reloads) every
 tick's writes now match Opera's; before the fixes the first FIFO read of every tick
-was a word late. The trace files are not in the repository (they hold the game's code).
+was a word late. `+dma_lat=<n>` serves every DMA request n MCLKs late and
+`+dma_hold=<n> +dma_hold_every=<m>` holds every m-th one n MCLKs more (a pause of the
+3DO); the harness fails when a DSP output write is lost on a full FIFO. It serves one
+request at a time, so the latency loads the bus for every channel of the game's traffic
+(three output and four input channels a frame): with the hardware's 8-word output FIFOs
+nothing is lost at 10 MCLKs, 12 words at 20, 4,302 at 40, and 9,020 with
+`+dma_lat=40 +dma_hold=300 +dma_hold_every=16`; the 64-word FIFOs lose nothing in any of
+these. The suite runs `+dma_lat=10` and the hold configuration; the output matches
+Opera's in both. The whole-system simulation (`tb_boot +dsp_trace_from_ms`, whose trace
+counts the lost output words) is where the real MADAM's timing shows. The trace files
+are not in the repository (they hold the game's code).
 
 **Matrix engine (fix to `MADAM.sv`).** MADAM's matrix multiply summed signed products in
 an expression made unsigned by an unsigned `'0` (SystemVerilog takes the signedness of
@@ -996,11 +1046,15 @@ sim/run_tb.sh tb_lightgun      # the light gun (count, buttons, off screen; NTSC
 sim/run_tb.sh tb_dsp_kt +nmem=... +imem=... +fifo=... +cpu=... +ticks=N +log=...
                                # the CLIO DSP on a game's program and input from an instrumented Opera
                                # run (see the CLIO section), for a tick-by-tick comparison with Opera;
+                               # +dma_lat / +dma_hold make MADAM late (lost output words fail the run);
+                               # the suite also runs +dma_lat=10 and +dma_lat=40 +dma_hold=300 +dma_hold_every=16
                                # the Opera patch and the scripts are in sim/tools/dsp_kt/
 sim/run_tb.sh tb_clio          # CLIO interrupt summary, timer cascade, timer controls, TimerSlack,
                                # DSP output memory and FIFO status, FIFOs (DSP reads during DMA refills),
                                # DSP instructions without operands, frame start state, empty input FIFOs,
                                # the input FIFO head word (CPU's, then the FIFO's), same-clock reads,
+                               # the 64-word output FIFOs drained by the DMA (a request per burst, flush),
+                               # a pause of the 3DO while the DSP runs on,
                                # frame reload value, audio lock, shifts with operand control,
                                # XBUS control read-back and DMA reset flush, indirect operands,
                                # CSTAT writes, ADBIO read-back

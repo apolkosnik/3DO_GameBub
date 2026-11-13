@@ -328,10 +328,16 @@ module CLIO
 				if (EIFIFO_OE_LATCH[11] && EIFIFO_COUNT[11] < 4'd2 && !DMA_TO_DSP_PEND[11]) DMA_TO_DSP_PEND[11] <= 1;
 				if (EIFIFO_OE_LATCH[12] && EIFIFO_COUNT[12] < 4'd2 && !DMA_TO_DSP_PEND[12]) DMA_TO_DSP_PEND[12] <= 1;
 				
-				if (EOFIFO_WE_LATCH[0] && EOFIFO_COUNT[0] >= 4'd6 && !DMA_FROM_DSP_PEND[0]) DMA_FROM_DSP_PEND[0] <= 1;
-				if (EOFIFO_WE_LATCH[1] && EOFIFO_COUNT[1] >= 4'd6 && !DMA_FROM_DSP_PEND[1]) DMA_FROM_DSP_PEND[1] <= 1;
-				if (EOFIFO_WE_LATCH[2] && EOFIFO_COUNT[2] >= 4'd6 && !DMA_FROM_DSP_PEND[2]) DMA_FROM_DSP_PEND[2] <= 1;
-				if (EOFIFO_WE_LATCH[3] && EOFIFO_COUNT[3] >= 4'd6 && !DMA_FROM_DSP_PEND[3]) DMA_FROM_DSP_PEND[3] <= 1;
+				// Game Bub port: a DMA from an output FIFO is requested whenever six
+				// words wait in it (MADAM takes three 32-bit words per burst), not
+				// only in the clock after a DSP write that leaves six: after a pause
+				// of the 3DO (the DSP ran on, see the 64-word FIFOs below) the
+				// backlog drains with one request per burst, and words that wait
+				// while the DSP is stopped come out without a further DSP write
+				if (EOFIFO_COUNT[0] >= 7'd6 && !DMA_FROM_DSP_PEND[0]) DMA_FROM_DSP_PEND[0] <= 1;
+				if (EOFIFO_COUNT[1] >= 7'd6 && !DMA_FROM_DSP_PEND[1]) DMA_FROM_DSP_PEND[1] <= 1;
+				if (EOFIFO_COUNT[2] >= 7'd6 && !DMA_FROM_DSP_PEND[2]) DMA_FROM_DSP_PEND[2] <= 1;
+				if (EOFIFO_COUNT[3] >= 7'd6 && !DMA_FROM_DSP_PEND[3]) DMA_FROM_DSP_PEND[3] <= 1;
 				
 				if (EOFIFO_FLUSH[0] && EOFIFO_COUNT[0] && !DMA_FROM_DSP_PEND[0]) DMA_FROM_DSP_PEND[0] <= 1;
 				if (EOFIFO_FLUSH[1] && EOFIFO_COUNT[1] && !DMA_FROM_DSP_PEND[1]) DMA_FROM_DSP_PEND[1] <= 1;
@@ -1015,10 +1021,10 @@ module CLIO
 				// Game Bub port: 0x3C0-0x3CC are the DSPP -> DMA (output) FIFOs'
 				// status (Portfolio clio.h clio_FIFOStatusDSPPtoDMA); the
 				// original returned input FIFOs 0-3 again
-				8'hC0: CPU_DO <= {28'h0000000,EOFIFO_COUNT[ 0]};
-				8'hC4: CPU_DO <= {28'h0000000,EOFIFO_COUNT[ 1]};
-				8'hC8: CPU_DO <= {28'h0000000,EOFIFO_COUNT[ 2]};
-				8'hCC: CPU_DO <= {28'h0000000,EOFIFO_COUNT[ 3]};
+				8'hC0: CPU_DO <= {25'h0,EOFIFO_COUNT[ 0]};
+				8'hC4: CPU_DO <= {25'h0,EOFIFO_COUNT[ 1]};
+				8'hC8: CPU_DO <= {25'h0,EOFIFO_COUNT[ 2]};
+				8'hCC: CPU_DO <= {25'h0,EOFIFO_COUNT[ 3]};
 				default: CPU_DO <= '0;
 			endcase
 		else if (XBUS_SEL)
@@ -1407,25 +1413,35 @@ module CLIO
 												(DMA_FROM_DSP_READ[1] || DMA_FROM_DSP_READ[0]) && DMA_CHAN[3:0] == 4'h2,
 												(DMA_FROM_DSP_READ[1] || DMA_FROM_DSP_READ[0]) && DMA_CHAN[3:0] == 4'h3};
 	bit  [15: 0] EOFIFO_Q[4];
-	bit  [ 3: 0] EOFIFO_COUNT[4];
-	CLIO_DSP_FIFO EOFIFO0 (.CLK(CLK), .EN(EN), .RST(FIFOINIT[16]), .DATA(DSP_EO_DATA), .WRREQ(EOFIFO0_WE & DSP_EN & CE_R), .RDREQ(EOFIFO_RDREQ[0] & IO_EN & CE_R), .Q(EOFIFO_Q[0]), .COUNT(EOFIFO_COUNT[0]));
-	CLIO_DSP_FIFO EOFIFO1 (.CLK(CLK), .EN(EN), .RST(FIFOINIT[17]), .DATA(DSP_EO_DATA), .WRREQ(EOFIFO1_WE & DSP_EN & CE_R), .RDREQ(EOFIFO_RDREQ[1] & IO_EN & CE_R), .Q(EOFIFO_Q[1]), .COUNT(EOFIFO_COUNT[1]));
-	CLIO_DSP_FIFO EOFIFO2 (.CLK(CLK), .EN(EN), .RST(FIFOINIT[18]), .DATA(DSP_EO_DATA), .WRREQ(EOFIFO2_WE & DSP_EN & CE_R), .RDREQ(EOFIFO_RDREQ[2] & IO_EN & CE_R), .Q(EOFIFO_Q[2]), .COUNT(EOFIFO_COUNT[2]));
-	CLIO_DSP_FIFO EOFIFO3 (.CLK(CLK), .EN(EN), .RST(FIFOINIT[19]), .DATA(DSP_EO_DATA), .WRREQ(EOFIFO3_WE & DSP_EN & CE_R), .RDREQ(EOFIFO_RDREQ[3] & IO_EN & CE_R), .Q(EOFIFO_Q[3]), .COUNT(EOFIFO_COUNT[3]));
-	wire [ 3: 0] EOFIFO_STAT[4] = '{{EOFIFO_COUNT[0]},
-	                                {EOFIFO_COUNT[1]},
-											  {EOFIFO_COUNT[2]},
-											  {EOFIFO_COUNT[3]}};
+	// Game Bub port: the output FIFOs are 64 words deep (the hardware's 8).
+	// The port pauses the 3DO for its slow memory (p3do_gamebub `pause`:
+	// MADAM and this DMA stop, IO_EN low) while the DSP runs on at its audio
+	// frame rate, and a DSP write to a full FIFO is lost: Killing Time's
+	// EZFlix decoder (8 output words per audio frame per channel, DMA bursts
+	// of 6) lost words in every pause longer than the two words of room left
+	// after a request, smearing the intro's pictures. Pausing the DSP with
+	// the 3DO (MiSTer's NEED_DSP_PAUSE) is no answer on this port: paused as
+	// much as the 3DO is here, it falls behind its 44.1 kHz frames (build a23
+	// on hardware: audio badly corrupted, pictures still wrong). The deeper
+	// FIFO holds a pause's worth of output; the DSP-visible status (0xE0-0xE3)
+	// saturates at 15, the CPU's 0x3C0-0x3CC read the full count.
+	bit  [ 6: 0] EOFIFO_COUNT[4];
+	CLIO_DSP_FIFO #(.DEPTH_BITS(6)) EOFIFO0 (.CLK(CLK), .EN(EN), .RST(FIFOINIT[16]), .DATA(DSP_EO_DATA), .WRREQ(EOFIFO0_WE & DSP_EN & CE_R), .RDREQ(EOFIFO_RDREQ[0] & IO_EN & CE_R), .Q(EOFIFO_Q[0]), .COUNT(EOFIFO_COUNT[0]));
+	CLIO_DSP_FIFO #(.DEPTH_BITS(6)) EOFIFO1 (.CLK(CLK), .EN(EN), .RST(FIFOINIT[17]), .DATA(DSP_EO_DATA), .WRREQ(EOFIFO1_WE & DSP_EN & CE_R), .RDREQ(EOFIFO_RDREQ[1] & IO_EN & CE_R), .Q(EOFIFO_Q[1]), .COUNT(EOFIFO_COUNT[1]));
+	CLIO_DSP_FIFO #(.DEPTH_BITS(6)) EOFIFO2 (.CLK(CLK), .EN(EN), .RST(FIFOINIT[18]), .DATA(DSP_EO_DATA), .WRREQ(EOFIFO2_WE & DSP_EN & CE_R), .RDREQ(EOFIFO_RDREQ[2] & IO_EN & CE_R), .Q(EOFIFO_Q[2]), .COUNT(EOFIFO_COUNT[2]));
+	CLIO_DSP_FIFO #(.DEPTH_BITS(6)) EOFIFO3 (.CLK(CLK), .EN(EN), .RST(FIFOINIT[19]), .DATA(DSP_EO_DATA), .WRREQ(EOFIFO3_WE & DSP_EN & CE_R), .RDREQ(EOFIFO_RDREQ[3] & IO_EN & CE_R), .Q(EOFIFO_Q[3]), .COUNT(EOFIFO_COUNT[3]));
+	wire [ 3: 0] EOFIFO_STAT[4] = '{EOFIFO_COUNT[0] > 7'd15 ? 4'hF : EOFIFO_COUNT[0][3:0],
+	                                EOFIFO_COUNT[1] > 7'd15 ? 4'hF : EOFIFO_COUNT[1][3:0],
+	                                EOFIFO_COUNT[2] > 7'd15 ? 4'hF : EOFIFO_COUNT[2][3:0],
+	                                EOFIFO_COUNT[3] > 7'd15 ? 4'hF : EOFIFO_COUNT[3][3:0]};
 											  
 	bit          EIFIFO_OE_LATCH[13];
-	bit          EOFIFO_WE_LATCH[4];
 	wire EIFIFO_BUF_WE = (DSP_ADDR[7:0] >= 9'h070 && DSP_ADDR[7:0] <= 9'h07E && DSP_EIRAM_WE);//0x070-0x07E
 	bit  [15: 0] EIFIFO_BUF[13];
 //	bit          EIFIFO_BUF_EMPTY[13];
 	always @(posedge CLK or negedge RST_N) begin
 		if (!RST_N) begin
 			EIFIFO_OE_LATCH <= '{13{0}};
-			EOFIFO_WE_LATCH <= '{4{0}};
 			EIFIFO_BUF <= '{13{'0}};
 			EIFIFO_SUPPLY <= '{13{0}};
 //			EIFIFO_BUF_EMPTY <= '{13{0}};
@@ -1445,10 +1461,6 @@ module CLIO
 				EIFIFO_OE_LATCH[10] <= EIFIFO10_OE;
 				EIFIFO_OE_LATCH[11] <= EIFIFO11_OE;
 				EIFIFO_OE_LATCH[12] <= EIFIFO12_OE;
-				EOFIFO_WE_LATCH[ 0] <= EOFIFO0_WE;
-				EOFIFO_WE_LATCH[ 1] <= EOFIFO1_WE;
-				EOFIFO_WE_LATCH[ 2] <= EOFIFO2_WE;
-				EOFIFO_WE_LATCH[ 3] <= EOFIFO3_WE;
 				
 				// the word handed over, if the FIFO has one (or gets one now, the
 				// FIFO's bypass): an empty FIFO keeps giving it (DSP_EI_DATA below);

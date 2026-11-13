@@ -79,7 +79,7 @@ module tb_dsp_kt;
 
 	// ---------------- the trace ----------------
 	string      nmem_file, imem_file, fifo_file, cpu_file, log_file;
-	int         n_ticks = 200, period = 576, dma_words = 2, dmaen = 32'h1F;
+	int         n_ticks = 200, period = 576, dma_words = 3, dmaen = 32'h1F;   // 3 words: MADAM's burst
 	bit [15:0]  nmem [512];
 	bit [15:0]  imem [1024];
 	bit [15:0]  fifo_q [13][$];          // input FIFO words still to deliver, per channel
@@ -107,6 +107,9 @@ module tb_dsp_kt;
 		void'($value$plusargs("dmaen=%h", dmaen));
 		void'($value$plusargs("trace_from=%d", trace_from));
 		void'($value$plusargs("trace_to=%d", trace_to));
+		void'($value$plusargs("dma_lat=%d", dma_lat));
+		void'($value$plusargs("dma_hold=%d", dma_hold));
+		void'($value$plusargs("dma_hold_every=%d", dma_hold_every));
 		$readmemh(nmem_file, nmem);
 		$readmemh(imem_file, imem);
 		fd = $fopen(fifo_file, "r");
@@ -153,6 +156,10 @@ module tb_dsp_kt;
 	bit         req_pend = 0;
 	bit [4:0]   req_ch;
 	int         dma_served = 0, dma_starved = 0;
+	int         dma_lat = 0;          // +dma_lat=<n>: MADAM serves every request n MCLKs late (arbitration)
+	int         dma_hold = 0;         // +dma_hold=<n> +dma_hold_every=<m>: every m-th request waits n MCLKs
+	int         dma_hold_every = 0;   //   more (the bus held by a CPU VRAM access or the video DMA)
+	int         lost_out = 0;         // DSP output FIFO writes lost (FIFO full: the DMA was late)
 	always @(posedge clk) if (rst_n && ce_r && dmareq) begin
 		req_pend <= 1;
 		req_ch <= dmach;
@@ -185,9 +192,10 @@ module tb_dsp_kt;
 		if (ended) begin mclk(); #1 clc = 3'h4; end
 		mclk(); #1 clc = 3'h0;
 	endtask
-	// from an output FIFO: two code 2 bus cycles (two FIFO words each), then code 7
+	// from an output FIFO: three code 2 bus cycles (two FIFO words each: MADAM's
+	// burst, EXTPIF BURST_LAST), then code 7
 	task automatic serve_from_dsp();
-		repeat (2) begin
+		repeat (3) begin
 			mclk(); #1 clc = 3'h2;
 			mclk(); #1 clc = 3'h0;
 			mclk(3);
@@ -204,6 +212,8 @@ module tb_dsp_kt;
 			if (req_pend) begin
 				req_pend = 0;
 				dma_served++;
+				if (dma_lat > 0) mclk(dma_lat);
+				if (dma_hold > 0 && dma_hold_every > 0 && dma_served % dma_hold_every == 0) mclk(dma_hold);
 				if (req_ch <= 5'h0C) serve_to_dsp(req_ch[3:0]);
 				else if (req_ch >= 5'h10 && req_ch <= 5'h13) serve_from_dsp();
 				else begin mclk(); #1 clc = 3'h7; mclk(); #1 clc = 3'h0; end
@@ -252,6 +262,9 @@ module tb_dsp_kt;
 		if (dut.EIFIFO2.RD_OK) begin $fdisplay(logf, "F 2 %04x", dut.EIFIFO_Q[2]); if (fifo_in[2].size()) void'(fifo_in[2].pop_front()); end
 		if (dut.EIFIFO3.RD_OK) begin $fdisplay(logf, "F 3 %04x", dut.EIFIFO_Q[3]); if (fifo_in[3].size()) void'(fifo_in[3].pop_front()); end
 		if (dut.EIFIFO4.RD_OK) begin $fdisplay(logf, "F 4 %04x", dut.EIFIFO_Q[4]); if (fifo_in[4].size()) void'(fifo_in[4].pop_front()); end
+		if (dsp_en && dut.EOFIFO0_WE && !dut.EOFIFO0.WR_OK) begin lost_out++; $fdisplay(logf, "O 0"); end
+		if (dsp_en && dut.EOFIFO1_WE && !dut.EOFIFO1.WR_OK) begin lost_out++; $fdisplay(logf, "O 1"); end
+		if (dsp_en && dut.EOFIFO2_WE && !dut.EOFIFO2.WR_OK) begin lost_out++; $fdisplay(logf, "O 2"); end
 	end
 
 	// the audio clock: ACLK_CE pulses so that the audio word strobe (every
@@ -320,7 +333,11 @@ module tb_dsp_kt;
 		run(period);
 		wr(16'h17FC, 32'h0);
 		$fclose(logf);
-		$display("tb_dsp_kt: %0d ticks, %0d DMA transfers, log %s", tick + 1, dma_served, log_file);
-		$finish;
+		$display("tb_dsp_kt: %0d ticks, %0d DMA transfers (served %0d MCLKs late), %0d output FIFO words lost, log %s",
+		         tick + 1, dma_served, dma_lat, lost_out, log_file);
+		// the log is compared with Opera's trace by dspcmp.py; a lost output
+		// word is a failure by itself (the output FIFO was full: a late DMA)
+		if (lost_out == 0 && dma_starved == 0) begin $display("tb_dsp_kt: PASS"); $finish; end
+		else $fatal(1, "tb_dsp_kt: FAIL");
 	end
 endmodule

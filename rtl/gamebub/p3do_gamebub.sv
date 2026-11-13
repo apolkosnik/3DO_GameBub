@@ -273,19 +273,31 @@ module p3do_gamebub #(
 		else if (CE_R) POWER_ON <= 0;
 	end
 
-	// Per-game VRAM layout / DSP pause tables (MiSTer 3DO.sv), keyed on the
-	// disc id and lead-out MSF from the disc-info block.
+	// Per-game VRAM layout table (MiSTer 3DO.sv), keyed on the disc id from
+	// the disc-info block: the disc label's volume unique identifier (raw
+	// sector 0 bytes 0x58-0x5B, user bytes 0x48-0x4B); cdd_emu read it 16
+	// bytes off until fixed, so no entry ever matched.
+	// MiSTer's table also pauses the DSP with the 3DO (NEED_DSP_PAUSE, DSP_EN
+	// low while PAUSE) for Blade Force (25609184), Decathlon (043DCD69, MSF
+	// 69026900), Killing Time (0A9B739E), Snow Job (06065D10) and BattleSport
+	// beta (3AC732DE): their DSP programs stream data through the output
+	// FIFOs, which overflow while the DSP runs on through a pause with
+	// MADAM's DMA stopped. Not here: this port pauses the 3DO for every slow
+	// memory access (the pause condition below), far more than MiSTer's DDR3
+	// does, and a DSP paused that much falls behind its 44.1 kHz frame rate
+	// (build a23 on hardware: Killing Time's audio badly corrupted, the
+	// pictures still wrong - a decoder counting DSP frames loses data with the
+	// frames). The DSP runs through the pauses; CLIO's output FIFOs are deep
+	// enough (64 words) to hold what it writes meanwhile.
 	wire [31:0] disc_id, disc_msf;
 	wire        disc_info_valid;
 	reg  [ 3:0] BRAM4_OFFS, BRAM2_OFFS, BRAM1_OFFS;
-	reg         NEED_DSP_PAUSE;
 	always @(posedge clk_sys) begin
 		// Game Bub: default VRAM blocks C-F, A-B, 9 (+ 8 in the SRAM), Portfolio's
 		// screens (BIOS, Cannon Fodder: 0xC0000), as most of the table below;
 		// MiSTer's default {0,4,6} left them in the SDRAM, which pauses the
 		// 3DO for every access (late video lines at the top of the frame)
 		{BRAM4_OFFS,BRAM2_OFFS,BRAM1_OFFS} <= {4'hC,4'hA,4'h9};
-		NEED_DSP_PAUSE <= 0;
 		if (disc_info_valid) begin
 			if (disc_id == 32'h29E4D882) {BRAM4_OFFS,BRAM2_OFFS,BRAM1_OFFS} <= {4'hC,4'hA,4'h9};//3D Atlas (US)
 			if (disc_id == 32'h274E924C) {BRAM4_OFFS,BRAM2_OFFS,BRAM1_OFFS} <= {4'h4,4'h2,4'h8};//Alone in the Dark (US)
@@ -298,11 +310,6 @@ module p3do_gamebub #(
 			if (disc_id == 32'h07732394) {BRAM4_OFFS,BRAM2_OFFS,BRAM1_OFFS} <= {4'h0,4'h6,4'h4};//Space Hulk - Vengeance of the Blood Angels (US)
 			if (disc_id == 32'h0387DF78) {BRAM4_OFFS,BRAM2_OFFS,BRAM1_OFFS} <= {4'h4,4'h8,4'hA};//Bodyconscious Digital Rave! Part 1 (Japan)
 			if (disc_id == 32'h213128DD) {BRAM4_OFFS,BRAM2_OFFS,BRAM1_OFFS} <= {4'h8,4'hC,4'hE};//Live! 3DO Magazine CD-ROM 1 (Japan)
-			if (disc_id == 32'h25609184                            ) NEED_DSP_PAUSE <= 1;//Blade Force (US)
-			if (disc_id == 32'h043DCD69 && disc_msf == 32'h69026900) NEED_DSP_PAUSE <= 1;//Decathlon (US) (Unl)
-			if (disc_id == 32'h0A9B739E                            ) NEED_DSP_PAUSE <= 1;//Killing Time (US) (RE1)
-			if (disc_id == 32'h06065D10                            ) NEED_DSP_PAUSE <= 1;//Snow Job Starring Tracy Scoggins (US)
-			if (disc_id == 32'h3AC732DE                            ) NEED_DSP_PAUSE <= 1;//BattleSport (USA) (Beta) (1995-09-22)
 		end
 	end
 
@@ -343,7 +350,7 @@ module p3do_gamebub #(
 		.VCLK(clk_vid),
 		.EN(1'b1),
 		.PAUSE(pause),
-		.DSP_PAUSE(pause & NEED_DSP_PAUSE),
+		.DSP_PAUSE(1'b0),                    // the DSP runs through the pauses (see the table above)
 		.PAL(PAL),
 		.CE_F(CE_F),
 		.CE_R(CE_R),

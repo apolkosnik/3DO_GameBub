@@ -27,7 +27,16 @@
 //      store them; Opera); the output FIFOs' status at 0x3C0-0x3CC
 //      (Portfolio clio.h clio_FIFOStatusDSPPtoDMA), the input FIFOs' at
 //      0x380-0x3BC. A DSP program (Portfolio StartupCode's MOVE opcodes)
-//      writes the output memory and one word into each output FIFO.
+//      writes the output memory and one word into each output FIFO. (5b)
+//      The output FIFOs hold 64 words (the hardware's 8: the port pauses
+//      the 3DO, MADAM's DMA with it, while the DSP runs on - Killing Time's
+//      EZFlix decoder lost output words): 40 words written with the DMA off
+//      all wait, the status reads 40, and with the DMA on they come out six
+//      per burst with one request per burst and no further DSP write; the
+//      DSP's flush (0x3FD) requests the rest. (5c) A pause of the 3DO
+//      (IO_EN low) while the DSP runs on through it: a Killing Time-like
+//      run of 24 output words finishes during the pause, all wait, and come
+//      out in four bursts after it; nothing is lost.
 //   6. The FIFOs (CLIO_DSP_FIFO, CLIO_DMA_FIFO): (c) a DSP read of an input
 //      FIFO (0x0F0, popped) or a peek (0x070) gives the word the CPU last
 //      wrote at 0x070 (once, nothing popped: the audio folio's FIFOHEAD,
@@ -99,6 +108,7 @@ module tb_clio;
 	reg  [ 2:0] clc = 0;
 	reg         pb_int = 0;
 	reg         dsp_en = 0;
+	reg         io_en = 1;                // IO_EN: MADAM's side of CLIO runs (low: the 3DO is paused)
 	reg  [31:0] mem_di = 0;               // MADAM's bus (DMA data to CLIO)
 	reg         aclk_ce = 0;              // audio clock enable
 	reg  [ 7:0] edi = 8'hFF;              // expansion bus data
@@ -109,7 +119,7 @@ module tb_clio;
 
 	CLIO dut (
 		.CLK(clk), .RST_N(rst_n), .EN(1'b1), .PAL(1'b0), .CE_R(ce_r), .CE_F(ce_f),
-		.IO_EN(1'b1), .DSP_EN(dsp_en), .PON(1'b0), .RESET_N(), .MCLK_PH1(ce_r), .MCLK_PH2(ce_f),
+		.IO_EN(io_en), .DSP_EN(dsp_en), .PON(1'b0), .RESET_N(), .MCLK_PH1(ce_r), .MCLK_PH2(ce_f),
 		.A(a), .CPU_DI(di), .CPU_DO(q), .DI(mem_di), .DO(dma_do), .CLC(clc), .CREADY_N(cready_n), .DMAREQ(dmareq), .DMACH(dmach),
 		.PB_INT(pb_int), .FIRQ_N(firq_n),
 		.EDI(edi), .EDO(), .ESTR_N(), .EWRT_N(), .ERST_N(), .ECMD_N(), .ESEL_N(), .ERDY_N(1'b0), .EINT_N(1'b1),
@@ -288,6 +298,12 @@ module tb_clio;
 	// 9: the words CLIO puts out on DMA channel 0x14 (when MADAM takes them)
 	bit [31:0] exp_words [$];
 	always @(posedge clk) if (rst_n && ce_r && dut.CLC2 == 3'h2 && dut.CLC1 == 3'h0 && dut.DMA_CHAN == 5'h14) exp_words.push_back(dma_do);
+	// 5b: the words CLIO puts out on DMA channel 0x10 (from output FIFO 0)
+	bit [31:0] eo_words [$];
+	always @(posedge clk) if (rst_n && ce_r && dut.CLC2 == 3'h2 && dut.CLC1 == 3'h0 && dut.DMA_CHAN == 5'h10) eo_words.push_back(dma_do);
+	// DSP writes to output FIFO 0 refused because it was full (5b, 5c)
+	int eo_lost = 0;
+	always @(posedge clk) if (rst_n && dut.EOFIFO0.WRREQ && !dut.EOFIFO0.WR_OK) eo_lost++;
 	// 8: output memory word 0 writes
 	int eo0_writes = 0;
 	always @(posedge clk) if (rst_n && ce_r && dsp_en && dut.DSP_EO_WE && dut.DSP_EO_ADDR == 8'h00) eo0_writes++;
@@ -483,9 +499,167 @@ module tb_clio;
 		rd_check("32-bit read of output memory words 0 and 1", 16'h3800, 32'h01110222);
 		rd_check("32-bit read of output memory words 2 and 3", 16'h3804, 32'h03330444);
 		for (int i = 0; i < 4; i++) begin
-			check($sformatf("output FIFO %0d holds one word (internal)", i), {28'h0, dut.EOFIFO_COUNT[i]}, 32'h1);
+			check($sformatf("output FIFO %0d holds one word (internal)", i), 32'(dut.EOFIFO_COUNT[i]), 32'h1);
 			rd_check($sformatf("output FIFO %0d status", i), 16'h03C0 + 16'(4 * i), 32'h1);
 			rd_check($sformatf("input FIFO %0d status", i), 16'h0380 + 16'(4 * i), 32'h0);
+		end
+
+		// ---------------- 5b. the output FIFOs hold 64 words, drained by the DMA ----------------
+		// A DSP write to a full output FIFO is lost. The port pauses the 3DO for
+		// its slow memory, MADAM and its DMA with it, while the DSP runs on, and
+		// Killing Time's EZFlix decoder (8 output words per audio frame per
+		// channel) lost words with the hardware's 8-word FIFOs in every pause
+		// longer than the two words of room left after a request: 40 words
+		// written with the DMA off all wait, the CPU's status reads 40; with the
+		// DMA on they come out six per burst, one request per burst, without any
+		// further DSP write; the DSP's flush (0x3FD) requests the rest.
+		begin
+			int bursts, n;
+			dsp_en = 1;
+			wr(16'h17FC, 32'h0);                           // DSP stopped
+			wr(16'h0308, 32'h000F0000);                    // DMA from the output FIFOs off
+			wr(16'h0300, 32'h00010000);                    // output FIFO 0 initialised
+			for (int i = 0; i < 40; i++) begin
+				code(2 * i, 16'h9BF0); code(2 * i + 1, 16'hC100 + 16'(i));   // MOVE output FIFO 0 <- 0x100 + i
+			end
+			code(80, 16'h8380); code(81, 16'h8000); code(82, 16'h8000);   // SLEEP, NOP, NOP
+			eo_lost = 0;
+			wr(16'h17E8, 32'h0); wr(16'h17FC, 32'h1);      // from 0, run (no audio frames here: no restart)
+			n = 0;
+			while (!dut.DSP.SLEEP && n < 2000) begin mclk(); n++; end
+			mclk(4);
+			wr(16'h17FC, 32'h0);
+			check("5b: DSP program reached its SLEEP", {31'h0, dut.DSP.SLEEP}, 32'h1);
+			check("5b: output FIFO 0 holds 40 words", 32'(dut.EOFIFO_COUNT[0]), 32'd40);
+			check("5b: no write refused", 32'(eo_lost), 32'd0);
+			rd_check("5b: output FIFO 0 status (CPU, 0x3C0)", 16'h03C0, 32'd40);
+			eo_words.delete();
+			bursts = 0;
+			wr(16'h0304, 32'h00010000);                    // DMA from output FIFO 0 on
+			n = 0;
+			while (n < 3000 && bursts < 8) begin
+				mclk(); n++; #1;
+				if (dut.DMA_ST == 4'd3) begin                // DMA_DSP_READ: channel 0x10 granted
+					if (bursts == 0) check("5b: DMA channel of the first request", {27'h0, dmach}, 32'h10);
+					repeat (3) begin                           // MADAM reads three 32-bit words
+						#1 clc = 3'h2;
+						mclk(); #1 clc = 3'h0;
+						mclk(3);
+					end
+					#1 clc = 3'h7;
+					mclk(); #1 clc = 3'h0;
+					mclk(4);
+					bursts++;
+				end
+			end
+			check("5b: DMA bursts from output FIFO 0 (six words each, one request per burst)", 32'(bursts), 32'd6);
+			check("5b: words MADAM took", 32'(eo_words.size()), 32'd18);
+			for (int k = 0; k < 18 && k < eo_words.size(); k++)
+				check($sformatf("5b: DMA word %0d", k), eo_words[k], {16'h100 + 16'(2 * k), 16'h101 + 16'(2 * k)});
+			check("5b: four words wait (fewer than a burst)", 32'(dut.EOFIFO_COUNT[0]), 32'd4);
+			code(0, 16'h9BFD); code(1, 16'hC001);          // MOVE 0x3FD <- 1: flush output FIFO 0
+			code(2, 16'h8380); code(3, 16'h8000); code(4, 16'h8000);
+			wr(16'h17E8, 32'h0); wr(16'h17FC, 32'h1);
+			n = 0;
+			while (!dut.DSP.SLEEP && n < 2000) begin mclk(); n++; end
+			mclk(4);
+			wr(16'h17FC, 32'h0);
+			eo_words.delete();
+			n = 0; bursts = 0;
+			while (n < 500 && bursts < 1) begin
+				mclk(); n++; #1;
+				if (dut.DMA_ST == 4'd3) begin
+					repeat (2) begin
+						#1 clc = 3'h2;
+						mclk(); #1 clc = 3'h0;
+						mclk(3);
+					end
+					#1 clc = 3'h7;
+					mclk(); #1 clc = 3'h0;
+					mclk(4);
+					bursts++;
+				end
+			end
+			check("5b: the flush requested a burst", 32'(bursts), 32'd1);
+			check("5b: flushed words", 32'(eo_words.size()), 32'd2);
+			for (int k = 0; k < 2 && k < eo_words.size(); k++)
+				check($sformatf("5b: flushed word %0d", k), eo_words[k], {16'h124 + 16'(2 * k), 16'h125 + 16'(2 * k)});
+			check("5b: output FIFO 0 empty after the flush", 32'(dut.EOFIFO_COUNT[0]), 32'h0);
+			wr(16'h0308, 32'h00010000);                    // DMA from output FIFO 0 off again
+		end
+
+		// ---------------- 5c. a pause of the 3DO while the DSP runs on ----------------
+		// The port pauses the 3DO for its slow memory (IO_EN low: MADAM, and with
+		// it the DMA that drains the output FIFOs, stops) while the DSP keeps its
+		// audio frame rate (DSP_EN high: pausing it with the 3DO loses frames,
+		// p3do_gamebub). A Killing Time-like run of 24 output words (its EZFlix
+		// decoder writes 8 per frame per channel, ~50 MCLKs apart), then a flush,
+		// paused for 800 MCLKs at the first DMA request: the DSP finishes during
+		// the pause, all 24 words wait, and come out in four bursts after it,
+		// each requested as six words remain; the flush, issued while the first
+		// request was pending, is ignored (as in the original). (The program first
+		// sets the frame reload to 0, so no counter frame restarts it; a program
+		// after it sets 565 back.)
+		begin
+			int bursts, n;
+			bit paused;
+			dsp_en = 1;
+			wr(16'h17FC, 32'h0);                           // DSP stopped
+			wr(16'h0300, 32'h00010000);                    // output FIFO 0 initialised
+			code(0, 16'h9BEF); code(1, 16'hC000);          // MOVE 0x3EF <- 0: no counter frames
+			for (int i = 0; i < 24; i++) begin
+				code(2 + 18 * i, 16'h9BF0); code(3 + 18 * i, 16'hC200 + 16'(i));   // MOVE output FIFO 0 <- 0x200 + i
+				for (int j = 2; j < 18; j++) code(2 + 18 * i + j, 16'h8000);       // 16 NOPs between the writes
+			end
+			code(434, 16'h9BFD); code(435, 16'hC001);      // flush output FIFO 0
+			code(436, 16'h8380); code(437, 16'h8000); code(438, 16'h8000);
+			eo_words.delete();
+			eo_lost = 0; bursts = 0; paused = 0;
+			wr(16'h0304, 32'h00010000);                    // DMA from output FIFO 0 on
+			wr(16'h17E8, 32'h0); wr(16'h17FC, 32'h1);      // run
+			n = 0;
+			while (n < 6000 && !(dut.DSP.SLEEP && bursts >= 4)) begin
+				mclk(); n++; #1;
+				if (dut.DMA_ST == 4'd3) begin                // channel 0x10 granted
+					if (!paused) begin                         // the 3DO pauses at the first request
+						io_en = 0;
+						mclk(800);
+						check("5c: the DSP ran through the pause (its program slept)", {31'h0, dut.DSP.SLEEP}, 32'h1);
+						check("5c: all 24 words wait in output FIFO 0", 32'(dut.EOFIFO_COUNT[0]), 32'd24);
+						io_en = 1;
+						paused = 1;
+						#1;
+					end
+					repeat (3) begin                           // MADAM's burst: three 32-bit words
+						#1 clc = 3'h2;
+						mclk(); #1 clc = 3'h0;
+						mclk(3);
+					end
+					#1 clc = 3'h7;
+					mclk(); #1 clc = 3'h0;
+					mclk(4);
+					bursts++;
+				end
+			end
+			mclk(50);                                      // no further request
+			wr(16'h17FC, 32'h0);
+			check("5c: the 3DO paused at the first request", {31'h0, paused}, 32'h1);
+			check("5c: DMA bursts after the pause", 32'(bursts), 32'd4);
+			check("5c: output words lost", 32'(eo_lost), 32'd0);
+			check("5c: 32-bit words MADAM took", 32'(eo_words.size()), 32'd12);
+			for (int k = 0; k < eo_words.size(); k++)
+				check($sformatf("5c: DMA word %0d", k), eo_words[k], {16'h200 + 16'(2 * k), 16'h201 + 16'(2 * k)});
+			check("5c: output FIFO 0 empty", 32'(dut.EOFIFO_COUNT[0]), 32'h0);
+			wr(16'h0308, 32'h00010000);                    // DMA from output FIFO 0 off again
+		end
+		begin                                              // the frame reload back to 565
+			int n;
+			code(0, 16'h9BEF); code(1, 16'hC235); code(2, 16'h8380); code(3, 16'h8000); code(4, 16'h8000);
+			wr(16'h17E8, 32'h0); wr(16'h17FC, 32'h1);
+			n = 0;
+			while (!dut.DSP.SLEEP && n < 200) begin mclk(); n++; end
+			wr(16'h17FC, 32'h0);
+			check("5c: frame reload back to 565", 32'(dut.RELOAD), 32'd565);
 		end
 
 		// ---------------- 6a. the FIFO modules ----------------

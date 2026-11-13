@@ -21,7 +21,8 @@
 //                  tick: I = DSP I memory word (through 0x3400), N = DSP N memory
 //                  word (through 0x2000), C = CLIO register (FIFO init, DMA enable)
 //   +ticks=<n>     DSP ticks to run (default 200)
-//   +period=<n>    MCLKs per tick (the audio word period; default 576)
+//   +period=<n>    MCLKs of the run after the last tick (default 567, one audio frame;
+//                  the audio clock itself is the core's 16.9344 MHz, 44.1 kHz frames)
 //   +words=<n>     32-bit words per DMA transfer to an input FIFO (default 2)
 //   +dmaen=<mask>  input FIFO channels whose DMA is on at the start (default 0x1F)
 //   +log=<file>    the log: T <tick>, W <addr> <data> <pc>, F <ch> <word>,
@@ -79,7 +80,7 @@ module tb_dsp_kt;
 
 	// ---------------- the trace ----------------
 	string      nmem_file, imem_file, fifo_file, cpu_file, log_file;
-	int         n_ticks = 200, period = 576, dma_words = 3, dmaen = 32'h1F;   // 3 words: MADAM's burst
+	int         n_ticks = 200, period = 567, dma_words = 3, dmaen = 32'h1F;   // 3 words: MADAM's burst
 	bit [15:0]  nmem [512];
 	bit [15:0]  imem [1024];
 	bit [15:0]  fifo_q [13][$];          // input FIFO words still to deliver, per channel
@@ -267,20 +268,25 @@ module tb_dsp_kt;
 		if (dsp_en && dut.EOFIFO2_WE && !dut.EOFIFO2.WR_OK) begin lost_out++; $fdisplay(logf, "O 2"); end
 	end
 
-	// the audio clock: ACLK_CE pulses so that the audio word strobe (every
-	// 0x180 of them) comes every `period` MCLKs
-	int aclk_div = 3;
-	always begin
-		repeat (aclk_div - 1) @(posedge clk);
-		@(posedge clk) aclk_ce = 1;
-		@(posedge clk) aclk_ce = 0;
+	// the audio clock: ACLK_CE as the core's ce_gen makes it, 16.9344 MHz from
+	// the 50 MHz clock (a fractional accumulator), so the audio word strobe
+	// (every 0x180 of them) comes every 44.1 kHz frame, ~567 MCLKs. (An earlier
+	// integer divider gave a pulse every 4 clocks: 768-MCLK frames, a third
+	// more time for the program than the real frame leaves it; found by the
+	// arm60_suite review.)
+	longint aclk_sum = 0;
+	always @(posedge clk) begin
+		aclk_ce <= 0;
+		aclk_sum += 16_934_400;
+		if (aclk_sum >= 50_000_000) begin
+			aclk_sum -= 50_000_000;
+			aclk_ce <= 1;
+		end
 	end
 
 	initial begin
 		int t;
 		load_trace();
-		aclk_div = (period * 2) / 384;
-		if (aclk_div < 2) aclk_div = 2;
 		repeat (8) @(posedge clk);
 		rst_n = 1;
 		mclk(8);
@@ -330,7 +336,10 @@ module tb_dsp_kt;
 				break;
 			end
 		end
-		run(period);
+		// let the last tick's program finish (its SLEEP) without starting another
+		// tick that the log would cut off
+		t = 0;
+		while (!slept && t < period) begin run(1); t++; end
 		wr(16'h17FC, 32'h0);
 		$fclose(logf);
 		$display("tb_dsp_kt: %0d ticks, %0d DMA transfers (served %0d MCLKs late), %0d output FIFO words lost, log %s",

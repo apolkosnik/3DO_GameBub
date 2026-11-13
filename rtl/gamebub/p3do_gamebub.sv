@@ -273,10 +273,25 @@ module p3do_gamebub #(
 		else if (CE_R) POWER_ON <= 0;
 	end
 
-	// Per-game VRAM layout table (MiSTer 3DO.sv), keyed on the disc id from
-	// the disc-info block: the disc label's volume unique identifier (raw
-	// sector 0 bytes 0x58-0x5B, user bytes 0x48-0x4B); cdd_emu read it 16
-	// bytes off until fixed, so no entry ever matched.
+	// Per-game VRAM table (MiSTer 3DO.sv), keyed on the disc id from the
+	// disc-info block: the disc label's volume unique identifier (raw sector
+	// 0 bytes 0x58-0x5B, user bytes 0x48-0x4B); cdd_emu read it 16 bytes off
+	// until fixed, so no entry ever matched. MiSTer's released build has
+	// USE_BRAM_BLOCKS_FOR_VRAM 0, so of its three values only BRAM1_OFFS, the
+	// 64 KiB block that is on chip (its first 48 KiB and VRAM's last 16 KiB),
+	// ever took effect there; BRAM4_OFFS and BRAM2_OFFS were for an on-chip
+	// VRAM build. This port keeps 8 blocks in the SRAM (vram_sram.sv: the
+	// BRAM4 and BRAM2 windows, the BRAM1 block and the highest block left),
+	// and when the table's BRAM4/BRAM2 values were applied to it the first
+	// time the id matched (v0.7), Alone in the Dark's {4,2,8} moved the SRAM
+	// to blocks 2-8 and F and left the Portfolio screens at 0xC0000 in the
+	// SDRAM (late video lines: the game looked broken). Applying the on-chip
+	// block alone is not safe either: the port's layout was tuned as a set,
+	// and with block 8 on chip the test ROM's frame buffer in block 9 moves to
+	// the SRAM and a shown line starts late (tb_top +disc_id=274E924C). So
+	// the table is kept for reference (APPLY_VRAM_TABLE 0) and every game
+	// runs the layout they all ran before v0.7: blocks 8-F in the SRAM, 9 on
+	// chip.
 	// MiSTer's table also pauses the DSP with the 3DO (NEED_DSP_PAUSE, DSP_EN
 	// low while PAUSE) for Blade Force (25609184), Decathlon (043DCD69, MSF
 	// 69026900), Killing Time (0A9B739E), Snow Job (06065D10) and BattleSport
@@ -292,24 +307,27 @@ module p3do_gamebub #(
 	wire [31:0] disc_id, disc_msf;
 	wire        disc_info_valid;
 	reg  [ 3:0] BRAM4_OFFS, BRAM2_OFFS, BRAM1_OFFS;
+	localparam  APPLY_VRAM_TABLE = 0;
 	always @(posedge clk_sys) begin
 		// Game Bub: default VRAM blocks C-F, A-B, 9 (+ 8 in the SRAM), Portfolio's
 		// screens (BIOS, Cannon Fodder: 0xC0000), as most of the table below;
 		// MiSTer's default {0,4,6} left them in the SDRAM, which pauses the
 		// 3DO for every access (late video lines at the top of the frame)
 		{BRAM4_OFFS,BRAM2_OFFS,BRAM1_OFFS} <= {4'hC,4'hA,4'h9};
-		if (disc_info_valid) begin
-			if (disc_id == 32'h29E4D882) {BRAM4_OFFS,BRAM2_OFFS,BRAM1_OFFS} <= {4'hC,4'hA,4'h9};//3D Atlas (US)
-			if (disc_id == 32'h274E924C) {BRAM4_OFFS,BRAM2_OFFS,BRAM1_OFFS} <= {4'h4,4'h2,4'h8};//Alone in the Dark (US)
-			if (disc_id == 32'h0340842C) {BRAM4_OFFS,BRAM2_OFFS,BRAM1_OFFS} <= {4'hC,4'hA,4'h9};//Cannon Fodder (US)
-			if (disc_id == 32'h2D731C98) {BRAM4_OFFS,BRAM2_OFFS,BRAM1_OFFS} <= {4'hC,4'hA,4'h9};//FIFA International Soccer (US, Korea)
-			if (disc_id == 32'h2584F855) {BRAM4_OFFS,BRAM2_OFFS,BRAM1_OFFS} <= {4'h8,4'hC,4'hE};//Psychic Detective (US) (Disc 1)
-			if (disc_id == 32'h031BED09) {BRAM4_OFFS,BRAM2_OFFS,BRAM1_OFFS} <= {4'h8,4'h6,4'hC};//Quarantine (US)
-			if (disc_id == 32'h06DE0DC2) {BRAM4_OFFS,BRAM2_OFFS,BRAM1_OFFS} <= {4'hC,4'hA,4'h9};//Road & Track Presents - The Need for Speed (US, EU)
-			if (disc_id == 32'h2D95DCB6) {BRAM4_OFFS,BRAM2_OFFS,BRAM1_OFFS} <= {4'h8,4'h6,4'hC};//Seal of the Pharaoh (US)
-			if (disc_id == 32'h07732394) {BRAM4_OFFS,BRAM2_OFFS,BRAM1_OFFS} <= {4'h0,4'h6,4'h4};//Space Hulk - Vengeance of the Blood Angels (US)
-			if (disc_id == 32'h0387DF78) {BRAM4_OFFS,BRAM2_OFFS,BRAM1_OFFS} <= {4'h4,4'h8,4'hA};//Bodyconscious Digital Rave! Part 1 (Japan)
-			if (disc_id == 32'h213128DD) {BRAM4_OFFS,BRAM2_OFFS,BRAM1_OFFS} <= {4'h8,4'hC,4'hE};//Live! 3DO Magazine CD-ROM 1 (Japan)
+		// MiSTer's table: the on-chip block, with its {BRAM4,BRAM2,BRAM1}
+		// triple as a comment (not applied, see above)
+		if (APPLY_VRAM_TABLE && disc_info_valid) begin
+			if (disc_id == 32'h29E4D882) BRAM1_OFFS <= 4'h9;//3D Atlas (US)                                         {C,A,9}
+			if (disc_id == 32'h274E924C) BRAM1_OFFS <= 4'h8;//Alone in the Dark (US)                                {4,2,8}
+			if (disc_id == 32'h0340842C) BRAM1_OFFS <= 4'h9;//Cannon Fodder (US)                                    {C,A,9}
+			if (disc_id == 32'h2D731C98) BRAM1_OFFS <= 4'h9;//FIFA International Soccer (US, Korea)                 {C,A,9}
+			if (disc_id == 32'h2584F855) BRAM1_OFFS <= 4'hE;//Psychic Detective (US) (Disc 1)                       {8,C,E}
+			if (disc_id == 32'h031BED09) BRAM1_OFFS <= 4'hC;//Quarantine (US)                                       {8,6,C}
+			if (disc_id == 32'h06DE0DC2) BRAM1_OFFS <= 4'h9;//Road & Track Presents - The Need for Speed (US, EU)  {C,A,9}
+			if (disc_id == 32'h2D95DCB6) BRAM1_OFFS <= 4'hC;//Seal of the Pharaoh (US)                              {8,6,C}
+			if (disc_id == 32'h07732394) BRAM1_OFFS <= 4'h4;//Space Hulk - Vengeance of the Blood Angels (US)       {0,6,4}
+			if (disc_id == 32'h0387DF78) BRAM1_OFFS <= 4'hA;//Bodyconscious Digital Rave! Part 1 (Japan)            {4,8,A}
+			if (disc_id == 32'h213128DD) BRAM1_OFFS <= 4'hE;//Live! 3DO Magazine CD-ROM 1 (Japan)                   {8,C,E}
 		end
 	end
 

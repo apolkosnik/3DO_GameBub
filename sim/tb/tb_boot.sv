@@ -34,7 +34,8 @@
 //           +vram_watch=<row>, +sport_ms=<n>, +rt_log_ms=<n>, +pad_ctl=<file> (buttons
 //           pressed while it runs, see pad_btn), +frame_log, +frames_from=<n> +frames_to=<m>
 //           +dsp_trace_from_ms=<ms> (DSP/DMA trace, see below), +expect_disc_id=<hex> (the
-//           disc-info block's id, raw sector 0 bytes 0x58-0x5B; a TB error if it differs)
+//           disc-info block's id, raw sector 0 bytes 0x58-0x5B; a TB error if it differs),
+//           +pause_log_from_ms=<ms> (every pause of the 3DO: length, causes, see below)
 //           (per-frame brightness log, every frame saved in a window; see save_frame)
 //           <out>/audio.raw: the audio output (s16le stereo, 44.1 kHz)
 //
@@ -1946,6 +1947,70 @@ module tb_boot;
 			ht_fd = 0;
 			ht_from_us = -1;
 		end
+	end
+
+	// Pause profile (+pause_log_from_ms=<ms>): every pause of the 3DO from that
+	// time (p3do_gamebub `pause`: MADAM, the CPU and CLIO's DMA side stop, the
+	// DSP runs on). <out>/pause_log.txt has a line per pause of 1 us or more,
+	// "P <start us> <length us> <causes at the start> <causes during it> <fill>
+	// <dsp request>": the causes as letters (i: a BIOS ROM / NVRAM access, d:
+	// ddram.sv busy with a random DRAM / VRAM access, l / r: a VRAM half not
+	// ready, s: the SDRAM secondary port holds the bus), fill 1 when a burst
+	// read (a VRAM fill) was in progress, and 1 when a DSP output FIFO DMA
+	// request waited during the pause. The summary at the end is a histogram
+	// of pause lengths, each bin with the number of pauses during which a DSP
+	// output request waited (an 8-word output FIFO has room for about 2 words,
+	// ~4 us of Killing Time's output, after a request).
+	longint   pause_log_from_ms = -1;
+	initial void'($value$plusargs("pause_log_from_ms=%d", pause_log_from_ms));
+	int       pl_fd = 0, pl_count = 0;
+	bit       pl_d = 0, pl_fill = 0, pl_dspreq = 0;
+	real      pl_t0 = 0, pl_total_us = 0;
+	bit [4:0] pl_cause0 = 0, pl_cause = 0;
+	int       pl_hist [8], pl_hist_req [8];    // < 1, 1-2, 2-4, 4-8, 8-16, 16-32, 32-64, >= 64 us
+	function automatic int pl_bin(input real us);
+		if (us < 1) return 0; if (us < 2) return 1; if (us < 4) return 2; if (us < 8) return 3;
+		if (us < 16) return 4; if (us < 32) return 5; if (us < 64) return 6; return 7;
+	endfunction
+	function automatic string pl_str(input bit [4:0] c);
+		return {c[4] ? "i" : "-", c[3] ? "d" : "-", c[2] ? "l" : "-", c[1] ? "r" : "-", c[0] ? "s" : "-"};
+	endfunction
+	always @(posedge clk_sys) if (pause_log_from_ms >= 0 && $realtime >= pause_log_from_ms * 1ms) begin
+		bit [4:0] c;
+		if (pl_fd == 0) begin
+			pl_fd = $fopen({outdir, "/pause_log.txt"}, "w");
+			if (pl_fd == 0) $display("[%0t] tb_boot: cannot open %s/pause_log.txt", $realtime, outdir);
+			else $display("[%0t] pause log started (%s/pause_log.txt)", $realtime, outdir);
+		end
+		c = {dut.ddr_io_busy, dut.ddr_busy, !dut.VRAM_LRDY, !dut.VRAM_RRDY, dut.sec_hold_s};
+		if (dut.pause && !pl_d) begin
+			pl_t0 = $realtime; pl_cause0 = c; pl_cause = c;
+			pl_fill = dut.ddr_bbusy; pl_dspreq = |dut.p3do.clio.DMA_FROM_DSP_PEND;
+		end
+		if (dut.pause) begin
+			pl_cause |= c;
+			if (dut.ddr_bbusy) pl_fill = 1;
+			if (|dut.p3do.clio.DMA_FROM_DSP_PEND) pl_dspreq = 1;
+		end
+		if (!dut.pause && pl_d) begin
+			real us;
+			int b;
+			us = ($realtime - pl_t0) / 1us;
+			b = pl_bin(us);
+			pl_hist[b]++;
+			if (pl_dspreq) pl_hist_req[b]++;
+			pl_total_us += us;
+			pl_count++;
+			if (us >= 1.0 && pl_fd != 0)
+				$fdisplay(pl_fd, "P %0.3f %0.3f %s %s %0d %0d", pl_t0 / 1us, us, pl_str(pl_cause0), pl_str(pl_cause), pl_fill, pl_dspreq);
+		end
+		pl_d = dut.pause;
+	end
+	final if (pause_log_from_ms >= 0) begin
+		$display("tb_boot: pauses: %0d, %0.1f ms paused in total; by length in us (with a DSP output DMA request waiting): <1: %0d (%0d), 1-2: %0d (%0d), 2-4: %0d (%0d), 4-8: %0d (%0d), 8-16: %0d (%0d), 16-32: %0d (%0d), 32-64: %0d (%0d), >=64: %0d (%0d)",
+		         pl_count, pl_total_us / 1000.0, pl_hist[0], pl_hist_req[0], pl_hist[1], pl_hist_req[1], pl_hist[2], pl_hist_req[2], pl_hist[3], pl_hist_req[3],
+		         pl_hist[4], pl_hist_req[4], pl_hist[5], pl_hist_req[5], pl_hist[6], pl_hist_req[6], pl_hist[7], pl_hist_req[7]);
+		if (pl_fd != 0) $fclose(pl_fd);
 	end
 
 	// DSP trace (+dsp_trace_from_ms=<ms>): <out>/dsp_trace.txt in tb_dsp_kt's

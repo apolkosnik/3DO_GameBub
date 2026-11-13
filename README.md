@@ -109,7 +109,7 @@ firmware also when you pause.
   hardware. In simulation it comes from page copies holding VRAM past a line's transfers;
   v0.4 holds copies before each shown line (*Page copies before a line's transfers*), and
   also keeps the CEL engine and the video cache's prefetches out of the time before a
-  line's transfers. Whether the band is gone has not been checked on hardware yet.
+  line's transfers. Confirmed gone on hardware (v0.7, 2026-11-13).
   Copies now run between the shown lines, so a game that clears or copies its frame
   buffer while the picture is shown does so more slowly than before (most with the
   SRAM's safe timing).
@@ -389,15 +389,25 @@ Two causes:
   bytes 0x400-0x47F of that block are the first 128 bytes of the *raw* sector 0
   (3docdd.cpp `GetDiscInfo`), and the id is at 0x458-0x45B, raw bytes 0x58-0x5B = user
   bytes 0x48-0x4B. `cdd_emu.sv` put the user data at 0x400, so the id came out 16 bytes
-  off (Killing Time's `0A9B739E` read `00000001`) and no table entry ever matched: Alone
-  in the Dark, Psychic Detective, Quarantine, Seal of the Pharaoh, Space Hulk,
-  Bodyconscious Digital Rave and Live! 3DO Magazine ran with the default VRAM layout. The
+  off (Killing Time's `0A9B739E` read `00000001`) and no table entry ever matched. The
   block now carries the raw sector's first 128 bytes: streamed, the sector's sync and
   header then its data; preloaded ISO, 16 zero bytes then the data. `tb_top` compares the
   block's 128 bytes with the image and the id with the ISO's bytes 0x48-0x4B in every run
   (`+disc_id=<hex>` puts another id into the test ISO); `tb_boot +expect_disc_id=<hex>`
-  checks the id a real image gives. MiSTer's DSP-pause entries (Blade Force, Decathlon,
-  Killing Time, Snow Job, BattleSport) are not applied here: see the CLIO list.
+  checks the id a real image gives. The table's VRAM values are not applied on this port
+  (they stay in `p3do_gamebub.sv` for reference): MiSTer's released build has its on-chip
+  VRAM windows off (`USE_BRAM_BLOCKS_FOR_VRAM 0`), so of each game's three values only the
+  third, the 64 KiB block kept on chip, ever took effect there, and its memory system is
+  not this one. The port had repurposed the first two to choose its SRAM blocks
+  (vram_sram.sv), and the first time an id matched (v0.7) Alone in the Dark's `{4,2,8}`
+  moved the SRAM to blocks 2-8 and F, leaving the Portfolio screens at 0xC0000 in the
+  SDRAM: the game looked broken (`tb_top +disc_id=274E924C` shows the late video lines of
+  an SDRAM frame buffer). Applying the on-chip block alone (block 8 for that game) puts
+  the test ROM's frame buffer in block 9 into the SRAM and a shown line starts late too:
+  the port's layout, blocks 8-F in the SRAM with 9 on chip, was tuned as a set, and every
+  game runs it, as all did before v0.7. MiSTer's DSP-pause entries (Blade Force,
+  Decathlon, Killing Time, Snow Job, BattleSport) are not applied either: see the CLIO
+  list.
 * **CPU VRAM writes during fills.** A game decoding video (Killing Time's EZFlix intro:
   ~50k CPU VRAM accesses a picture, 12 pictures a second) writes VRAM all the time.
   A random VRAM access issued while the read-transfer cache fills a half-row waited in
@@ -641,8 +651,9 @@ of the test BIOS makes them from the CPU (see *Simulation*).
   counting DSP frames loses data with them). So the DSP is never paused here, and the
   deeper FIFO holds a pause's worth of output; a late burst then drains the backlog one
   request per burst. Confirmed on hardware (build a24): Killing Time's intro plays clean,
-  with normal audio. The DSP's output FIFO status (0xE0-0xE3) saturates at 15; the CPU's
-  0x3C0-0x3CC read the full count.
+  with normal audio, and the game no longer hangs in its main menu when left alone (it
+  did on v0.5, music stopping with it; never reproduced in simulation). The DSP's output
+  FIFO status (0xE0-0xE3) saturates at 15; the CPU's 0x3C0-0x3CC read the full count.
 * A DSP read of a data word an instruction writes in the same clock gets the new word:
   the MOVE's, or an ALU result whose write waits for the memory port behind a MOVE's
   write. Killing Time's DSP program increments its interrupt counter (ADD [108] + 1),
@@ -741,11 +752,16 @@ was a word late. `+dma_lat=<n>` serves every DMA request n MCLKs late and
 3DO); the harness fails when a DSP output write is lost on a full FIFO. It serves one
 request at a time, so the latency loads the bus for every channel of the game's traffic
 (three output and four input channels a frame): with the hardware's 8-word output FIFOs
-nothing is lost at 10 MCLKs, 12 words at 20, 4,302 at 40, and 9,020 with
+nothing is lost at 10 MCLKs, 12 words at 20, 4,306 at 40, and 13,684 with
 `+dma_lat=40 +dma_hold=300 +dma_hold_every=16`; the 64-word FIFOs lose nothing in any of
 these. The suite runs `+dma_lat=10` and the hold configuration; the output matches
-Opera's in both. The whole-system simulation (`tb_boot +dsp_trace_from_ms`, whose trace
-counts the lost output words) is where the real MADAM's timing shows. The trace files
+Opera's in both. The harness's audio clock is the core's (16.9344 MHz from the 50 MHz
+clock, 44.1 kHz frames of ~567 MCLKs); its first version divided the clock by an integer
+and gave 768-MCLK frames, a third more time for the DSP program than the real frame
+leaves it, which the arm60_suite review found (the numbers above are at the real rate).
+The whole-system simulation (`tb_boot +dsp_trace_from_ms`, whose trace counts the lost
+output words) is where the real MADAM's timing shows: on the v0.6 RTL half a second of
+Killing Time's intro lost 7,899 output words in 2,262 of 22,068 frames. The trace files
 are not in the repository (they hold the game's code).
 
 **Matrix engine (fix to `MADAM.sv`).** MADAM's matrix multiply summed signed products in

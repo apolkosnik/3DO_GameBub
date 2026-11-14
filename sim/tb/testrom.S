@@ -78,12 +78,28 @@
 @      hold a line's video request past its scanout. Before 8.
 @  19. The light gun on the control port (Game Bub registers 0x1014-0x101C,
 @      set by tb_top): read by MADAM's player bus DMA as Portfolio reads it;
-@      the pad word, the gun's 40 bits (ID 0x4D, trigger, the scan count of
-@      the aimed pixel, line pulses), then no more devices. Before 8.
+@      the gun's 40 bits first (ID 0x4D, trigger, the scan count of the
+@      aimed pixel, line pulses: player one's gun first in the chain), then
+@      the pad word, then no more devices. Before 8.
 @  20. The mouse on the control port (Controller setting 2, a motion packet
 @      and the buttons from the Game Bub registers 0x1030/0x1034, set by
 @      tb_top after test 19's transfer): the pad word, the mouse's 32 bits
 @      (ID 0x49, buttons, dy, dx), then no more devices. Before 8.
+@  22. The mouse before the pad (Controller setting 3, "Mouse + pad": player
+@      1 for games that take the first device as player 1, as Mad Dog
+@      McCree does; tb_top sets it after test 20's transfer and writes
+@      another motion packet): the mouse's 32 bits, then the pad word, then
+@      no more devices. After 20, before 21.
+@  23. Two mice before the pad (Controller setting 4, "2 mice + pad": a mouse
+@      for each of two players; tb_top sets it after test 22's transfer, the
+@      second mouse's right button, and a motion packet for each mouse):
+@      mouse 1's 32 bits, mouse 2's, the pad word, then no more devices.
+@      After 22, before 21.
+@  24. The dock's gamepads as pads of their own (InputV1; Controller setting
+@      0, tb_top connects three gamepads after test 23's transfer: the
+@      first's B, the second's Start, the third's left stick held left): pad
+@      1 (the handheld's buttons and the first gamepad: B), pad 2 (P), pad 3
+@      (left), then no more devices. After 23, before 21.
 @  21. A software video decoder's in-place decode into screens outside the
 @      FPGA, as Killing Time's EZFlix intro does it (Opera, instrumented:
 @      every access a 32-bit CPU access, the screens 0x20E800 and 0x234000
@@ -893,8 +909,8 @@ entry:
 	@ ---- 19. light gun on the control port (player bus DMA) ----
 	mov	r12, #19
 	bl	pbus_dma
-	ldr	r1, =0x80004D80		@ pad word, gun ID, trigger, count[19]
-	ldr	r2, =0x50D93FFF		@ count[18:0], hits, then 1s
+	ldr	r1, =0x4D8050D9		@ gun ID, trigger, count[19], count[18:3]
+	ldr	r2, =0x3F8000FF		@ count[2:0], hits, the pad word, then 1s
 	bl	pbus_check
 
 	@ ---- 20. mouse on the control port ----
@@ -924,6 +940,101 @@ entry:
 	bl	pbus_dma
 	ldr	r1, =0x8000498F		@ pad word, mouse ID 0x49, left button, dy -3 (bits 19:10) ...
 	ldr	r2, =0xF405FFFF		@ ... dy, dx +5 (bits 9:0), then 1s (one count per unit written)
+	bl	pbus_check
+
+	@ ---- 22. the mouse before the pad ----
+	@ tb_top sets the Controller setting to 3 (mouse + pad) after test 20's
+	@ transfer, and writes one motion packet (dx +5, dy -3; the left button
+	@ still held) when this test enables its transfer, as for test 20.
+	mov	r12, #22
+	ldr	r8, =0x03400000
+	ldr	r7, =0x1FF
+	ldr	r0, [r8, #0x34]
+	and	r0, r0, r7
+20:	ldr	r6, [r8, #0x34]
+	and	r6, r6, r7
+	cmp	r6, r0
+	mov	r0, r6
+	bcs	20b
+21:	ldr	r6, [r8, #0x34]
+	and	r6, r6, r7
+	cmp	r6, #30
+	bcc	21b
+	cmp	r6, #150
+	bhi	21b
+	bl	pbus_dma
+	ldr	r1, =0x498FF405		@ mouse ID 0x49, left button, dy -3, dx +5 first ...
+	ldr	r2, =0x8000FFFF		@ ... then the pad word, then 1s
+	bl	pbus_check
+
+	@ ---- 23. two mice before the pad ----
+	@ tb_top sets the Controller setting to 4 (2 mice + pad) and the second
+	@ mouse's right button after test 22's transfer, and writes a motion
+	@ packet for each mouse (mouse 1 dx +5 dy -3, mouse 2 dx -7 dy +2) when
+	@ this test enables its transfer, as for test 20.
+	mov	r12, #23
+	ldr	r8, =0x03400000
+	ldr	r7, =0x1FF
+	ldr	r0, [r8, #0x34]
+	and	r0, r0, r7
+20:	ldr	r6, [r8, #0x34]
+	and	r6, r6, r7
+	cmp	r6, r0
+	mov	r0, r6
+	bcs	20b
+21:	ldr	r6, [r8, #0x34]
+	and	r6, r6, r7
+	cmp	r6, #30
+	bcc	21b
+	cmp	r6, #150
+	bhi	21b
+	bl	pbus_dma
+	ldr	r4, =0x00032000
+	ldr	r3, [r4, #4]
+	ldr	r1, =0x498FF405		@ mouse 1: left button, dy -3, dx +5
+	cmp	r3, r1
+	movne	r2, r3
+	bne	fail
+	add	r11, r11, #1
+	ldr	r3, [r4, #8]
+	ldr	r1, =0x49200BF9		@ mouse 2: right button, dy +2, dx -7
+	cmp	r3, r1
+	movne	r2, r3
+	bne	fail
+	add	r11, r11, #1
+	ldr	r3, [r4, #12]
+	ldr	r1, =0x8000FFFF		@ the pad word, then 1s
+	cmp	r3, r1
+	movne	r2, r3
+	bne	fail
+	add	r11, r11, #1
+	ldr	r3, [r4, #16]
+	mvn	r1, #0			@ no more devices
+	cmp	r3, r1
+	movne	r2, r3
+	bne	fail
+	add	r11, r11, #1
+
+	@ ---- 24. the dock's gamepads as pads of their own ----
+	mov	r12, #24
+	ldr	r8, =0x03400000
+	ldr	r7, =0x1FF
+	ldr	r0, [r8, #0x34]
+	and	r0, r0, r7
+20:	ldr	r6, [r8, #0x34]
+	and	r6, r6, r7
+	cmp	r6, r0
+	mov	r0, r6
+	bcs	20b
+21:	ldr	r6, [r8, #0x34]
+	and	r6, r6, r7
+	cmp	r6, #30
+	bcc	21b
+	cmp	r6, #150
+	bhi	21b
+	bl	pbus_dma
+	ldr	r1, =0x80808020		@ pad 1: B; pad 2: P
+	ldr	r2, =0x8200FFFF		@ pad 3: left; then 1s
 	bl	pbus_check
 
 	@ ---- 21. in-place video decode into screens outside the FPGA ----

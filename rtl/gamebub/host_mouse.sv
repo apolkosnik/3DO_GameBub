@@ -5,7 +5,7 @@
 // Every write of the motion register is one packet: dx right positive, dy
 // down positive (PS/2 counts y up, so dy is negated), each clamped to the
 // packet's 9 bits (-256..255); HPS2PAD moves the 3DO mouse one count per unit
-// and takes at most 96 counts per control port read. Buttons: bit 0 left,
+// and takes at most 511 counts per control port read. Buttons: bit 0 left,
 // bit 1 right, bit 2 middle (PS/2 flag bits 0, 1, 2), in the flags byte at
 // all times: HPS2PAD reads them as they stand, so a button written without
 // a motion packet (the firmware does, with the mouse still) counts.

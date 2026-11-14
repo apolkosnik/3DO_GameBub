@@ -71,10 +71,14 @@ module cdd_emu (
 	input              sb_we,
 	input      [12: 0] sb_wa,            // word in the sector ring (0x4000_0000..0x4000_7FFF)
 	input      [31: 0] sb_wd,
-	output     [31: 0] core_cmd_words [4],
+	output     [31: 0] core_cmd_words [6],  // core -> host request: opcode, 5 parameters
 	output reg         core_req,         // HostV0 commandCore
 	input              core_done,
 	input              core_error,
+	input      [31: 0] core_res [3],     // its result words (status, ...)
+	// On-demand disc (files.json "on_demand", framework v1.1.0-beta4): file 0
+	// was not loaded at setup; the core reads it itself (see od_* below)
+	input              od_enable,
 	output reg [31: 0] disc_id,          // raw sector 0 bytes 0x58..0x5B = user bytes 0x48..0x4B (MiSTer hack table key)
 	output reg [31: 0] disc_msf,         // bytes 4..7 of the info block
 	output reg         disc_info_valid,
@@ -265,19 +269,19 @@ module cdd_emu (
 	reg [ 7:0] toc_tracks;
 	reg [23:0] toc_leadout_bcd;
 	always @(posedge clk_sys) begin
-		if (toc_we) tocr[toc_wa] <= toc_wd;
+		if (t_we) tocr[t_wa] <= t_wd;
 		toc_q <= tocr[toc_ra];
 	end
 	// A real table of contents has 1..99 tracks, also given in BCD. (With
 	// firmware that does not know "disc" files, a .cue would arrive as text.)
 	reg        toc_valid;
 	always @(posedge clk_sys) begin
-		if (toc_we && toc_wa == 9'd0) begin
-			toc_tracks <= toc_wd[7:0];
-			toc_valid  <= toc_wd[7:0] >= 8'd1 && toc_wd[7:0] <= 8'd99 &&
-			              toc_wd[15:8] == {4'(toc_wd[7:0] / 10), 4'(toc_wd[7:0] % 10)};
+		if (t_we && t_wa == 9'd0) begin
+			toc_tracks <= t_wd[7:0];
+			toc_valid  <= t_wd[7:0] >= 8'd1 && t_wd[7:0] <= 8'd99 &&
+			              t_wd[15:8] == {4'(t_wd[7:0] / 10), 4'(t_wd[7:0] % 10)};
 		end
-		if (toc_we && toc_wa == 9'd2) toc_leadout_bcd <= toc_wd[23:0];
+		if (t_we && t_wa == 9'd2) toc_leadout_bcd <= t_wd[23:0];
 	end
 
 	// Track table (streaming): first LBA, index 1 LBA and audio flag of each
@@ -285,13 +289,13 @@ module cdd_emu (
 	reg [23:0] trk_first [0:127];
 	reg [23:0] trk_idx1  [0:127];
 	reg        trk_audio [0:127];
-	wire [8:0] toc_wa_t = toc_wa - 9'd4;
+	wire [8:0] toc_wa_t = t_wa - 9'd4;
 	always @(posedge clk_sys) begin
-		if (toc_we && toc_wa >= 9'd4)
+		if (t_we && t_wa >= 9'd4)
 			case (toc_wa_t[1:0])
-				2'd0: trk_first[toc_wa_t[8:2]] <= toc_wd[23:0];
-				2'd2: trk_idx1 [toc_wa_t[8:2]] <= toc_wd[23:0];
-				2'd3: trk_audio[toc_wa_t[8:2]] <= toc_wd[31];
+				2'd0: trk_first[toc_wa_t[8:2]] <= t_wd[23:0];
+				2'd2: trk_idx1 [toc_wa_t[8:2]] <= t_wd[23:0];
+				2'd3: trk_audio[toc_wa_t[8:2]] <= t_wd[31];
 				default: ;
 			endcase
 	end
@@ -308,10 +312,10 @@ module cdd_emu (
 	reg [ 7:0] pl_idx;
 	reg [23:0] pa_v, pr_v;               // abs / rel time left to convert
 	reg [ 7:0] pa_m, pa_s, pr_m, pr_s;
-	wire [6:0] pl_ntr = disc_stream ? toc_tracks[6:0] : 7'd1;
-	wire [23:0] pl_first = disc_stream ? trk_first[pl_t] : 24'd150;
-	wire [23:0] pl_i1    = disc_stream ? trk_idx1[pl_hit] : 24'd150;
-	wire        pl_aud   = disc_stream ? trk_audio[pl_hit] : 1'b0;
+	wire [6:0] pl_ntr = ds_eff ? toc_tracks[6:0] : 7'd1;
+	wire [23:0] pl_first = ds_eff ? trk_first[pl_t] : 24'd150;
+	wire [23:0] pl_i1    = ds_eff ? trk_idx1[pl_hit] : 24'd150;
+	wire        pl_aud   = ds_eff ? trk_audio[pl_hit] : 1'b0;
 	always @(posedge clk_sys) begin
 		pl_done <= 0;
 		if (rst_sys) begin
@@ -383,33 +387,60 @@ module cdd_emu (
 		raw_byte_addr = off + {k, 1'b0};
 	endfunction
 
-	// Core -> host request (the same handshake as the fork's PSX core):
-	// raise request with the words set, wait for done or error, drop the
-	// request, wait for done and error to clear.
+	// Core -> host requests (HostV0 commandCore; opcode and parameters at
+	// 0xF000_1000, results written back by the host before done): raise
+	// request with the words set, wait for done (error: done and error),
+	// drop the request, wait for done and error to clear.
+	//   FileGetSize 0x0400 (file)                     -> status, size lo, hi
+	//   FileRead    0x0402 (file, address, offset lo, offset hi, count)
+	//                                                 -> status, bytes read
+	//   DiscGetToc  0x8400 (file, address): the fork firmware's table of
+	//               contents of a disc file it serves as a raw image (.cue,
+	//               .chd); stock firmware answers an unknown request with an
+	//               error, and the file is then read as one data track
+	// Sectors are read with FileRead at (LBA - 150) x the sector size (2352
+	// for a raw image, 2048 for an ISO, whose user data then goes 16 bytes
+	// into the ring slot). A read that is not answered OK in full fails.
+	localparam [31:0] REQ_FILE_GET_SIZE = 32'h0000_0400;
+	localparam [31:0] REQ_FILE_READ     = 32'h0000_0402;
+	localparam [31:0] REQ_DISC_GET_TOC  = 32'h0000_8400;
+	localparam [31:0] TOC_ADDR          = 32'h1000_0000;   // the disc file's first 2 KiB (toc_we)
 	typedef enum bit [1:0] { Q_IDLE, Q_WAIT, Q_CLEAR } qstate_t;
 	qstate_t   qst;
 	reg [31:0] q_lba;
 	reg        q_start;          // pulse from the main FSM (latched in q_pend)
 	reg        q_pend;
+	reg        od_qstart;        // pulse from the on-demand setup
 	reg        q_finished;       // pulse: answered (q_failed says how)
 	reg        q_failed;
 	reg [27:0] q_timer;
 	reg [31:0] q_addr;           // host address of the slot it fills
-	assign core_cmd_words[0] = CMD_DISC_READ;
-	assign core_cmd_words[1] = 32'd0;            // disc file id
-	assign core_cmd_words[2] = q_lba;            // absolute LBA (track 1 at 150)
-	assign core_cmd_words[3] = q_addr;
+	reg [31:0] q_off;            // file offset of sector q_lba
+	reg        od_iso;           // the on-demand disc is an ISO (2048-byte sectors)
+	// setup requests (od_*) or sector reads
+	reg        od_req;           // the request is a setup one: od_w
+	reg [31:0] od_w [6];
+	wire [11:0] q_cnt = od_iso ? 12'd2048 : 12'd2352;
+	always @(posedge clk_sys) q_off <= (q_lba - 32'd150) * (od_iso ? 32'd2048 : 32'd2352);
+	assign core_cmd_words[0] = od_req ? od_w[0] : REQ_FILE_READ;
+	assign core_cmd_words[1] = od_req ? od_w[1] : 32'd0;                       // the disc file
+	assign core_cmd_words[2] = od_req ? od_w[2] : q_addr + (od_iso ? 32'd16 : 32'd0);
+	assign core_cmd_words[3] = od_req ? od_w[3] : q_off;
+	assign core_cmd_words[4] = od_req ? od_w[4] : 32'd0;
+	assign core_cmd_words[5] = od_req ? od_w[5] : 32'(q_cnt);
+	// the count a read must return (0: not a read)
+	wire [31:0] q_want = od_req ? ((od_w[0] == REQ_FILE_READ) ? od_w[5] : 32'd0) : 32'(q_cnt);
 
 	always @(posedge clk_sys) begin
 		q_finished <= 0;
-		if (rst_sys) begin
+		if (rst_sys && !od_req) begin
 			// a request may still be answered after a reset: start by
 			// waiting for the answer to clear
 			core_req <= 0;
 			q_pend   <= 0;
 			qst <= Q_CLEAR;
 		end else begin
-			if (q_start) q_pend <= 1;
+			if (q_start || od_qstart) q_pend <= 1;
 			case (qst)
 				Q_IDLE: if (q_pend) begin
 					q_pend   <= 0;
@@ -420,8 +451,9 @@ module cdd_emu (
 				Q_WAIT: begin
 					q_timer <= q_timer + 1'd1;
 					if (core_done || core_error || &q_timer) begin
-						// no answer in ~5 s (e.g. stock firmware): fail
-						q_failed   <= !core_done;
+						// no answer in ~5 s: fail
+						q_failed   <= !core_done || core_error || core_res[0] != 32'd0 ||
+						              (q_want != 0 && core_res[1] != q_want);
 						q_finished <= 1;
 						core_req   <= 0;
 						qst <= Q_CLEAR;
@@ -432,6 +464,163 @@ module cdd_emu (
 			endcase
 		end
 	end
+
+	// ------------------------------------------------------------------
+	// On-demand disc setup (od_enable: the host set up the core without
+	// loading file 0). Once, when the core first runs: DiscGetToc; else
+	// FileGetSize and a FileRead of the file's first 2352 bytes into ring
+	// slot 0, which tell a raw image (sync 00 FF x10 00) from an ISO (Opera
+	// volume header 01 5A 5A 5A 5A 5A 01 at byte 0) and give the sector
+	// count. The core then writes a table of contents of one data track
+	// through the TOC port, as the fork firmware would, and the disc is read
+	// in streaming mode. Anything else (no answer, an error, a file that is
+	// neither, e.g. a .cue on stock firmware) leaves no disc.
+	// ------------------------------------------------------------------
+	typedef enum bit [3:0] { OD_OFF, OD_TOC, OD_TOC_W, OD_SIZE, OD_SIZE_W, OD_PROBE, OD_PROBE_W,
+	                         OD_DIV, OD_MSF, OD_SYN, OD_DONE, OD_FAIL } odstate_t;
+	odstate_t  ods;
+	reg        od_present;       // the on-demand disc is ready (streaming mode)
+	reg        od_change;        // pulse: it became ready
+	reg [31:0] od_size;
+	reg [31:0] od_pw [3];        // the probe's first three words
+	reg [31:0] od_rem;
+	reg [23:0] od_secs;          // sectors (quotient)
+	reg [ 4:0] od_bit;
+	reg [23:0] od_lo;            // lead-out LBA
+	reg [23:0] od_v;             // MSF conversion: frames left
+	reg [ 7:0] od_m, od_s;
+	reg [ 3:0] od_k;
+	reg        od_we;
+	reg [ 8:0] od_wa;
+	reg [31:0] od_wd;
+	function automatic [7:0] bin2bcd(input [7:0] x);
+		bin2bcd = {4'(x / 8'd10), 4'(x % 8'd10)};
+	endfunction
+	// the probe sees the host's writes to the first words of slot 0
+	// (cleared while the size is asked for, before the probe's FileRead)
+	always @(posedge clk_sys)
+		if (ods == OD_SIZE_W) od_pw <= '{default: '0};
+		else if (ods == OD_PROBE_W && sb_we && sb_wa < 13'd3) od_pw[sb_wa[1:0]] <= sb_wd;
+	always @(posedge clk_sys) begin
+		od_change <= 0;
+		od_qstart <= 0;
+		od_we     <= 0;
+		if (!od_enable) begin
+			ods        <= OD_OFF;
+			od_present <= 0;
+			od_iso     <= 0;
+			od_req     <= 0;
+		end else case (ods)
+			OD_OFF: if (!rst_sys) begin
+				od_w    <= '{REQ_DISC_GET_TOC, 32'd0, TOC_ADDR, 32'd0, 32'd0, 32'd0};
+				od_req  <= 1;
+				od_qstart <= 1;
+				ods <= OD_TOC;
+			end
+			OD_TOC: ods <= OD_TOC_W;
+			OD_TOC_W: if (q_finished) begin
+				if (!q_failed && toc_valid) begin
+					od_req <= 0;
+					ods <= OD_DONE;          // the fork's TOC, raw sectors
+				end else begin
+					od_w    <= '{REQ_FILE_GET_SIZE, 32'd0, 32'd0, 32'd0, 32'd0, 32'd0};
+					od_qstart <= 1;
+					ods <= OD_SIZE;
+				end
+			end
+			OD_SIZE: ods <= OD_SIZE_W;
+			OD_SIZE_W: if (q_finished) begin
+				if (q_failed || core_res[2] != 32'd0 || core_res[1] < 32'd2352) ods <= OD_FAIL;
+				else begin
+					od_size <= core_res[1];
+					od_w    <= '{REQ_FILE_READ, 32'd0, SECTOR_BUF_ADDR, 32'd0, 32'd0, 32'd2352};
+					od_qstart <= 1;
+					ods <= OD_PROBE;
+				end
+			end
+			OD_PROBE: ods <= OD_PROBE_W;
+			OD_PROBE_W: if (q_finished) begin
+				if (q_failed) ods <= OD_FAIL;
+				else if (od_pw[0] == 32'hFFFF_FF00 && od_pw[1] == 32'hFFFF_FFFF && od_pw[2] == 32'h00FF_FFFF) begin
+					od_iso <= 0;             // raw: sectors = size / 2352
+					od_rem <= '0;
+					od_secs <= '0;
+					od_bit <= 5'd31;
+					ods <= OD_DIV;
+				end else if (od_pw[0] == 32'h5A5A_5A01) begin
+					od_iso  <= 1;            // ISO: size / 2048
+					od_secs <= od_size[31:11] > 32'hFF_FFFF ? 24'hFF_FFFF : 24'(od_size[31:11]);
+					od_lo   <= 24'(od_size[31:11]) + 24'd150;
+					od_v    <= 24'(od_size[31:11]) + 24'd150;
+					{od_m, od_s} <= '0;
+					ods <= OD_MSF;
+				end else ods <= OD_FAIL;
+			end
+			OD_DIV: begin
+				// one quotient bit per clock (restoring division by 2352)
+				bit [32:0] r;
+				r = {od_rem, od_size[od_bit]};
+				if (r >= 33'd2352) begin
+					od_rem  <= 32'(r - 33'd2352);
+					od_secs <= {od_secs[22:0], 1'b1};
+				end else begin
+					od_rem  <= r[31:0];
+					od_secs <= {od_secs[22:0], 1'b0};
+				end
+				if (od_bit == 0) ods <= OD_MSF;
+				else od_bit <= od_bit - 5'd1;
+				od_lo <= '0;
+			end
+			OD_MSF: begin
+				// the lead-out's position, MM:SS:FF
+				if (od_lo == 0) begin
+					od_lo <= od_secs + 24'd150;
+					od_v  <= od_secs + 24'd150;
+					{od_m, od_s} <= '0;
+				end else if (od_v >= 24'd4500) begin od_v <= od_v - 24'd4500; od_m <= od_m + 8'd1; end
+				else if (od_v >= 24'd75) begin od_v <= od_v - 24'd75; od_s <= od_s + 8'd1; end
+				else begin
+					od_k <= '0;
+					ods <= OD_SYN;
+				end
+			end
+			OD_SYN: begin
+				// the table of contents (docs/disc_streaming.md): one data track
+				od_we <= 1;
+				od_wa <= 9'(od_k);
+				case (od_k)
+					4'd0: od_wd <= 32'h0000_0101;                                     // 1 track
+					4'd1: od_wd <= 32'(od_lo);                                        // lead-out LBA
+					4'd2: od_wd <= {8'h00, bin2bcd(od_m), bin2bcd(od_s), bin2bcd(8'(od_v))};
+					4'd3: od_wd <= 32'd0;
+					4'd4: od_wd <= 32'd150;                                           // first LBA
+					4'd5: od_wd <= 32'(od_lo) - 32'd1;                                // last LBA
+					4'd6: od_wd <= 32'd150;                                           // index 1
+					default: od_wd <= 32'h0000_0200;                                  // 00:02:00, data
+				endcase
+				if (od_k == 4'd7) begin
+					od_req <= 0;
+					ods <= OD_DONE;
+				end
+				od_k <= od_k + 4'd1;
+			end
+			OD_DONE: if (!od_present) begin
+				od_present <= 1;
+				od_change  <= 1;
+			end
+			default: od_req <= 0;    // OD_FAIL: no disc
+		endcase
+	end
+
+	// the TOC port: the host's writes (fork firmware), or the setup's
+	wire        t_we = toc_we | od_we;
+	wire [ 8:0] t_wa = od_we ? od_wa : toc_wa;
+	wire [31:0] t_wd = od_we ? od_wd : toc_wd;
+	// the disc: loaded by the host (preloaded ISO, or the fork's TOC) or
+	// on demand
+	wire        dp_eff = disc_present | od_present;
+	wire        ds_eff = disc_stream | od_present;
+	wire        dc_eff = disc_change | od_change;
 
 	function automatic [7:0] bcd2bin(input [7:0] x);
 		bcd2bin = x[7:4] * 8'd10 + x[3:0];
@@ -543,7 +732,7 @@ module cdd_emu (
 
 			// a disc was loaded or swapped: send its info block again (the
 			// controller then reports a media change, as on MiSTer)
-			if (disc_change) begin
+			if (dc_eff) begin
 				info_sent <= 0;
 				read_pend <= 0;
 			end
@@ -579,8 +768,8 @@ module cdd_emu (
 
 			case (cst)
 				C_IDLE: begin
-					if (disc_present && !info_sent && (!disc_stream || toc_valid)) begin
-						if (disc_stream) begin
+					if (dp_eff && !info_sent && (!ds_eff || toc_valid)) begin
+						if (ds_eff) begin
 							r_flush     = 1;              // sector 0 of track 1
 							r_flush_lba = 24'd150;
 							pf_end     <= 24'd151;
@@ -595,7 +784,7 @@ module cdd_emu (
 						sec_words <= 11'((blk_len + 12'd1) >> 1);
 						sec_off   <= (blk_len == 12'd2048) ? 12'd16 :
 						             (blk_len >= 12'd2352) ? 12'd0  : ((12'd2352 - blk_len) & 12'hFFE);
-						if (disc_stream) begin
+						if (ds_eff) begin
 							// the sector's track (audio or data); the sector comes
 							// from the ring. Not there (a seek): the ring restarts
 							// at it, so the firmware's latency overlaps the drive's
@@ -619,11 +808,11 @@ module cdd_emu (
 				end
 
 				// ---- disc-info block ----
-				C_INFO_WAIT: if (disc_stream ? rb_cnt != 0 : fetch_done) begin
+				C_INFO_WAIT: if (ds_eff ? rb_cnt != 0 : fetch_done) begin
 					// MiSTer hack-table key and MSF, as 3DO.sv extracts them
-					disc_msf <= disc_stream ? {bcd2bin(toc_leadout_bcd[23:16]), bcd2bin(toc_leadout_bcd[15:8]),
+					disc_msf <= ds_eff ? {bcd2bin(toc_leadout_bcd[23:16]), bcd2bin(toc_leadout_bcd[15:8]),
 					                           bcd2bin(toc_leadout_bcd[7:0]), 8'h00} : {leadout_msf, 8'h00};
-					zero_sector <= disc_stream && rb_fail[rb_head];
+					zero_sector <= ds_eff && rb_fail[rb_head];
 					rd_base  <= slot_base(rb_head);
 					CDD_DIEN <= 1;
 					widx     <= '0;
@@ -650,9 +839,9 @@ module cdd_emu (
 						toc_ra  <= (8'(widx[9:3]) - 8'd1 >= toc_tracks) ? 9'd2 : 9'(7 + 4 * (widx[9:3] - 1));
 					end else if (rd_phase == 2'd2) begin
 						bit [15:0] cw;
-						cw = disc_stream ? (zero_sector ? 16'h0000 : user_word(sbr_q, widx[0])) :
+						cw = ds_eff ? ((zero_sector || (od_iso && widx < 11'h208)) ? 16'h0000 : user_word(sbr_q, widx[0])) :
 						     (widx >= 11'h200 && widx < 11'h208) ? 16'h0000 : cddw(sbuf_q, host_le);
-						if (disc_stream)
+						if (ds_eff)
 							CDD_DATA <= info_word_toc(widx[9:0], toc_tracks, toc_leadout_bcd,
 							                          (8'(widx[9:3]) - 8'd1 >= toc_tracks) ? {8'h00, toc_leadout_bcd} : toc_q, cw);
 						else
@@ -711,7 +900,7 @@ module cdd_emu (
 					// data: the drive's sector time from the NEXT or READ; audio:
 					// a tick of the sector clock
 					if (rb_cnt != 0 && (sec_audio ? acredit != 0 : delay_cnt == 0)) begin
-						if (str_cancel || disc_change) cst <= C_IDLE;
+						if (str_cancel || dc_eff) cst <= C_IDLE;
 						else begin
 							a_send = sec_audio;
 							astream  <= sec_audio;
@@ -749,7 +938,10 @@ module cdd_emu (
 						// streaming: the raw sector; preloaded ISO: its 2048 bytes
 						// of user data, zeros after them in a longer block
 						if (zero_sector) w = 16'h0000;
-						else if (disc_stream) w = (sec_b < 12'd2352) ? user_word(sbr_q, sec_b[1]) : 16'h0000;
+						// (an on-demand ISO has only the user data, bytes 16-2063: its
+						// sync, header and EDC/ECC read as zeros)
+						else if (ds_eff) w = (sec_b < 12'd2352 && !(od_iso && (sec_b < 12'd16 || sec_b >= 12'd2064)))
+						                     ? user_word(sbr_q, sec_b[1]) : 16'h0000;
 						else w = widx[10] ? 16'h0000 : cddw(sbuf_q, host_le);
 						CDD_DATA <= w;                     // ioctl order: low byte first
 						CDD_WR   <= 1;
@@ -769,7 +961,7 @@ module cdd_emu (
 				end
 
 				C_SEC_END: begin
-					if (disc_stream) r_pop = 1;           // the sector leaves the ring
+					if (ds_eff) r_pop = 1;           // the sector leaves the ring
 					CDD_DTEN    <= 0;
 					cur_lba     <= cur_lba + 1'd1;
 					blocks_left <= blocks_left - 1'd1;
@@ -803,7 +995,7 @@ module cdd_emu (
 					pf_discard <= 0;
 				end
 				if (fill) rb_fail[pf_slot] <= q_failed;
-				if (r_flush || disc_change) begin
+				if (r_flush || dc_eff) begin
 					rb_on  <= r_flush;           // a disc change alone stops it
 					rb_lba <= r_flush_lba;
 					rb_cnt <= '0;
@@ -814,7 +1006,7 @@ module cdd_emu (
 						rb_lba  <= rb_lba + 24'd1;
 					end
 					rb_cnt <= rb_cnt + 4'(fill) - 4'(r_pop);
-					if (disc_stream && rb_on && !pf_busy && !r_pop && rb_cnt < 4'(RB_SLOTS) &&
+					if (ds_eff && rb_on && !pf_busy && !r_pop && rb_cnt < 4'(RB_SLOTS) &&
 					    (rb_lba + 24'(rb_cnt) < pf_end || astream)) begin
 						bit [4:0] sl;
 						sl = 5'(rb_head) + 5'(rb_cnt);

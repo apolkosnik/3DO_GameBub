@@ -1,29 +1,45 @@
 # Disc streaming
 
-On stock Game Bub firmware, cores get their files loaded into memory at startup, which
-limits the 3DO core to discs of up to 22 MiB. Commercial 3DO discs are 100–650 MB.
+Game Bub firmware loads a core's files into memory at startup, which would limit the 3DO
+core to discs of up to 22 MiB; commercial 3DO discs are 100-650 MB. Since framework and
+firmware `v1.1.0-beta4`, a file marked `"on_demand": true` in `files.json` is not loaded:
+the core reads it itself, at any offset, through core -> host requests. The disc is such
+a file, so the core reads only the sectors the game asks for.
 
-The PlayStation port in the [`neutralinsomniac/gamebub`](https://github.com/neutralinsomniac/gamebub/blob/psx/docs/psx.md)
-fork (branch `psx`) added on-demand disc reads to the Game Bub firmware. This core
-uses the same protocol, so **one firmware build serves both cores**.
+## Firmware
 
-## Firmware and framework support
+- **Stock firmware (`v1.1.0-beta4` or later):** a single-file image, an `.iso`
+  (2048-byte sectors) or a raw `.bin` (2352-byte sectors, one data track), of any size.
+  Stock firmware does not read `.cue` or `.chd` files: picked there, the core finds
+  neither a raw image nor an ISO in it and starts without a disc (the BIOS's screen).
+- **The fork's firmware** (`firmware/`) also reads `.cue` (with its `.bin` files, data
+  and CD-DA tracks) and `.chd`. It serves any disc file as one raw image of 2352-byte
+  sectors, track 1 at its start, and answers the core's DiscGetToc with the table of
+  contents.
 
-- **Stock firmware (`v1.1-beta`):** a core can send requests to the MCU, but they are
-  never answered. The framework's core→MCU channel exists (`commandCore`, interrupt bit
-  4, parameters at `0xF000_1000`). The firmware declares its registers but never enables
-  the interrupt or reads the parameters (`firmware/handheld/src/device/drivers/fpga/mod.rs`,
-  `worker/mod.rs`).
-- **The fork's firmware** answers them. A file marked `"disc": true` in `files.json` is
-  opened as a CD image (`.cue` with its `.bin` files, or a lone `.bin` of raw 2352-byte
-  sectors). The core then reads sectors on request (`firmware/handheld/src/core/disc.rs`,
-  `CoreManager::handle_core_request` in `core/mod.rs`).
+Firmware before `v1.1.0-beta4` cannot run this core: its input registers and requests
+differ (the core is built on the `v1.1.0-beta4` framework).
 
-## Protocol (as implemented by the fork firmware)
+## Protocol
 
-**Loading a disc.** The firmware sends `FileWriteStart`, writes the disc's **table of
-contents** to the file's address, then sends `FileWriteEnd` with the TOC's length.
-Little-endian 32-bit words:
+Requests use the HostV0 core -> host channel (the framework's `commandCore`): the core
+puts the opcode and up to five 32-bit parameters at `0xF000_1000`, raises `request`, and
+waits for `done`; the host writes its result words (status first, 0 = OK) back to
+`0xF000_1000` before `done`, and an error raises `error` with `done`. The core drops
+`request`, and the host clears its answer.
+
+| Request | Opcode | Parameters | Results |
+|---|---|---|---|
+| FileGetSize | `0x0400` | file id | status, size low, size high |
+| FileRead | `0x0402` | file id, core address, offset low, offset high, byte count | status, bytes read |
+| DiscGetToc (fork) | `0x8400` | file id, core address | status |
+
+FileRead writes the file's bytes to the core address as little-endian 32-bit words, at
+the file's `max_transfer_speed`; at the end of the file it returns fewer bytes. Stock
+firmware answers DiscGetToc, which it does not know, with an error.
+
+**The table of contents** (DiscGetToc, written to the core address; little-endian
+32-bit words):
 
 | Word | Content |
 |---|---|
@@ -36,37 +52,38 @@ Little-endian 32-bit words:
 | 6 + 4n | index 1 LBA |
 | 7 + 4n | index 1 position, BCD `0x00MMSSFF`; bit 31: audio track |
 
-LBAs are absolute: track 1 starts at 150 (00:02:00).
-
-**Reading a sector.** The core writes `DISC_READ` (`0x0400`), the file id, an absolute
-LBA and a destination address to its request words at `0xF000_1000`, then raises
-`commandCore.request`. The firmware reads the raw 2352-byte sector (sectors outside the
-image read as zeros) and writes it to the destination as little-endian words, at the
-file's `max_transfer_speed`. It then answers `done` (or `error`) in `0xF100_1104`. The
-core drops `request`, and the firmware clears the answer.
-
-**Changing discs.** From the pause menu, the firmware sends the new disc's TOC while the
-core runs.
+LBAs are absolute: track 1 starts at 150 (00:02:00). The raw image's sector at absolute
+LBA L is at byte offset (L - 150) x 2352.
 
 ## In this core
 
-- `files.json`: the disc file has `"disc": true` and extensions `cue`, `bin`, `iso`, `chd` (a CHD is read by the handheld firmware; see [firmware/](../firmware/README.md)).
-- **Mode.** `gb_host.sv` tells the two modes apart by the file's length. Under 2 KiB is
-  a TOC (streaming); anything else is an ISO image loaded into SDRAM (stock firmware, at
-  most 22 MiB). A TOC is only used if its track count is 1–99 and matches its BCD copy,
-  because stock firmware would deliver a `.cue` as plain text.
-- **Sector reads.** `cdd_emu.sv` issues `DISC_READ` requests into a read-ahead ring of
-  13 raw sectors in block RAM, mapped at host addresses `0x4000_0000`–`0x4000_7FFF`
-  (slot s at `0x4000_0000 + 2352 s`). The transfer never touches the SDRAM, and the 3DO
-  is not paused for it. The requests go one at a time, back to back: up to the end of
-  the READ the drive controller sent, and while audio plays, as far ahead as the ring
+- `files.json`: the disc file (id 0) has `"on_demand": true`, extensions `cue`, `bin`,
+  `iso`, `chd`, and `"disc": true` (the fork firmware's mark for a disc image).
+- **Setup** (`cdd_emu.sv`, `od_*`). When the core first runs after the host's setup
+  without file 0 loaded, it sends DiscGetToc to the file's first 2 KiB (`0x1000_0000`).
+  A valid table (1-99 tracks, the count matching its BCD copy) from the fork firmware
+  makes it a raw image with those tracks. Otherwise it sends FileGetSize and a FileRead
+  of the file's first 2352 bytes into ring slot 0: a sync pattern (`00 FF x10 00`) makes
+  it a raw image of size / 2352 sectors, the Opera volume header (`01 5A 5A 5A 5A 5A 01`)
+  an ISO of size / 2048 sectors, and the core writes a table of contents of one data
+  track itself. Anything else (no answer, an error, a `.cue` read as text) leaves no
+  disc. A disc loaded at setup (`FileWriteStart`/`FileWriteEnd` of file 0: an ISO in the
+  SDRAM, up to 22 MiB, or a table of contents) is still taken; `tb_top +preload` keeps
+  that path tested.
+- **Sector reads.** `cdd_emu.sv` sends FileRead requests into a read-ahead ring of
+  13 raw sectors in block RAM, mapped at host addresses `0x4000_0000`-`0x4000_7FFF`
+  (slot s at `0x4000_0000 + 2352 s`): 2352 bytes at (L - 150) x 2352 for a raw image,
+  2048 bytes at (L - 150) x 2048 to 16 bytes into the slot for an ISO, whose sync,
+  header and EDC/ECC then read as zeros. The transfer never touches the SDRAM, and the
+  3DO is not paused for it. The requests go one at a time, back to back: up to the end
+  of the READ the drive controller sent, and while audio plays, as far ahead as the ring
   has room (13 sectors, 173 ms at 1x). A slow answer (an SD read, a file opened at a
   track boundary) then overlaps playback instead of delaying a sector. A READ of a sector
   that is not next in the ring (a seek) restarts the ring there; its first request goes
   out at once, so the firmware's latency overlaps the drive's seek time. With the
-  default block length (2048 bytes), the core hands bytes 16–2063 (the MODE1 user data)
-  to the controller, as MiSTer's HPS does. A failed or unanswered request (about 5 s
-  timeout) reads as an empty sector.
+  default block length (2048 bytes), the core hands bytes 16-2063 (the MODE1 user data)
+  to the controller, as MiSTer's HPS does. A request that fails, is not answered OK in
+  full, or gets no answer (about 5 s) reads as an empty sector.
 - **CD-DA and raw sectors.** The 3DO has no analog CD audio path: its audio CD player
   reads CD-DA sectors through the drive's data port and plays them on the DSP. The drive
   commands this takes (`3DO_CDROM.sv`, as SataTo3DO's drive emulation implements them):
@@ -99,18 +116,17 @@ core runs.
 - **Disc swap.** A TOC arriving while the core runs resends the disc-info block, which
   the controller reports as a media change.
 
-With the fork's firmware, use `.cue`/`.bin`. That firmware opens any disc file that is
-not a `.cue` as raw 2352-byte sectors (`DiscImage::open` in `disc.rs`): an `.iso` whose
-size is not a multiple of 2352 is refused ("not a raw image"), and one whose size happens
-to be would be read as garbage. `files.json` still lists `iso` for stock firmware, which
-preloads it. `tools/iso2bin.py image.iso` converts an ISO into `image.bin` (MODE1/2352:
-sync, header, data, EDC, P/Q ECC) and `image.cue` for the fork's firmware.
+`tools/iso2bin.py image.iso` converts an ISO into `image.bin` (MODE1/2352: sync, header,
+data, EDC, P/Q ECC) and `image.cue`.
 
 ## Verification
 
-- `sim/run_tb.sh tb_top +stream`: a model of the fork firmware serves `DISC_READ`
-  requests for a disc with a data track and an audio track. The test BIOS's CD tests run
-  through it:
+- `sim/run_tb.sh tb_top` (stock firmware: an ISO; the model answers DiscGetToc with an
+  error, then FileGetSize and FileRead) and `tb_top +stream` (the fork firmware: a raw
+  image with a data track and an audio track, its table of contents on DiscGetToc). The
+  end of the run checks that the core set the disc up on demand, as an ISO or a raw
+  image, with its tracks. With `+stream`, the test BIOS's CD
+  tests run through it:
   - read capacity and a two-sector read (test 7);
   - disc info and TOC (test 14);
   - two 2352-byte CD-DA blocks, then a third through a new READ that continues the
@@ -122,7 +138,8 @@ sync, header, data, EDC, P/Q ECC) and `image.cue` for the fork's firmware.
   that continues the stream. The firmware model answers the request for that READ's
   sector 20 ms late (`+disc_spike_us`), and the sector still comes on time from the
   read-ahead. Every request must go to a slot of the ring.
-- `tb_boot +disc_bin=<image.bin>`: boots a real BIOS while streaming a real disc image.
+- `tb_boot +disc_bin=<image.bin>` (or `+disc_iso=<image.iso>`; `+fw_stock` for stock
+  firmware): boots a real BIOS while streaming a real disc image on demand.
   The real Wolfenstein 3D image (133 MB) streams through the same path.
   `+audio_tracks=<n> [+data_sectors=<k>]` describes the image as a data track of k sectors
   (none with k = 0) followed by n audio tracks. The log shows every command the BIOS sends

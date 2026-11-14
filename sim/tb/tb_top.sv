@@ -13,8 +13,11 @@
 // Video timing towards the framework is checked as well (320 pixels per
 // line, 240 lines per frame).
 //
-// Plusargs: +rom=<file> (default build/sim/testrom.bin), +be (host sends
-//           big-endian words; detected by the core from the ISO header),
+// Plusargs: +rom=<file> (default build/sim/testrom.bin); the disc (see the
+//           firmware model): stock firmware with an on-demand ISO (default),
+//           +stream (the fork's raw image with a CD-DA track), +preload (the
+//           ISO loaded at setup; +be: the host sends big-endian words,
+//           detected by the core from the ISO header),
 //           +frames=<n> video frames to check, +trace (CPU bus), +state
 //           (core control state), +sdram_verbose (SDRAM commands)
 //
@@ -58,6 +61,21 @@ module tb_top;
 	wire [15:0] s_dq_out, s_dq_in;
 
 	reg  [11:0] buttons = 0;
+	// the dock's gamepads: connected, buttons {l2 r2 l3 r3 a b x y up down
+	// left right l1 r1 start select}, sticks
+	reg  [ 3:0] gp_on = '0;
+	reg  [15:0] gp_bt [4] = '{default: '0};
+	reg  [ 7:0] gp_lx [4] = '{default: '0}, gp_ly [4] = '{default: '0}, gp_rx [4] = '{default: '0}, gp_ry [4] = '{default: '0};
+	// InputExtendedV0 slots as the framework (HandheldInput) drives them:
+	// docked (a dock controller in slot 0) the dock's, else slot 0 is the
+	// handheld (`buttons`: A B X Y Up Down Left Right L R Start Select) and
+	// the other slots are empty.
+	wire        docked = gp_on[0];
+	wire [15:0] hh_bt = {4'b0000, buttons[0], buttons[1], buttons[2], buttons[3], buttons[4], buttons[5],
+	                     buttons[6], buttons[7], buttons[8], buttons[9], buttons[10], buttons[11]};
+	wire [ 3:0] sl_on = docked ? gp_on : 4'b0001;
+	wire [15:0] sl_bt [4] = '{docked ? gp_bt[0] : hh_bt, docked ? gp_bt[1] : '0, docked ? gp_bt[2] : '0, docked ? gp_bt[3] : '0};
+	wire [ 3:0] sl_type [4] = '{docked ? 4'd3 : 4'd1, sl_on[1] ? 4'd3 : 4'd0, sl_on[2] ? 4'd3 : 4'd0, sl_on[3] ? 4'd3 : 4'd0};
 	wire        sr_ce_n, sr_we_n, sr_oe_n, sr_dir;
 	wire [ 1:0] sr_mask_n;
 	wire [17:0] sr_a;
@@ -78,10 +96,10 @@ module tb_top;
 		.host_commandHost_done(h_cdone), .host_commandHost_error(h_err),
 		.host_commandCore_request(c_req), .host_commandCore_busy(1'b0),
 		.host_commandCore_done(c_done), .host_commandCore_error(c_err),
-		.input_buttons_a(buttons[0]), .input_buttons_b(buttons[1]), .input_buttons_x(buttons[2]),
-		.input_buttons_y(buttons[3]), .input_buttons_up(buttons[4]), .input_buttons_down(buttons[5]),
-		.input_buttons_left(buttons[6]), .input_buttons_right(buttons[7]), .input_buttons_l(buttons[8]),
-		.input_buttons_r(buttons[9]), .input_buttons_start(buttons[10]), .input_buttons_select(buttons[11]),
+		.input_slots_0_active(sl_on[0]), .input_slots_0_deviceType(sl_type[0]), .input_slots_0_buttons_l2(sl_bt[0][15]), .input_slots_0_buttons_r2(sl_bt[0][14]), .input_slots_0_buttons_l3(sl_bt[0][13]), .input_slots_0_buttons_r3(sl_bt[0][12]), .input_slots_0_buttons_a(sl_bt[0][11]), .input_slots_0_buttons_b(sl_bt[0][10]), .input_slots_0_buttons_x(sl_bt[0][9]), .input_slots_0_buttons_y(sl_bt[0][8]), .input_slots_0_buttons_up(sl_bt[0][7]), .input_slots_0_buttons_down(sl_bt[0][6]), .input_slots_0_buttons_left(sl_bt[0][5]), .input_slots_0_buttons_right(sl_bt[0][4]), .input_slots_0_buttons_l1(sl_bt[0][3]), .input_slots_0_buttons_r1(sl_bt[0][2]), .input_slots_0_buttons_start(sl_bt[0][1]), .input_slots_0_buttons_select(sl_bt[0][0]), .input_slots_0_analog_leftX(gp_lx[0]), .input_slots_0_analog_leftY(gp_ly[0]), .input_slots_0_analog_rightX(gp_rx[0]), .input_slots_0_analog_rightY(gp_ry[0]), .input_slots_0_analog_leftTrigger(8'd0), .input_slots_0_analog_rightTrigger(8'd0),
+		.input_slots_1_active(sl_on[1]), .input_slots_1_deviceType(sl_type[1]), .input_slots_1_buttons_l2(sl_bt[1][15]), .input_slots_1_buttons_r2(sl_bt[1][14]), .input_slots_1_buttons_l3(sl_bt[1][13]), .input_slots_1_buttons_r3(sl_bt[1][12]), .input_slots_1_buttons_a(sl_bt[1][11]), .input_slots_1_buttons_b(sl_bt[1][10]), .input_slots_1_buttons_x(sl_bt[1][9]), .input_slots_1_buttons_y(sl_bt[1][8]), .input_slots_1_buttons_up(sl_bt[1][7]), .input_slots_1_buttons_down(sl_bt[1][6]), .input_slots_1_buttons_left(sl_bt[1][5]), .input_slots_1_buttons_right(sl_bt[1][4]), .input_slots_1_buttons_l1(sl_bt[1][3]), .input_slots_1_buttons_r1(sl_bt[1][2]), .input_slots_1_buttons_start(sl_bt[1][1]), .input_slots_1_buttons_select(sl_bt[1][0]), .input_slots_1_analog_leftX(gp_lx[1]), .input_slots_1_analog_leftY(gp_ly[1]), .input_slots_1_analog_rightX(gp_rx[1]), .input_slots_1_analog_rightY(gp_ry[1]), .input_slots_1_analog_leftTrigger(8'd0), .input_slots_1_analog_rightTrigger(8'd0),
+		.input_slots_2_active(sl_on[2]), .input_slots_2_deviceType(sl_type[2]), .input_slots_2_buttons_l2(sl_bt[2][15]), .input_slots_2_buttons_r2(sl_bt[2][14]), .input_slots_2_buttons_l3(sl_bt[2][13]), .input_slots_2_buttons_r3(sl_bt[2][12]), .input_slots_2_buttons_a(sl_bt[2][11]), .input_slots_2_buttons_b(sl_bt[2][10]), .input_slots_2_buttons_x(sl_bt[2][9]), .input_slots_2_buttons_y(sl_bt[2][8]), .input_slots_2_buttons_up(sl_bt[2][7]), .input_slots_2_buttons_down(sl_bt[2][6]), .input_slots_2_buttons_left(sl_bt[2][5]), .input_slots_2_buttons_right(sl_bt[2][4]), .input_slots_2_buttons_l1(sl_bt[2][3]), .input_slots_2_buttons_r1(sl_bt[2][2]), .input_slots_2_buttons_start(sl_bt[2][1]), .input_slots_2_buttons_select(sl_bt[2][0]), .input_slots_2_analog_leftX(gp_lx[2]), .input_slots_2_analog_leftY(gp_ly[2]), .input_slots_2_analog_rightX(gp_rx[2]), .input_slots_2_analog_rightY(gp_ry[2]), .input_slots_2_analog_leftTrigger(8'd0), .input_slots_2_analog_rightTrigger(8'd0),
+		.input_slots_3_active(sl_on[3]), .input_slots_3_deviceType(sl_type[3]), .input_slots_3_buttons_l2(sl_bt[3][15]), .input_slots_3_buttons_r2(sl_bt[3][14]), .input_slots_3_buttons_l3(sl_bt[3][13]), .input_slots_3_buttons_r3(sl_bt[3][12]), .input_slots_3_buttons_a(sl_bt[3][11]), .input_slots_3_buttons_b(sl_bt[3][10]), .input_slots_3_buttons_x(sl_bt[3][9]), .input_slots_3_buttons_y(sl_bt[3][8]), .input_slots_3_buttons_up(sl_bt[3][7]), .input_slots_3_buttons_down(sl_bt[3][6]), .input_slots_3_buttons_left(sl_bt[3][5]), .input_slots_3_buttons_right(sl_bt[3][4]), .input_slots_3_buttons_l1(sl_bt[3][3]), .input_slots_3_buttons_r1(sl_bt[3][2]), .input_slots_3_buttons_start(sl_bt[3][1]), .input_slots_3_buttons_select(sl_bt[3][0]), .input_slots_3_analog_leftX(gp_lx[3]), .input_slots_3_analog_leftY(gp_ly[3]), .input_slots_3_analog_rightX(gp_rx[3]), .input_slots_3_analog_rightY(gp_ry[3]), .input_slots_3_analog_leftTrigger(8'd0), .input_slots_3_analog_rightTrigger(8'd0),
 		.sdram_clock(s_clk), .sdram_cke(s_cke), .sdram_cs(s_cs), .sdram_ras(s_ras), .sdram_cas(s_cas),
 		.sdram_we(s_we), .sdram_dqm(s_dqm), .sdram_bank(s_ba), .sdram_address(s_a),
 		.sdram_dataIn(s_dq_in), .sdram_dataOut(s_dq_out), .sdram_dataDir(s_oe),
@@ -188,11 +206,21 @@ module tb_top;
 	endtask
 
 	// ------------------------------------------------------------------
-	// Disc-streaming firmware model (+stream): the fork firmware's
-	// send_disc (table of contents to the disc file's address) and
-	// disc_read (raw 2352-byte sectors on DISC_READ requests).
+	// Disc firmware model. The disc file is on demand (files.json
+	// "on_demand", framework v1.1.0-beta4): the core asks for it through
+	// HostV0 core -> host requests (opcode and 5 parameters at 0xF000_1000,
+	// results written back there before done; an error is done and error):
+	// FileGetSize 0x0400, FileRead 0x0402 (file, address, offset lo, hi,
+	// count; short at the end of the file) and the fork's DiscGetToc 0x8400
+	// (file, address).
+	//   default:  stock firmware: the ISO; DiscGetToc is unknown (error)
+	//   +stream:  the fork firmware: the disc as a raw image (data track and
+	//             a CD-DA track), its table of contents on DiscGetToc
+	//   +preload: no requests: the ISO loaded at setup (FileWrite, before
+	//             on-demand files; +be: big-endian host words)
 	// ------------------------------------------------------------------
-	bit stream_mode;
+	bit stream_mode, preload_mode;
+	int disc_reqs = 0;
 	int sectors_served = 0;
 	int disc_latency_us = 300;
 	// A firmware hiccup (a slow SD read, a file opened at a track boundary):
@@ -233,9 +261,8 @@ module tb_top;
 		return 8'h00;   // EDC/ECC not modelled
 	endfunction
 
-	task automatic send_toc();
-		bit [31:0] r, toc [12];
-		bit e;
+	task automatic send_toc(input bit [31:0] addr);
+		bit [31:0] toc [12];
 		int sectors, a0;
 		sectors = iso_len / 2048;
 		a0 = 150 + sectors;                  // track 2 (audio)
@@ -245,10 +272,16 @@ module tb_top;
 		toc[3] = 0;
 		toc[4] = 150; toc[5] = a0 - 1; toc[6] = 150; toc[7] = msf_bcd(150);
 		toc[8] = a0; toc[9] = a0 + AUDIO_SECTORS - 1; toc[10] = a0; toc[11] = msf_bcd(a0) | 32'h8000_0000;
-		host_cmd(16'h0300, 0, 0, 0, r, e);
-		for (int i = 0; i < 12; i++) host_wr(32'h1000_0000 + 4 * i, toc[i]);
-		host_cmd(16'h0301, 0, 48, 0, r, e);
+		for (int i = 0; i < 12; i++) host_wr(addr + 4 * i, toc[i]);
 	endtask
+	// the disc file's byte o: the raw image (+stream) or the ISO
+	function automatic [7:0] file_byte(input longint o);
+		if (stream_mode) return raw_byte(int'(o / 2352) + 150, int'(o % 2352));
+		return iso.exists(int'(o)) ? iso[int'(o)] : 8'h00;
+	endfunction
+	function automatic longint file_size();
+		return stream_mode ? longint'(iso_len / 2048 + AUDIO_SECTORS) * 2352 : longint'(iso_len);
+	endfunction
 
 	// Every command the test ROM writes to the CD controller and the status
 	// bytes it reads back, as seen on the controller's port.
@@ -312,7 +345,7 @@ module tb_top;
 			end else audio_last = -1s;
 		end
 		if (dut.cdd.cmd_new && dut.cdd.comm[0] == 8'h20) next_cmd_t = $realtime;
-		if (dut.cdd_dten && !dten_d && dut.cdd.disc_stream && is_audio(int'(dut.cdd.snd_lba))) begin
+		if (dut.cdd_dten && !dten_d && dut.cdd.ds_eff && is_audio(int'(dut.cdd.snd_lba))) begin
 			realtime g, per;
 			per = dut.cdrom.CDD_SPEED2X ? 1s / 150 : 1s / 75;
 			audio_secs++;
@@ -377,49 +410,134 @@ module tb_top;
 	end
 
 	initial forever begin
-		bit [31:0] w [4];
+		bit [31:0] w [6];
+		bit [31:0] res [3];
+		bit        ok, unknown;
 		@(posedge clk_sys);
-		if (stream_mode && c_req && !c_done && !c_err) begin
-			for (int i = 0; i < 4; i++) host_rd(32'hF000_1000 + 4 * i, w[i]);
-			#(disc_latency_us * 1us);
-			if (disc_spikes < 2 && int'(w[2]) == 150 + iso_len / 2048 + 3) begin
-				disc_spikes++;
-				$display("[%0t] firmware model: abs LBA %0d answered %0d us late", $realtime, w[2], disc_spike_us);
-				#(disc_spike_us * 1us);
-			end
-			if (w[3] < 32'h4000_0000 || w[3] > 32'h4000_7FFF - 2352 + 1 || (w[3] - 32'h4000_0000) % 2352 != 0)
-				fail($sformatf("core request: destination %08h is not a sector slot", w[3]));
-			if (w[0] != 32'h0400 || w[1] != 0) begin
-				fail($sformatf("unexpected core request %08h %08h", w[0], w[1]));
-				c_err <= 1;
-			end else begin
-				for (int i = 0; i < 2352; i += 4)
-					host_wr(w[3] + i, {raw_byte(w[2], i + 3), raw_byte(w[2], i + 2), raw_byte(w[2], i + 1), raw_byte(w[2], i)});
-				sectors_served++;
-				c_done <= 1;
-			end
+		if (!preload_mode && c_req && !c_done && !c_err) begin
+			for (int i = 0; i < 6; i++) host_rd(32'hF000_1000 + 4 * i, w[i]);
+			disc_reqs++;
+			res = '{default: '0};
+			ok = 1;
+			unknown = 0;
+			if (w[1] != 0) fail($sformatf("core request %08h for file %0d, not the disc", w[0], w[1]));
+			case (w[0])
+				32'h0000_0400: begin res[1] = file_size()[31:0]; res[2] = file_size()[63:32]; end
+				32'h0000_0402: begin
+					longint off;
+					int n;
+					off = {w[4], w[3]};
+					n = (off >= file_size()) ? 0 : (file_size() - off < longint'(w[5])) ? int'(file_size() - off) : int'(w[5]);
+					#(disc_latency_us * 1us);
+					// a sector read (not the core's first look at the file)
+					if (off != 0 || w[2] != 32'h4000_0000) begin
+						bit [31:0] slot;
+						slot = w[2] - (stream_mode ? 32'd0 : 32'd16);
+						if (slot < 32'h4000_0000 || slot > 32'h4000_7FFF - 2352 + 1 || (slot - 32'h4000_0000) % 2352 != 0)
+							fail($sformatf("FileRead: destination %08h is not a sector slot (+%0d)", w[2], stream_mode ? 0 : 16));
+						if (w[5] != (stream_mode ? 2352 : 2048) || off % w[5] != 0)
+							fail($sformatf("FileRead of %0d bytes at %0d: not one %0d-byte sector", w[5], off, stream_mode ? 2352 : 2048));
+						if (stream_mode && disc_spikes < 2 && off == longint'(iso_len / 2048 + 3) * 2352) begin
+							disc_spikes++;
+							$display("[%0t] firmware model: abs LBA %0d answered %0d us late", $realtime, 150 + iso_len / 2048 + 3, disc_spike_us);
+							#(disc_spike_us * 1us);
+						end
+						sectors_served++;
+					end
+					for (int i = 0; i < n; i += 4)
+						host_wr(w[2] + i, {file_byte(off + i + 3), file_byte(off + i + 2), file_byte(off + i + 1), file_byte(off + i)});
+					res[1] = n;
+				end
+				32'h0000_8400: begin
+					if (stream_mode) send_toc(w[2]);
+					else unknown = 1;      // stock firmware: an unknown request
+				end
+				default: begin
+					fail($sformatf("unexpected core request %08h", w[0]));
+					unknown = 1;
+				end
+			endcase
+			if (!unknown) for (int i = 0; i < 3; i++) host_wr(32'hF000_1000 + 4 * i, res[i]);
+			c_done <= 1;
+			c_err  <= unknown || !ok;
 			while (c_req) @(posedge clk_sys);
 			c_done <= 0; c_err <= 0;
 		end
 	end
 
-	// Read the NVRAM file back as the MCU does on exit
+	// Read the NVRAM file back as the MCU does on exit, and on pause while the
+	// game runs (save_on_pause). The MCU reads it over SPI, which cannot wait
+	// (framework SpiReceiverFifo): the read request for word j is queued one
+	// SPI word time after the one for word j-1, the first at the end of the
+	// command, and word j is shifted out SAVE_LEAD words after its request
+	// (the 8 dummy bytes); the core answers the requests in order. A word not
+	// there in time is sent as FFFFFFFF and the rest of the save shifts. The
+	// default 5000 KB/s (10 MHz quad SPI) makes a word SAVE_WORD long. Each
+	// save is checked against that schedule with the host reads' own times.
+	// gb_host holds the 3DO paused for a save (save_hold); without it the
+	// reads waited for the SDRAM behind the running 3DO and the saves on the
+	// card came out shifted and FF-filled.
+	localparam realtime SAVE_WORD = 800ns;
+	localparam int      SAVE_LEAD = 2;
+	int       nvram_saves = 0, nvram_save_words = 0, nvram_underflows = 0;
+	realtime  nvram_worst_slack = 1s;
 	bit [7:0] nvram [32768];
-	bit [31:0] nvram_size;       // FileReadStart's answer: 0x8000, or 0 when unchanged
+	bit [31:0] nvram_size;       // FileReadStart's answer: always 0x8000 (the firmware truncates the file to it)
 	task automatic read_nvram(input int bytes);
 		bit [31:0] r, w;
 		bit e;
 		host_cmd(16'h0302, 3, 0, 0, r, e);
 		if (e) fail("FileReadStart(3) error");
-		if (r != 32'h8000 && r != 0) fail($sformatf("FileReadStart(3) size %08h", r));
+		// the whole NVRAM every time: v1.1.0-beta4 firmware truncates the
+		// save file and writes what this says (a 0 would empty it)
+		if (r != 32'h8000) fail($sformatf("FileReadStart(3) size %08h, expected 00008000", r));
 		nvram_size = r;
-		// the testbench reads the memory either way (the firmware would skip it on 0)
+		begin
+		realtime t0, done_at;
+		int under;
+		t0 = $realtime;
+		done_at = t0;
+		under = 0;
+		nvram_saves++;
 		for (int o = 0; o < bytes; o += 4) begin
+			realtime req, need, start, dt, slack;
+			int j;
+			j = o / 4;
+			req  = t0 + j * SAVE_WORD;
+			need = t0 + (j + SAVE_LEAD) * SAVE_WORD;
+			// the core takes request j when it is queued and the one before is answered
+			start = req > done_at ? req : done_at;
+			if ($realtime < start) #(start - $realtime);
+			start = $realtime;
+			host_rd(32'h3000_0000 + o, w);
+			dt = $realtime - start;
+			done_at = $realtime;
+			slack = need - done_at;
+			if (slack < nvram_worst_slack) nvram_worst_slack = slack;
+			nvram_save_words++;
+			if (done_at > need) begin
+				under++;
+				nvram_underflows++;
+				if (nvram_underflows <= 5)
+					$display("[%0t] NVRAM save %0d: byte %04h answered %0.0f ns after the SPI sent it (the read took %0.0f ns)",
+					         $realtime, nvram_saves, o, (done_at - need) / 1ns, dt / 1ns);
+			end
+			if (host_be) {nvram[o], nvram[o+1], nvram[o+2], nvram[o+3]} = w;
+			else         {nvram[o+3], nvram[o+2], nvram[o+1], nvram[o]} = w;
+		end
+		end
+		host_cmd(16'h0303, 3, 0, 0, r, e);
+	endtask
+
+	// The test ROM's verdict, read without a save (the firmware never polls the
+	// NVRAM; a save pauses the 3DO)
+	task automatic peek_nvram(input int from, input int bytes);
+		bit [31:0] w;
+		for (int o = from; o < from + bytes; o += 4) begin
 			host_rd(32'h3000_0000 + o, w);
 			if (host_be) {nvram[o], nvram[o+1], nvram[o+2], nvram[o+3]} = w;
 			else         {nvram[o+3], nvram[o+2], nvram[o+1], nvram[o]} = w;
 		end
-		host_cmd(16'h0303, 3, 0, 0, r, e);
 	endtask
 
 	// "Buttons" setting (0x100C): each Game Bub button held alone gives one
@@ -527,15 +645,16 @@ module tb_top;
 		bit [31:0] r;
 		bit e;
 		bit done;
-		bit nvram_changed;
 
 		if (!$value$plusargs("rom=%s", romfile)) romfile = "build/sim/testrom.bin";
 		if (!$value$plusargs("frames=%d", n_frames)) n_frames = 2;
 		host_be = $test$plusargs("be");
 		stream_mode = $test$plusargs("stream");
+		preload_mode = $test$plusargs("preload");
+		if (stream_mode && preload_mode) $fatal(1, "tb_top: +stream and +preload exclude each other");
+		if (host_be && !preload_mode) $fatal(1, "tb_top: +be needs +preload (the firmware's FileRead writes little-endian words)");
 		void'($value$plusargs("disc_latency_us=%d", disc_latency_us));
 		void'($value$plusargs("disc_spike_us=%d", disc_spike_us));
-		if (stream_mode && host_be) $fatal(1, "tb_top: +stream uses little-endian host words");
 
 		fd = $fopen(romfile, "rb");
 		if (fd == 0) $fatal(1, "tb_top: cannot open %s", romfile);
@@ -567,8 +686,8 @@ module tb_top;
 		$display("[%0t] core status: setup", $realtime);
 
 		// files in files.json order
-		if (stream_mode) send_toc();
-		else             send_file(0, 32'h1000_0000, iso, iso_len);
+		// (the disc file is on demand: not sent, unless +preload)
+		if (preload_mode) send_file(0, 32'h1000_0000, iso, iso_len);
 		send_file(1, 32'h2000_0000, rom, rom_len);
 
 		host_cmd(16'h0102, 0, 0, 0, r, e);   // SetupComplete
@@ -578,12 +697,9 @@ module tb_top;
 		$display("[%0t] core status: halted (setup complete)", $realtime);
 
 		// The blank NVRAM must have been formatted (save file not supplied),
-		// and reported as changed (a new save file is due); afterwards it is
-		// unchanged until the 3DO writes it.
+		// and every save gives all of it, also unchanged (read_nvram).
 		read_nvram(16);
-		if (nvram_size != 32'h8000) fail("freshly formatted NVRAM not reported as changed");
 		read_nvram(16);
-		if (nvram_size != 0) fail("unchanged NVRAM reported as changed");
 		if ({nvram[0], nvram[1], nvram[2], nvram[3]} != 32'h015A5A5A || nvram[6] != 8'h02)
 			fail($sformatf("NVRAM not formatted: %02h %02h %02h %02h .. %02h", nvram[0], nvram[1], nvram[2], nvram[3], nvram[6]));
 
@@ -595,7 +711,7 @@ module tb_top;
 		check_buttons(0);
 		$display("[%0t] Buttons setting: %0d pad words checked", $realtime, pad_checks);
 		host_wr(32'h0000_1010, 32'(sram_mode));   // "VRAM memory", taken while the 3DO is in reset
-		// light gun after the pad (test ROM test 19): aim x 0x4000, y 0x8000,
+		// light gun before the pad (test ROM test 19): aim x 0x4000, y 0x8000,
 		// trigger held
 		host_wr(32'h0000_1014, 32'h1);
 		host_wr(32'h0000_1018, 32'h8000_4000);
@@ -620,20 +736,32 @@ module tb_top;
 
 		// Poll the verdict in NVRAM bytes 0x100..0x10F
 		done = 0;
-		nvram_changed = 0;
 		// (up to about 900 ms: test 14 reads CD-DA sectors in real time; test
 		// 15 copies with the video DMA on, one transfer per shown line with the
 		// SRAM safe timing; tests 15-17 wait for frame starts)
 		for (int t = 0; t < 9000 && !done; t++) begin
 			#100us;
-			read_nvram(16'h118);
-			if (nvram_size != 0) nvram_changed = 1;
+			peek_nvram(16'h100, 16'h18);
 			if ({nvram[256], nvram[257], nvram[258], nvram[259]} == "PASS" ||
 			    {nvram[256], nvram[257], nvram[258], nvram[259]} == "FAIL") done = 1;
 		end
 		if (!done) fail("test ROM did not report a result");
-		if (!nvram_changed) fail("NVRAM written by the 3DO was never reported as changed");
-		else begin
+		// the save that follows: the 3DO's writes reported as a change, and
+		// the whole NVRAM read with the 3DO running, as on pause
+		begin
+			int late0, late_blank0;
+			late0 = vl_late; late_blank0 = vl_late_blank;
+			read_nvram(32768);
+			$display("[%0t] NVRAM saves: %0d (%0d words), %0d words late for the SPI, least slack %0.0f ns; video lines late during the running save %0d shown, %0d blanking",
+			         $realtime, nvram_saves, nvram_save_words, nvram_underflows, nvram_worst_slack / 1ns,
+			         vl_late - late0, vl_late_blank - late_blank0);
+			if (nvram_underflows != 0) fail($sformatf("%0d NVRAM save words late for the SPI", nvram_underflows));
+			// lines late while the 3DO is held for the save are its pause, not a fault
+			vl_late = late0; vl_late_blank = late_blank0;
+			#20us;
+			if (dut.save_hold) fail("the 3DO is still held paused 20 us after the save ended");
+		end
+		begin
 			bit [31:0] test, addr, checks;
 			test   = {nvram[260], nvram[261], nvram[262], nvram[263]};
 			addr   = {nvram[264], nvram[265], nvram[266], nvram[267]};
@@ -654,8 +782,10 @@ module tb_top;
 			// test 15 (page copies with the video DMA on): 64 + 32 rows; test 16
 			// (relative VDL next pointer): 1; test 17 (cel culling): 5; test 18
 			// (cels drawn into a shown frame buffer): 1; test 19 (light gun): 3;
-			// test 20 (mouse): 3; test 21 (in-place video decode): 3 pictures x 5
-			if (checks != 64*4 + 1 + 64*5 + 2 + 16 + 1 + 2 + 4 + 1 + (stream_mode ? 25 : 1) + 3 * 13 * 512 + 10 + 3 + 64 + 16 + 96 + 1 + 5 + 1 + 3 + 3 + 15)
+			// test 20 (mouse): 3; test 22 (mouse before the pad): 3; test 23
+			// (two mice before the pad): 4; test 24 (the dock's gamepads): 3;
+			// test 21 (in-place video decode): 3 pictures x 5
+			if (checks != 64*4 + 1 + 64*5 + 2 + 16 + 1 + 2 + 4 + 1 + (stream_mode ? 25 : 1) + 3 * 13 * 512 + 10 + 3 + 64 + 16 + 96 + 1 + 5 + 1 + 3 + 3 + 3 + 4 + 3 + 15)
 				fail($sformatf("unexpected number of checks %0d", checks));
 			for (int i = 0; i < 16; i++)
 				if (nvram[8'h80 + i] != 8'(8'hA5 + 8'h13 * i)) fail($sformatf("NVRAM byte %02h = %02h", 8'h80 + i, nvram[8'h80 + i]));
@@ -679,6 +809,7 @@ module tb_top;
 			if (sp != 32'h2) fail($sformatf("CD speed setting (0x1020) reads %0d, written 2", sp));
 		end
 
+
 		// video timing towards the framework
 		while (frames < n_frames + 1) @(posedge clk_sys);
 		$display("[%0t] video: %0d frames, bad lines %0d, bad frames %0d; at the %0d software reset(s): %0d lines, %0d frames",
@@ -697,6 +828,16 @@ module tb_top;
 		// one from CLIO's power-on state (CSTAT = 0x11), one by the test ROM
 		if (soft_resets != 2) fail($sformatf("%0d CLIO software resets, expected 2 (power-on and the test ROM's)", soft_resets));
 
+		if (!preload_mode) begin
+			// the disc came on demand: the fork's table of contents (raw image)
+			// or, from stock firmware, the ISO's size and first sector
+			$display("tb_top: on-demand disc (%s firmware): %0d requests, %0d sectors served, %s", stream_mode ? "fork" : "stock",
+			         disc_reqs, sectors_served, dut.cdd.od_iso ? "ISO" : "raw image");
+			if (!dut.cdd.od_present) fail("on-demand disc: the core did not set it up");
+			if (dut.cdd.od_iso != !stream_mode) fail($sformatf("on-demand disc read as %s", dut.cdd.od_iso ? "an ISO" : "a raw image"));
+			if (dut.cdd.toc_tracks != (stream_mode ? 2 : 1)) fail($sformatf("on-demand disc: %0d tracks", dut.cdd.toc_tracks));
+			if (sectors_served < 2) fail("on-demand disc: the core did not request the sectors");
+		end else if (disc_reqs != 0) fail("preloaded ISO: the core sent requests");
 		if (stream_mode) begin
 			$display("tb_top: %0d disc sectors served by the firmware model", sectors_served);
 			if (sectors_served < 3) fail("streaming mode: the core did not request the sectors");
@@ -737,7 +878,15 @@ module tb_top;
 	// again, at a line in the first half of a field) one motion packet
 	// (dx +5, dy -3) is written: the port is latched every field, which
 	// takes the motion, so it must come in the field before the DMA reads.
-	bit pb_mctl_q = 0, pb_mouse_set = 0, pb_motion_set = 0;
+	// After test 20's transfer, the same for test 22 with the Controller
+	// setting 3 (the mouse before the pad); after test 22's, for test 23
+	// with the setting 4 (two mice before the pad), the second mouse's right
+	// button, and a packet for each mouse.
+	bit pb_mctl_q = 0, pb_mouse_set = 0, pb_motion_set = 0, pb_first_set = 0, pb_first_motion_set = 0;
+	bit pb_two_set = 0, pb_two_motion_set = 0, pb_pads_set = 0;
+	// After test 23's transfer: the Controller setting back to 0 and three
+	// dock gamepads connected (test 24): the first with B, the second with
+	// Start, the third with its left stick held left.
 	always @(posedge clk_sys) begin
 		if (!dut.p3do.madam.MCTL[15] && pb_mctl_q && !pb_mouse_set) begin
 			pb_mouse_set <= 1;
@@ -751,6 +900,57 @@ module tb_top;
 		end
 		if (dut.p3do.madam.MCTL[15] && !pb_mctl_q && pb_mouse_set && !pb_motion_set) begin
 			pb_motion_set <= 1;
+			fork
+				begin
+					host_wr(32'h0000_1030, {16'hFFFD, 16'h0005});
+					$display("[%0t] mouse: motion dx +5 dy -3 written (line %0d)", $realtime, dut.p3do.madam.SPORT.VCOUNT);
+				end
+			join_none
+		end
+		if (!dut.p3do.madam.MCTL[15] && pb_mctl_q && pb_motion_set && !pb_first_set) begin
+			pb_first_set <= 1;
+			fork
+				begin
+					host_wr(32'h0000_1014, 32'h3);
+					$display("[%0t] mouse: Controller 3 (mouse before the pad)", $realtime);
+				end
+			join_none
+		end
+		if (!dut.p3do.madam.MCTL[15] && pb_mctl_q && pb_first_motion_set && !pb_two_set) begin
+			pb_two_set <= 1;
+			fork
+				begin
+					host_wr(32'h0000_1014, 32'h4);
+					host_wr(32'h0000_103C, 32'h1_0002);
+					$display("[%0t] mouse: Controller 4 (two mice before the pad), mouse 2 connected, right button", $realtime);
+				end
+			join_none
+		end
+		if (!dut.p3do.madam.MCTL[15] && pb_mctl_q && pb_two_motion_set && !pb_pads_set) begin
+			pb_pads_set <= 1;
+			fork
+				begin
+					host_wr(32'h0000_1014, 32'h0);
+					gp_bt[0] = 16'h0400;   // B
+					gp_bt[1] = 16'h0002;   // Start
+					gp_lx[2] = -8'sd100;   // left stick left
+					gp_on = 4'b0111;
+					$display("[%0t] gamepads: Controller 0, three dock gamepads (B, Start, stick left)", $realtime);
+				end
+			join_none
+		end
+		if (dut.p3do.madam.MCTL[15] && !pb_mctl_q && pb_two_set && !pb_two_motion_set) begin
+			pb_two_motion_set <= 1;
+			fork
+				begin
+					host_wr(32'h0000_1030, {16'hFFFD, 16'h0005});
+					host_wr(32'h0000_1038, {16'h0002, 16'hFFF9});
+					$display("[%0t] mice: mouse 1 dx +5 dy -3, mouse 2 dx -7 dy +2 written (line %0d)", $realtime, dut.p3do.madam.SPORT.VCOUNT);
+				end
+			join_none
+		end
+		if (dut.p3do.madam.MCTL[15] && !pb_mctl_q && pb_first_set && !pb_first_motion_set) begin
+			pb_first_motion_set <= 1;
 			fork
 				begin
 					host_wr(32'h0000_1030, {16'hFFFD, 16'h0005});

@@ -54,18 +54,105 @@ module p3do_gamebub #(
 	input  logic        host_commandCore_busy,
 	input  logic        host_commandCore_done,
 	input  logic        host_commandCore_error,
-	input  logic        input_buttons_a,
-	input  logic        input_buttons_b,
-	input  logic        input_buttons_x,
-	input  logic        input_buttons_y,
-	input  logic        input_buttons_up,
-	input  logic        input_buttons_down,
-	input  logic        input_buttons_left,
-	input  logic        input_buttons_right,
-	input  logic        input_buttons_l,
-	input  logic        input_buttons_r,
-	input  logic        input_buttons_start,
-	input  logic        input_buttons_select,
+	// InputExtendedV0, 4 slots: slot 0 the handheld's buttons (undocked) or the
+	// first dock controller, slots 1-3 the other dock controllers (active
+	// while one is there). The framework zeroes the analog values unfocused.
+	input  logic        input_slots_0_active,
+	input  logic [3:0]  input_slots_0_deviceType,
+	input  logic        input_slots_0_buttons_a,
+	input  logic        input_slots_0_buttons_b,
+	input  logic        input_slots_0_buttons_x,
+	input  logic        input_slots_0_buttons_y,
+	input  logic        input_slots_0_buttons_up,
+	input  logic        input_slots_0_buttons_down,
+	input  logic        input_slots_0_buttons_left,
+	input  logic        input_slots_0_buttons_right,
+	input  logic        input_slots_0_buttons_l1,
+	input  logic        input_slots_0_buttons_r1,
+	input  logic        input_slots_0_buttons_l2,
+	input  logic        input_slots_0_buttons_r2,
+	input  logic        input_slots_0_buttons_l3,
+	input  logic        input_slots_0_buttons_r3,
+	input  logic        input_slots_0_buttons_start,
+	input  logic        input_slots_0_buttons_select,
+	input  logic [7:0]  input_slots_0_analog_leftX,
+	input  logic [7:0]  input_slots_0_analog_leftY,
+	input  logic [7:0]  input_slots_0_analog_rightX,
+	input  logic [7:0]  input_slots_0_analog_rightY,
+	input  logic [7:0]  input_slots_0_analog_leftTrigger,
+	input  logic [7:0]  input_slots_0_analog_rightTrigger,
+	input  logic        input_slots_1_active,
+	input  logic [3:0]  input_slots_1_deviceType,
+	input  logic        input_slots_1_buttons_a,
+	input  logic        input_slots_1_buttons_b,
+	input  logic        input_slots_1_buttons_x,
+	input  logic        input_slots_1_buttons_y,
+	input  logic        input_slots_1_buttons_up,
+	input  logic        input_slots_1_buttons_down,
+	input  logic        input_slots_1_buttons_left,
+	input  logic        input_slots_1_buttons_right,
+	input  logic        input_slots_1_buttons_l1,
+	input  logic        input_slots_1_buttons_r1,
+	input  logic        input_slots_1_buttons_l2,
+	input  logic        input_slots_1_buttons_r2,
+	input  logic        input_slots_1_buttons_l3,
+	input  logic        input_slots_1_buttons_r3,
+	input  logic        input_slots_1_buttons_start,
+	input  logic        input_slots_1_buttons_select,
+	input  logic [7:0]  input_slots_1_analog_leftX,
+	input  logic [7:0]  input_slots_1_analog_leftY,
+	input  logic [7:0]  input_slots_1_analog_rightX,
+	input  logic [7:0]  input_slots_1_analog_rightY,
+	input  logic [7:0]  input_slots_1_analog_leftTrigger,
+	input  logic [7:0]  input_slots_1_analog_rightTrigger,
+	input  logic        input_slots_2_active,
+	input  logic [3:0]  input_slots_2_deviceType,
+	input  logic        input_slots_2_buttons_a,
+	input  logic        input_slots_2_buttons_b,
+	input  logic        input_slots_2_buttons_x,
+	input  logic        input_slots_2_buttons_y,
+	input  logic        input_slots_2_buttons_up,
+	input  logic        input_slots_2_buttons_down,
+	input  logic        input_slots_2_buttons_left,
+	input  logic        input_slots_2_buttons_right,
+	input  logic        input_slots_2_buttons_l1,
+	input  logic        input_slots_2_buttons_r1,
+	input  logic        input_slots_2_buttons_l2,
+	input  logic        input_slots_2_buttons_r2,
+	input  logic        input_slots_2_buttons_l3,
+	input  logic        input_slots_2_buttons_r3,
+	input  logic        input_slots_2_buttons_start,
+	input  logic        input_slots_2_buttons_select,
+	input  logic [7:0]  input_slots_2_analog_leftX,
+	input  logic [7:0]  input_slots_2_analog_leftY,
+	input  logic [7:0]  input_slots_2_analog_rightX,
+	input  logic [7:0]  input_slots_2_analog_rightY,
+	input  logic [7:0]  input_slots_2_analog_leftTrigger,
+	input  logic [7:0]  input_slots_2_analog_rightTrigger,
+	input  logic        input_slots_3_active,
+	input  logic [3:0]  input_slots_3_deviceType,
+	input  logic        input_slots_3_buttons_a,
+	input  logic        input_slots_3_buttons_b,
+	input  logic        input_slots_3_buttons_x,
+	input  logic        input_slots_3_buttons_y,
+	input  logic        input_slots_3_buttons_up,
+	input  logic        input_slots_3_buttons_down,
+	input  logic        input_slots_3_buttons_left,
+	input  logic        input_slots_3_buttons_right,
+	input  logic        input_slots_3_buttons_l1,
+	input  logic        input_slots_3_buttons_r1,
+	input  logic        input_slots_3_buttons_l2,
+	input  logic        input_slots_3_buttons_r2,
+	input  logic        input_slots_3_buttons_l3,
+	input  logic        input_slots_3_buttons_r3,
+	input  logic        input_slots_3_buttons_start,
+	input  logic        input_slots_3_buttons_select,
+	input  logic [7:0]  input_slots_3_analog_leftX,
+	input  logic [7:0]  input_slots_3_analog_leftY,
+	input  logic [7:0]  input_slots_3_analog_rightX,
+	input  logic [7:0]  input_slots_3_analog_rightY,
+	input  logic [7:0]  input_slots_3_analog_leftTrigger,
+	input  logic [7:0]  input_slots_3_analog_rightTrigger,
 	output logic        sdram_clock,
 	output logic        sdram_cke,
 	output logic        sdram_cs,
@@ -118,7 +205,7 @@ module p3do_gamebub #(
 	wire rst_vid = rst_vid_s[2];
 
 	/////////////////////////  HOST INTERFACE  ///////////////////////////////
-	wire        core_halt, core_reset_pulse, focus, HOST_LE;
+	wire        core_halt, core_reset_pulse, focus, HOST_LE, save_hold;
 	wire        disc_present, bios_loaded, bios_512k, kanji_loaded;
 	wire [24:0] disc_bytes;
 	wire [ 1:0] cd_speed;
@@ -126,11 +213,16 @@ module p3do_gamebub #(
 	wire        bios_pal;
 	wire        button_layout;
 	wire        stat_run, stat_stall;   // statistics for the firmware (gb_host 0x1000/0x1004)
-	wire [ 1:0] controller;      // control port after the pad: 1 light gun, 2 mouse (gb_host 0x1014)
+	wire [ 2:0] controller;      // control port (gb_host 0x1014): 0 pad, 1 pad + light gun, 2 pad + mouse, 3 mouse + pad, 4 2 mice + pad
 	wire        mouse_pkt;       // a mouse motion write (0x1030)
 	wire [31:0] mouse_motion;    // {dy, dx}
 	wire [ 2:0] mouse_buttons;   // (0x1034)
 	wire [24:0] ps2_mouse;       // the motion as PS/2 packets for HPS2PAD (host_mouse.sv)
+	wire        mouse2_pkt;      // the second mouse (0x1038, 0x103C)
+	wire [31:0] mouse2_motion;
+	wire [ 2:0] mouse2_buttons;
+	wire        mouse2_connected;   // a second dock mouse (0x103C bit 16)
+	wire [24:0] ps2_mouse2;
 	wire [31:0] lg_aim;          // {y, x}, 0..65535 (0x1018)
 	wire [ 2:0] lg_buttons;      // {off screen, option, trigger} (0x101C)
 	wire [ 1:0] vram_mem;
@@ -139,8 +231,9 @@ module p3do_gamebub #(
 	wire [ 8:0] toc_wa;
 	wire [12:0] sb_wa;
 	wire [31:0] toc_wd, sb_wd;
-	wire [31:0] core_cmd_words [4];
-	wire        nvram_wr;
+	wire [31:0] core_cmd_words [6];
+	wire [31:0] core_res [3];
+	wire        od_enable;
 
 	wire        host_sec_req, host_sec_we;
 	wire [23:0] host_sec_addr;
@@ -163,6 +256,7 @@ module p3do_gamebub #(
 		.cmd_done        (host_commandHost_done),
 		.cmd_error       (host_commandHost_error),
 		.core_halt       (core_halt),
+		.save_hold       (save_hold),
 		.core_reset_pulse(core_reset_pulse),
 		.focus           (focus),
 		.HOST_LE         (HOST_LE),
@@ -182,6 +276,10 @@ module p3do_gamebub #(
 		.mouse_pkt       (mouse_pkt),
 		.mouse_motion    (mouse_motion),
 		.mouse_buttons   (mouse_buttons),
+		.mouse2_pkt      (mouse2_pkt),
+		.mouse2_motion   (mouse2_motion),
+		.mouse2_buttons  (mouse2_buttons),
+		.mouse2_connected(mouse2_connected),
 		.lg_aim          (lg_aim),
 		.lg_buttons      (lg_buttons),
 		.disc_stream     (disc_stream),
@@ -193,7 +291,8 @@ module p3do_gamebub #(
 		.sb_wa           (sb_wa),
 		.sb_wd           (sb_wd),
 		.core_cmd_words  (core_cmd_words),
-		.nvram_wr        (nvram_wr),
+		.core_res        (core_res),
+		.od_enable       (od_enable),
 		.clk_mem         (clk_mem),
 		.rst_mem         (rst_mem),
 		.sec_req         (host_sec_req),
@@ -478,6 +577,8 @@ module p3do_gamebub #(
 		.core_req       (host_commandCore_request),
 		.core_done      (host_commandCore_done),
 		.core_error     (host_commandCore_error),
+		.core_res       (core_res),
+		.od_enable      (od_enable),
 		.disc_id        (disc_id),
 		.disc_msf       (disc_msf),
 		.disc_info_valid(disc_info_valid),
@@ -512,28 +613,90 @@ module p3do_gamebub #(
 	//   1: a pad with A B C D in a row (Neo Geo style) that the dock reports as
 	//      A B X Y: A/B/X -> 3DO A/B/C, Y -> X.
 	// Both: Start -> P, Select -> X, L -> L, R -> R.
-	wire pad_a = button_layout ? input_buttons_a : input_buttons_y;
-	wire pad_b = input_buttons_b;
-	wire pad_c = button_layout ? input_buttons_x : input_buttons_a;
-	wire pad_x = input_buttons_select | (button_layout ? input_buttons_y : input_buttons_x);
-	wire [12:0] joy0 = {
-		2'b00,
-		input_buttons_l,
-		input_buttons_r,
-		pad_x,
-		input_buttons_start,
-		pad_c,
-		pad_b,
-		pad_a,
-		input_buttons_up,
-		input_buttons_down,
-		input_buttons_left,
-		input_buttons_right
-	};
+	// A 3DO pad (HPS2PAD joystick_N) from a pad's buttons, with the layout.
+	function automatic [12:0] pad3do(input a, b, x, y, l, r, start, select, up, down, left, right);
+		pad3do = {
+			2'b00, l, r,
+			select | (button_layout ? y : x),   // X
+			start,                               // P
+			button_layout ? x : a,               // C
+			b,                                   // B
+			button_layout ? a : y,               // A
+			up, down, left, right
+		};
+	endfunction
+	// An input slot as a 3DO pad: L1 / R1 are L / R, its left stick more
+	// than half way is the D-pad too (the handheld has no stick: 0).
+	function automatic [12:0] gamepad3do(input [15:0] bt, input signed [7:0] lx, input signed [7:0] ly);
+		// bt: {l2 r2 l3 r3 a b x y up down left right l1 r1 start select}
+		gamepad3do = pad3do(bt[11], bt[10], bt[9], bt[8], bt[3], bt[2], bt[1], bt[0],
+		                    bt[7] | (ly <= -8'sd64), bt[6] | (ly >= 8'sd64),
+		                    bt[5] | (lx <= -8'sd64), bt[4] | (lx >= 8'sd64));
+	endfunction
+	wire [15:0] gp_bt [4];
+	wire [ 7:0] gp_lx [4], gp_ly [4];
+	wire [ 3:0] gp_on;
+	assign gp_on[0] = input_slots_0_active;
+	assign gp_bt[0] = {input_slots_0_buttons_l2, input_slots_0_buttons_r2, input_slots_0_buttons_l3, input_slots_0_buttons_r3, input_slots_0_buttons_a, input_slots_0_buttons_b, input_slots_0_buttons_x, input_slots_0_buttons_y, input_slots_0_buttons_up, input_slots_0_buttons_down, input_slots_0_buttons_left, input_slots_0_buttons_right, input_slots_0_buttons_l1, input_slots_0_buttons_r1, input_slots_0_buttons_start, input_slots_0_buttons_select};
+	assign gp_lx[0] = input_slots_0_analog_leftX;
+	assign gp_ly[0] = input_slots_0_analog_leftY;
+	assign gp_on[1] = input_slots_1_active;
+	assign gp_bt[1] = {input_slots_1_buttons_l2, input_slots_1_buttons_r2, input_slots_1_buttons_l3, input_slots_1_buttons_r3, input_slots_1_buttons_a, input_slots_1_buttons_b, input_slots_1_buttons_x, input_slots_1_buttons_y, input_slots_1_buttons_up, input_slots_1_buttons_down, input_slots_1_buttons_left, input_slots_1_buttons_right, input_slots_1_buttons_l1, input_slots_1_buttons_r1, input_slots_1_buttons_start, input_slots_1_buttons_select};
+	assign gp_lx[1] = input_slots_1_analog_leftX;
+	assign gp_ly[1] = input_slots_1_analog_leftY;
+	assign gp_on[2] = input_slots_2_active;
+	assign gp_bt[2] = {input_slots_2_buttons_l2, input_slots_2_buttons_r2, input_slots_2_buttons_l3, input_slots_2_buttons_r3, input_slots_2_buttons_a, input_slots_2_buttons_b, input_slots_2_buttons_x, input_slots_2_buttons_y, input_slots_2_buttons_up, input_slots_2_buttons_down, input_slots_2_buttons_left, input_slots_2_buttons_right, input_slots_2_buttons_l1, input_slots_2_buttons_r1, input_slots_2_buttons_start, input_slots_2_buttons_select};
+	assign gp_lx[2] = input_slots_2_analog_leftX;
+	assign gp_ly[2] = input_slots_2_analog_leftY;
+	assign gp_on[3] = input_slots_3_active;
+	assign gp_bt[3] = {input_slots_3_buttons_l2, input_slots_3_buttons_r2, input_slots_3_buttons_l3, input_slots_3_buttons_r3, input_slots_3_buttons_a, input_slots_3_buttons_b, input_slots_3_buttons_x, input_slots_3_buttons_y, input_slots_3_buttons_up, input_slots_3_buttons_down, input_slots_3_buttons_left, input_slots_3_buttons_right, input_slots_3_buttons_l1, input_slots_3_buttons_r1, input_slots_3_buttons_start, input_slots_3_buttons_select};
+	assign gp_lx[3] = input_slots_3_analog_leftX;
+	assign gp_ly[3] = input_slots_3_analog_leftY;
+	// Pad 1: slot 0, always on the chain (the handheld's buttons, or the first
+	// dock controller); pads 2-4: slots 1-3 while active.
+	wire [12:0] joy0 = gamepad3do(gp_bt[0], gp_lx[0], gp_ly[0]);
+	wire [12:0] joy1 = gp_on[1] ? gamepad3do(gp_bt[1], gp_lx[1], gp_ly[1]) : 13'd0;
+	wire [12:0] joy2 = gp_on[2] ? gamepad3do(gp_bt[2], gp_lx[2], gp_ly[2]) : 13'd0;
+	wire [12:0] joy3 = gp_on[3] ? gamepad3do(gp_bt[3], gp_lx[3], gp_ly[3]) : 13'd0;
+
+	// The control port's daisy chain (HPS2PAD CHAIN), as the devices would be
+	// plugged into a console: the Controller setting gives the order, what is
+	// connected the devices (Portfolio's event broker logs a device in or out
+	// when it appears or goes, as with a real one plugged or unplugged).
+	//   0 pads; 1 light gun, then pads (player 1's gun first, as the American
+	//   Laser Games manuals ask); 2 pads, then mice; 3 (and 4) mice, then pads.
+	// Pads: pad 1 always, pads 2-4 while their gamepad is connected. Mice: the
+	// mouse always (a dock pad's right stick drives it without a dock mouse),
+	// the second while a second dock mouse is connected (0x103C bit 16).
+	wire        mice_on  = controller == 3'd2 || controller == 3'd3 || controller == 3'd4;
+	wire        mouse2_on = mice_on && mouse2_connected;
+	reg  [27:0] chain;
+	always @(posedge clk_sys) begin
+		reg [27:0] c;
+		reg [ 2:0] n;
+		c = '0; n = '0;
+		if (controller == 3'd1) begin c[n*4 +: 4] = 4'h8 | 4'd6; n = n + 3'd1; end
+		if (mice_on && controller != 3'd2) begin
+			c[n*4 +: 4] = 4'h8 | 4'd4; n = n + 3'd1;
+			if (mouse2_on) begin c[n*4 +: 4] = 4'h8 | 4'd5; n = n + 3'd1; end
+		end
+		c[n*4 +: 4] = 4'h8 | 4'd0; n = n + 3'd1;
+		for (int i = 1; i < 4; i++)
+			if (gp_on[i]) begin c[n*4 +: 4] = 4'h8 | 4'(i); n = n + 3'd1; end
+		if (controller == 3'd2) begin
+			c[n*4 +: 4] = 4'h8 | 4'd4; n = n + 3'd1;
+			if (mouse2_on) begin c[n*4 +: 4] = 4'h8 | 4'd5; n = n + 3'd1; end
+		end
+		chain <= c;
+	end
 
 	host_mouse hmouse (
 		.clk(clk_sys), .rst(reset_3do), .pkt(mouse_pkt), .dx(mouse_motion[15:0]), .dy(mouse_motion[31:16]),
 		.buttons(mouse_buttons), .ps2_mouse(ps2_mouse)
+	);
+	host_mouse hmouse2 (
+		.clk(clk_sys), .rst(reset_3do), .pkt(mouse2_pkt), .dx(mouse2_motion[15:0]), .dy(mouse2_motion[31:16]),
+		.buttons(mouse2_buttons), .ps2_mouse(ps2_mouse2)
 	);
 
 	HPS2PAD pad (
@@ -548,9 +711,12 @@ module p3do_gamebub #(
 		.PAD_SEL(3'd1),
 		.ARCADE_SEL(2'd0),
 		.STICK_EN(1'b0),
-		.MOUSE_EN(controller == 2'd2),
+		.MOUSE_EN(mice_on),
+		.MOUSE2_EN(mouse2_on),
+		.GB_CHAIN(1'b1),
+		.CHAIN(chain),
 		.ARCADE_SERVICE(1'b0),
-		.LG_EN(controller == 2'd1),
+		.LG_EN(controller == 3'd1),
 		.LG_PAL(PAL),
 		.lg_x(lg_aim[15:0]),
 		.lg_y(lg_aim[31:16]),
@@ -558,12 +724,13 @@ module p3do_gamebub #(
 		.lg_option(lg_buttons[1]),
 		.lg_offscreen(lg_buttons[2]),
 		.joystick_0(joy0),
-		.joystick_1('0),
-		.joystick_2('0),
-		.joystick_3('0),
+		.joystick_1(joy1),
+		.joystick_2(joy2),
+		.joystick_3(joy3),
 		.joy0_x0('0), .joy0_y0('0), .joy0_x1('0), .joy0_y1('0),
 		.joy1_x0('0), .joy1_y0('0), .joy1_x1('0), .joy1_y1('0),
-		.ps2_mouse(ps2_mouse)
+		.ps2_mouse(ps2_mouse),
+		.ps2_mouse2(ps2_mouse2)
 	);
 
 	/////////////////////////  SDRAM  ////////////////////////////////////////
@@ -764,10 +931,6 @@ module p3do_gamebub #(
 
 	assign RAM_DI = !LRAS0_N || !RRAS0_N ? VRAM_Q : sdr_dout;
 
-	// the 3DO wrote its NVRAM (save changed since loaded)
-	reg sramw_n_d = 1;
-	always @(posedge clk_sys) sramw_n_d <= SRAMW_N;
-	assign nvram_wr = !SRAMW_N && sramw_n_d;
 	assign PDI = !SRAMR_N ? (ddr_io_do>>{~PA[3:2],3'b000}) & 32'h000000FF : ddr_io_do;
 
 	/////////////////////////  "DDR" (VRAM overflow, ROMs, NVRAM)  ///////////
@@ -907,11 +1070,13 @@ module p3do_gamebub #(
 	/////////////////////////  PAUSE  ////////////////////////////////////////
 	// As MiSTer: stall the 3DO while slow memory is busy. In addition the
 	// SDRAM secondary port requests a pause (sec_hold) before it may use the
-	// bus; sec_paused tells it the pause is in effect and will be held.
+	// bus; sec_paused tells it the pause is in effect and will be held. The
+	// 3DO also stays paused while the host reads the NVRAM to save it
+	// (save_hold, gb_host).
 	always @(posedge clk_sys) begin
 		bit cond;
 		if (CE_F) begin
-			cond = ddr_io_busy || ddr_busy || !VRAM_LRDY || !VRAM_RRDY || sec_hold_s;
+			cond = ddr_io_busy || ddr_busy || !VRAM_LRDY || !VRAM_RRDY || sec_hold_s || save_hold;
 			pause      <= cond;
 			sec_paused <= sec_hold_s;
 		end

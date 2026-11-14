@@ -36,7 +36,10 @@ class P3DOCore extends Module with Core {
         )
         val audio = new AudioV0()
         val host = new HostV0()
-        val input = new InputV0()
+        // Four input slots (slot 0 the handheld's buttons, or the first dock
+        // controller while docked): the 3DO's control port chains a pad for
+        // each active one (rtl/p3do/hps2pad.sv).
+        val input = new InputExtendedV0(numSlots = 4)
         val sdram = new SdramV0(
             addressWidth = 13,
             dataWidth = 16,

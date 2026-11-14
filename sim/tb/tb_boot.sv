@@ -12,7 +12,7 @@
 //   * every CD controller command the BIOS sends and every sector delivered
 //   * CPU address samples, pause statistics, SDRAM model errors
 //   * every sector sent to the CD controller is checked against the image
-//     (streamed .bin or preloaded ISO) at the LBA the BIOS asked for
+//     (an on-demand .bin or ISO, or a preloaded ISO) at the LBA the BIOS asked for
 //   * every video line must have had its VRAM read transfers (both halves)
 //     before it starts shifting out (TB errors if the 3DO was paused in
 //     between; MADAM's own arbitration delays are reported separately)
@@ -28,10 +28,12 @@
 //     +trace_from_ms=<n>, all from n ms on) before the CPU first runs outside
 //     the 3DO memory map (a crash), with CLIO's interrupt state at each FIQ
 //
-// Plusargs: +bios=<file> (required), +iso=<file> or +disc_bin=<file>,
+// Plusargs: +bios=<file> (required), +disc_bin=<file> or +disc_iso=<file> (the disc file
+//           on demand, see the firmware model; +fw_stock: stock firmware, no DiscGetToc;
+//           +audio_tracks=<n> +data_sectors=<k>: the fork's TOC), +iso=<file> (preloaded),
 //           +disc_latency_us=<n> (default 800), +trace_from_ms=<n>, +run_ms=<n> (default 1000),
 //           +frame_every=<n> (default 10), +out=<dir> (default build/sim),
-//           +vram_watch=<row>, +sport_ms=<n>, +rt_log_ms=<n>, +pad_ctl=<file> (buttons
+//           +vram_watch=<row>, +sport_ms=<n>, +rt_log_ms=<n>, +nvram_in=<file>, +nvram_out=<file> (a save loaded / written as the firmware does), +pad_ctl=<file> (buttons
 //           pressed while it runs, see pad_btn), +frame_log, +frames_from=<n> +frames_to=<m>
 //           +dsp_trace_from_ms=<ms> (DSP/DMA trace, see below), +expect_disc_id=<hex> (the
 //           disc-info block's id, raw sector 0 bytes 0x58-0x5B; a TB error if it differs),
@@ -171,6 +173,15 @@ module tb_boot;
 		end
 	end
 
+	// InputExtendedV0 slots as the framework drives them undocked: slot 0 the
+	// handheld (pad_btn: A B X Y Up Down Left Right L R Start Select, as
+	// {l2 r2 l3 r3 a b x y up down left right l1 r1 start select}), the
+	// other slots empty
+	wire [ 3:0] sl_on = 4'b0001;
+	wire [15:0] sl_bt [4] = '{{4'b0000, pad_btn[0], pad_btn[1], pad_btn[2], pad_btn[3], pad_btn[4], pad_btn[5],
+	                           pad_btn[6], pad_btn[7], pad_btn[8], pad_btn[9], pad_btn[10], pad_btn[11]}, '0, '0, '0};
+	wire [ 3:0] sl_type [4] = '{4'd1, 4'd0, 4'd0, 4'd0};
+	wire [ 7:0] gp_st [4] = '{default: '0};
 	p3do_gamebub #(.DISPLAY_DIVIDER(31)) dut (
 		.clock(clk_sys), .reset(reset),
 		.clocks_clockIn50M(1'b0),
@@ -184,10 +195,10 @@ module tb_boot;
 		.host_commandHost_done(h_cdone), .host_commandHost_error(h_err),
 		.host_commandCore_request(c_req), .host_commandCore_busy(1'b0),
 		.host_commandCore_done(c_done), .host_commandCore_error(c_err),
-		.input_buttons_a(pad_btn[0]), .input_buttons_b(pad_btn[1]), .input_buttons_x(pad_btn[2]),
-		.input_buttons_y(pad_btn[3]), .input_buttons_up(pad_btn[4]), .input_buttons_down(pad_btn[5]),
-		.input_buttons_left(pad_btn[6]), .input_buttons_right(pad_btn[7]), .input_buttons_l(pad_btn[8]),
-		.input_buttons_r(pad_btn[9]), .input_buttons_start(pad_btn[10]), .input_buttons_select(pad_btn[11]),
+		.input_slots_0_active(sl_on[0]), .input_slots_0_deviceType(sl_type[0]), .input_slots_0_buttons_l2(sl_bt[0][15]), .input_slots_0_buttons_r2(sl_bt[0][14]), .input_slots_0_buttons_l3(sl_bt[0][13]), .input_slots_0_buttons_r3(sl_bt[0][12]), .input_slots_0_buttons_a(sl_bt[0][11]), .input_slots_0_buttons_b(sl_bt[0][10]), .input_slots_0_buttons_x(sl_bt[0][9]), .input_slots_0_buttons_y(sl_bt[0][8]), .input_slots_0_buttons_up(sl_bt[0][7]), .input_slots_0_buttons_down(sl_bt[0][6]), .input_slots_0_buttons_left(sl_bt[0][5]), .input_slots_0_buttons_right(sl_bt[0][4]), .input_slots_0_buttons_l1(sl_bt[0][3]), .input_slots_0_buttons_r1(sl_bt[0][2]), .input_slots_0_buttons_start(sl_bt[0][1]), .input_slots_0_buttons_select(sl_bt[0][0]), .input_slots_0_analog_leftX(gp_st[0]), .input_slots_0_analog_leftY(gp_st[0]), .input_slots_0_analog_rightX(gp_st[0]), .input_slots_0_analog_rightY(gp_st[0]), .input_slots_0_analog_leftTrigger(8'd0), .input_slots_0_analog_rightTrigger(8'd0),
+		.input_slots_1_active(sl_on[1]), .input_slots_1_deviceType(sl_type[1]), .input_slots_1_buttons_l2(sl_bt[1][15]), .input_slots_1_buttons_r2(sl_bt[1][14]), .input_slots_1_buttons_l3(sl_bt[1][13]), .input_slots_1_buttons_r3(sl_bt[1][12]), .input_slots_1_buttons_a(sl_bt[1][11]), .input_slots_1_buttons_b(sl_bt[1][10]), .input_slots_1_buttons_x(sl_bt[1][9]), .input_slots_1_buttons_y(sl_bt[1][8]), .input_slots_1_buttons_up(sl_bt[1][7]), .input_slots_1_buttons_down(sl_bt[1][6]), .input_slots_1_buttons_left(sl_bt[1][5]), .input_slots_1_buttons_right(sl_bt[1][4]), .input_slots_1_buttons_l1(sl_bt[1][3]), .input_slots_1_buttons_r1(sl_bt[1][2]), .input_slots_1_buttons_start(sl_bt[1][1]), .input_slots_1_buttons_select(sl_bt[1][0]), .input_slots_1_analog_leftX(gp_st[1]), .input_slots_1_analog_leftY(gp_st[1]), .input_slots_1_analog_rightX(gp_st[1]), .input_slots_1_analog_rightY(gp_st[1]), .input_slots_1_analog_leftTrigger(8'd0), .input_slots_1_analog_rightTrigger(8'd0),
+		.input_slots_2_active(sl_on[2]), .input_slots_2_deviceType(sl_type[2]), .input_slots_2_buttons_l2(sl_bt[2][15]), .input_slots_2_buttons_r2(sl_bt[2][14]), .input_slots_2_buttons_l3(sl_bt[2][13]), .input_slots_2_buttons_r3(sl_bt[2][12]), .input_slots_2_buttons_a(sl_bt[2][11]), .input_slots_2_buttons_b(sl_bt[2][10]), .input_slots_2_buttons_x(sl_bt[2][9]), .input_slots_2_buttons_y(sl_bt[2][8]), .input_slots_2_buttons_up(sl_bt[2][7]), .input_slots_2_buttons_down(sl_bt[2][6]), .input_slots_2_buttons_left(sl_bt[2][5]), .input_slots_2_buttons_right(sl_bt[2][4]), .input_slots_2_buttons_l1(sl_bt[2][3]), .input_slots_2_buttons_r1(sl_bt[2][2]), .input_slots_2_buttons_start(sl_bt[2][1]), .input_slots_2_buttons_select(sl_bt[2][0]), .input_slots_2_analog_leftX(gp_st[2]), .input_slots_2_analog_leftY(gp_st[2]), .input_slots_2_analog_rightX(gp_st[2]), .input_slots_2_analog_rightY(gp_st[2]), .input_slots_2_analog_leftTrigger(8'd0), .input_slots_2_analog_rightTrigger(8'd0),
+		.input_slots_3_active(sl_on[3]), .input_slots_3_deviceType(sl_type[3]), .input_slots_3_buttons_l2(sl_bt[3][15]), .input_slots_3_buttons_r2(sl_bt[3][14]), .input_slots_3_buttons_l3(sl_bt[3][13]), .input_slots_3_buttons_r3(sl_bt[3][12]), .input_slots_3_buttons_a(sl_bt[3][11]), .input_slots_3_buttons_b(sl_bt[3][10]), .input_slots_3_buttons_x(sl_bt[3][9]), .input_slots_3_buttons_y(sl_bt[3][8]), .input_slots_3_buttons_up(sl_bt[3][7]), .input_slots_3_buttons_down(sl_bt[3][6]), .input_slots_3_buttons_left(sl_bt[3][5]), .input_slots_3_buttons_right(sl_bt[3][4]), .input_slots_3_buttons_l1(sl_bt[3][3]), .input_slots_3_buttons_r1(sl_bt[3][2]), .input_slots_3_buttons_start(sl_bt[3][1]), .input_slots_3_buttons_select(sl_bt[3][0]), .input_slots_3_analog_leftX(gp_st[3]), .input_slots_3_analog_leftY(gp_st[3]), .input_slots_3_analog_rightX(gp_st[3]), .input_slots_3_analog_rightY(gp_st[3]), .input_slots_3_analog_leftTrigger(8'd0), .input_slots_3_analog_rightTrigger(8'd0),
 		.sdram_clock(s_clk), .sdram_cke(s_cke), .sdram_cs(s_cs), .sdram_ras(s_ras), .sdram_cas(s_cas),
 		.sdram_we(s_we), .sdram_dqm(s_dqm), .sdram_bank(s_ba), .sdram_address(s_a),
 		.sdram_dataIn(s_dq_in), .sdram_dataOut(s_dq_out), .sdram_dataDir(s_oe),
@@ -308,35 +319,79 @@ module tb_boot;
 		$fclose(fd);
 	endtask
 
-	// ---------------- disc-streaming firmware model ----------------
-	// +disc_bin=<file>: a single-track MODE1/2352 .bin, served like the
-	// fork firmware (table of contents, then raw sectors on DISC_READ).
-	int  bin_fd = 0;
+	// ---------------- disc firmware model ----------------
+	// The disc file is on demand (files.json "on_demand", framework
+	// v1.1.0-beta4): the core asks the firmware for it through HostV0
+	// core -> host requests (opcode and 5 parameters at 0xF000_1000; the
+	// results are written back there, then done; an error is done and error,
+	// as the Game Bub firmware's handle_core_request answers):
+	//   FileGetSize 0x0400 (file) -> status, size
+	//   FileRead    0x0402 (file, address, offset lo, hi, count) -> status,
+	//               bytes read (fewer at the end of the file), after
+	//               +disc_latency_us
+	//   DiscGetToc  0x8400 (file, address): the fork firmware's table of
+	//               contents; with +fw_stock unknown (done and error), as
+	//               stock firmware answers it
+	// +disc_bin=<file>: raw 2352-byte sectors; +disc_iso=<file>: an ISO
+	// (2048-byte sectors, stock firmware only: the fork serves its discs raw).
+	int  disc_fd = 0;
+	longint disc_size = 0;
 	int  bin_sectors = 0;
 	int  disc_latency_us = 800;
-	int  served = 0;
+	int  served = 0, disc_reqs = 0;
+	bit  fw_stock = 0;
+	bit [31:0] fw_toc [$];
 	function automatic [7:0] bcd(input int x); return 8'(((x / 10) << 4) | (x % 10)); endfunction
 	function automatic [31:0] msf_bcd(input int lba);
 		return {8'h00, bcd(lba / 75 / 60), bcd((lba / 75) % 60), bcd(lba % 75)};
 	endfunction
 	initial forever begin
-		bit [31:0] w [4];
-		bit [7:0]  sec [2352];
+		bit [31:0] w [6];
+		bit [31:0] res [3];
+		bit        ok, unknown;
+		bit [7:0]  fbuf [2352];
 		@(posedge clk_sys);
-		if (bin_fd != 0 && c_req && !c_done && !c_err) begin
-			for (int i = 0; i < 4; i++) host_rd(32'hF000_1000 + 4 * i, w[i]);
-			foreach (sec[i]) sec[i] = 8'h00;
-			if (w[2] >= 150 && w[2] < 150 + bin_sectors) begin
-				int n;
-				void'($fseek(bin_fd, longint'(w[2] - 150) * 2352, 0));
-				n = $fread(sec, bin_fd);
-			end
-			#(disc_latency_us * 1us);
-			for (int i = 0; i < 2352; i += 4) host_wr(w[3] + i, {sec[i+3], sec[i+2], sec[i+1], sec[i]});
-			served++;
+		if (disc_fd != 0 && c_req && !c_done && !c_err) begin
+			for (int i = 0; i < 6; i++) host_rd(32'hF000_1000 + 4 * i, w[i]);
+			disc_reqs++;
+			res = '{default: '0};
+			ok = 1;
+			unknown = 0;
+			case (w[0])
+				32'h0000_0400: begin
+					if (w[1] != 0) begin res[0] = 1; ok = 0; end
+					else begin res[1] = disc_size[31:0]; res[2] = disc_size[63:32]; end
+				end
+				32'h0000_0402: begin
+					if (w[1] != 0 || w[5] > 2352) begin res[0] = 1; ok = 0; end
+					else begin
+						longint off;
+						int n;
+						off = {w[4], w[3]};
+						n = (off >= disc_size) ? 0 : (disc_size - off < longint'(w[5])) ? int'(disc_size - off) : int'(w[5]);
+						foreach (fbuf[i]) fbuf[i] = 8'h00;
+						if (n > 0) begin
+							void'($fseek(disc_fd, off, 0));
+							void'($fread(fbuf, disc_fd, 0, n));
+						end
+						#(disc_latency_us * 1us);
+						for (int i = 0; i < n; i += 4) host_wr(w[2] + i, {fbuf[i+3], fbuf[i+2], fbuf[i+1], fbuf[i]});
+						res[1] = n;
+						served++;
+					end
+				end
+				32'h0000_8400: begin
+					if (fw_stock || w[1] != 0) unknown = 1;
+					else foreach (fw_toc[i]) host_wr(w[2] + 4 * i, fw_toc[i]);
+				end
+				default: unknown = 1;
+			endcase
+			if (!unknown) for (int i = 0; i < 3; i++) host_wr(32'hF000_1000 + 4 * i, res[i]);
 			c_done <= 1;
+			c_err  <= unknown || !ok;
 			while (c_req) @(posedge clk_sys);
 			c_done <= 0;
+			c_err  <= 0;
 		end
 	end
 
@@ -401,7 +456,7 @@ module tb_boot;
 		if (dut.cdd_dten && !cdd_dten_d) begin
 			sectors_sent++;
 			if (sectors_sent <= 40 || sectors_sent % 100 == 0)
-				$display("[%0t] CD sector %0d (%s %0d)", $realtime, sectors_sent, dut.cdd.disc_stream ? "abs lba" : "lba", dut.cdd.disc_stream ? dut.cdd.snd_lba : 32'(dut.cdd.fetch_lba_sys));
+				$display("[%0t] CD sector %0d (%s %0d)", $realtime, sectors_sent, dut.cdd.ds_eff ? "abs lba" : "lba", dut.cdd.ds_eff ? dut.cdd.snd_lba : 32'(dut.cdd.fetch_lba_sys));
 		end
 		if (!dut.cdd_dien && cdd_dien_d) begin
 			$display("[%0t] CD disc-info block sent (id %08h, lead-out MSF %06h)", $realtime, dut.cdd.disc_id, dut.cdd.disc_msf[31:8]);
@@ -428,6 +483,7 @@ module tb_boot;
 	// controller's data port are checked against the same block.
 	int       chk_fd = 0;
 	int       chk_sec_bytes = 2352; // sector size in the image file
+	bit       chk_iso_raw = 0;      // an on-demand ISO: sent as a raw sector (zeros, the 2048 bytes at 16, zeros)
 	int       chk_sectors = 0;      // sectors in the image
 	int       cd_exp_lba = 150;     // absolute LBA of the next sector to arrive
 	int       cd_ref_lba = 0;       // LBA of the sector being received
@@ -468,12 +524,16 @@ module tb_boot;
 					void'($fseek(chk_fd, longint'(cd_ref_lba - 150) * chk_sec_bytes, 0));
 					n = $fread(cd_raw, chk_fd, 0, chk_sec_bytes);
 				end
-				if (chk_sec_bytes == 2048) off = 0;
+				if (chk_iso_raw) begin
+					// the 2048 user bytes at raw bytes 16..2063, zeros around them
+					for (int i = 2351; i >= 0; i--) cd_raw[i] = (i >= 16 && i < 2064) ? cd_raw[i - 16] : 8'h00;
+				end
+				if (chk_sec_bytes == 2048 && !chk_iso_raw) off = 0;
 				else if (cd_blk_len == 2048) off = 16;
 				else if (cd_blk_len >= 2352) off = 0;
 				else off = (2352 - cd_blk_len) & ~1;
 				foreach (cd_ref[i])
-					cd_ref[i] = (i < cd_blk_len && off + i < chk_sec_bytes) ? cd_raw[off + i] : 8'h00;
+					cd_ref[i] = (i < cd_blk_len && off + i < (chk_iso_raw ? 2352 : chk_sec_bytes)) ? cd_raw[off + i] : 8'h00;
 				cd_widx = 0;
 				cd_sec_errs = 0;
 				cd_ref_sum = 16'h0000;
@@ -627,6 +687,68 @@ module tb_boot;
 				         $realtime, dut.p3do.CPU_A, fiq_count, outdir);
 			end
 		end
+	end
+
+	// ---------------- NVRAM access check ----------------
+	// Every 3DO access to the NVRAM (MADAM's slow bus, SRAMW_N / SRAMR_N) is
+	// logged to <out>/nvram_log.txt with the byte index (PA[16:2]) and data,
+	// taken in the access's last clock. Back-to-back accesses (STM/LDM runs)
+	// keep the strobe low and only change PA, so an access also ends when
+	// PA[16:2] changes under a low strobe. Only accesses the CPU completed
+	// count: the strobe is decoded from MADAM's CPU access and can pulse low
+	// for a clock or two between bus cycles with no MCLK phase (MCLK_PH2), so
+	// no DDR request (io_rd/io_we are gated by MCLK_CE) and no data taken;
+	// those are counted apart. A shadow keeps each byte the 3DO
+	// wrote; a read of such a byte that returns anything else is an error.
+	// At the end the shadow is compared with the NVRAM as the host reads it
+	// back (the save the firmware would write).
+	bit [7:0] nv_sh [32768];
+	bit       nv_known [32768];
+	int       nv_wr_n = 0, nv_rd_n = 0, nv_rd_bad = 0, nv_fd = 0, nv_empty = 0;
+	bit       nv_w_ph = 0, nv_r_ph = 0;   // MCLK_PH2 seen in the open access
+	reg       nv_w_d = 1, nv_r_d = 1;
+	reg [19:0] nv_pa_d;
+	reg [ 7:0] nv_pdo_d;
+	reg [31:0] nv_pdi_d;
+	always @(posedge clk_sys) begin
+		nv_w_d   <= dut.SRAMW_N;
+		nv_r_d   <= dut.SRAMR_N;
+		nv_pa_d  <= dut.PA;
+		nv_pdo_d <= dut.PDO;
+		nv_pdi_d <= dut.PDI;
+		if (nv_fd == 0) begin
+			nv_fd = $fopen({outdir, "/nvram_log.txt"}, "w");
+			$fdisplay(nv_fd, "# time_ns op index data shadow");
+		end
+		if (!nv_w_d && (dut.SRAMW_N || dut.PA[16:2] != nv_pa_d[16:2]) && !nv_w_ph) nv_empty++;
+		if (!nv_w_d && (dut.SRAMW_N || dut.PA[16:2] != nv_pa_d[16:2]) && nv_w_ph) begin
+			int i;
+			i = int'(nv_pa_d[16:2]);
+			nv_wr_n++;
+			$fdisplay(nv_fd, "%0d W %04h %02h %s", $time, i, nv_pdo_d, nv_known[i] ? $sformatf("%02h", nv_sh[i]) : "--");
+			nv_sh[i] = nv_pdo_d;
+			nv_known[i] = 1;
+		end
+		if (!nv_r_d && (dut.SRAMR_N || dut.PA[16:2] != nv_pa_d[16:2]) && !nv_r_ph) nv_empty++;
+		if (!nv_r_d && (dut.SRAMR_N || dut.PA[16:2] != nv_pa_d[16:2]) && nv_r_ph) begin
+			int i;
+			bit bad;
+			i = int'(nv_pa_d[16:2]);
+			nv_rd_n++;
+			bad = nv_known[i] && nv_pdi_d[7:0] != nv_sh[i];
+			$fdisplay(nv_fd, "%0d R %04h %02h %s%s", $time, i, nv_pdi_d[7:0], nv_known[i] ? $sformatf("%02h", nv_sh[i]) : "--",
+			          bad ? " BAD" : "");
+			if (bad) begin
+				nv_rd_bad++;
+				if (nv_rd_bad <= 20)
+					$display("[%0t] NVRAM read of byte %04h returned %02h, the 3DO wrote %02h", $realtime, i, nv_pdi_d[7:0], nv_sh[i]);
+			end
+		end
+		// a new access starts (strobe falls, or PA moves under a low strobe)
+		if (dut.SRAMW_N || nv_w_d || dut.PA[16:2] != nv_pa_d[16:2]) nv_w_ph = 0;
+		if (dut.SRAMR_N || nv_r_d || dut.PA[16:2] != nv_pa_d[16:2]) nv_r_ph = 0;
+		if (!dut.SRAMW_N && dut.p3do.MCLK_PH2) nv_w_ph = 1;
+		if (!dut.SRAMR_N && dut.p3do.MCLK_PH2) nv_r_ph = 1;
 	end
 
 	// command bytes the BIOS writes to the drive (CD bus write strobes)
@@ -1468,6 +1590,26 @@ module tb_boot;
 	// the pad's latch): the falling edges in the shifting window against the
 	// shifts done, and the first 32-bit word received against the one the
 	// pad latched (an error).
+	// The first 32 bits the pad shifts out after a latch: with the Game Bub
+	// chain (GB_CHAIN), its devices in slot order (HPS2PAD snap / snap_chain,
+	// taken at the latch; a pad 16 bits, a mouse 32, the light gun 40) and 1s
+	// after the chain's end; otherwise the MiSTer port layout (IN_DATA).
+	function automatic bit [31:0] pb_first_word();
+		bit [31:0] w = '1;
+		int n = 0;
+		if (!dut.pad.GB_CHAIN) return dut.pad.IN_DATA[255:224];
+		for (int k = 0; k < 7 && n < 32; k++) begin
+			bit [3:0] e = 4'(dut.pad.snap_chain >> (4 * k));
+			int len;
+			if (!e[3] || e[2:0] == 3'd7) break;
+			len = e[2:0] < 3'd4 ? 16 : e[2:0] < 3'd6 ? 32 : 40;
+			for (int b = 0; b < len && n < 32; b++) begin
+				w[31 - n] = dut.pad.snap[e[2:0]][39 - b];
+				n++;
+			end
+		end
+		return w;
+	endfunction
 	int pb_frames = 0, pb_lost_frames = 0, pb_lost_bits = 0, pb_words = 0, pb_bad_words = 0, pb_falls = 0, pb_strobes = 0;
 	bit pb_clk_d = 0, pb_latch_d = 0, pb_active = 0, pb_checked = 0, pb_check_next = 0;
 	bit [31:0] pb_expect;
@@ -1485,7 +1627,7 @@ module tb_boot;
 					end
 				end
 				pb_active = 1; pb_falls = 0; pb_strobes = 0; pb_checked = 0; pb_check_next = 0;
-				pb_expect = dut.pad.IN_DATA[255:224];
+				pb_expect = pb_first_word();
 			end
 			if (pb_active) begin
 				// a data bit's falling edge: every 200 video clocks in the line, the
@@ -2204,14 +2346,20 @@ module tb_boot;
 		iso_len = 0;
 		void'($value$plusargs("disc_latency_us=%d", disc_latency_us));
 		void'($value$plusargs("trace_from_ms=%d", trace_from_ms));
-		if ($value$plusargs("disc_bin=%s", iso)) begin
-			bin_fd = $fopen(iso, "rb");
-			if (bin_fd == 0) $fatal(1, "tb_boot: cannot open %s", iso);
-			void'($fseek(bin_fd, 0, 2));
-			bin_sectors = $ftell(bin_fd) / 2352;
+		fw_stock = $test$plusargs("fw_stock");
+		if ($value$plusargs("disc_bin=%s", iso) || $value$plusargs("disc_iso=%s", iso)) begin
+			bit is_iso;
+			is_iso = $test$plusargs("disc_iso");
+			disc_fd = $fopen(iso, "rb");
+			if (disc_fd == 0) $fatal(1, "tb_boot: cannot open %s", iso);
+			void'($fseek(disc_fd, 0, 2));
+			disc_size = $ftell(disc_fd);
+			bin_sectors = int'(disc_size / (is_iso ? 2048 : 2352));
 			chk_fd = $fopen(iso, "rb");
 			chk_sectors = bin_sectors;
-			$display("tb_boot: streaming %s (%0d raw sectors), firmware latency %0d us", iso, bin_sectors, disc_latency_us);
+			if (is_iso) begin chk_sec_bytes = 2048; chk_iso_raw = 1; end
+			$display("tb_boot: on-demand %s %s (%0d sectors), %s firmware, latency %0d us", is_iso ? "ISO" : "raw image", iso,
+			         bin_sectors, fw_stock ? "stock" : "fork", disc_latency_us);
 		end else if ($value$plusargs("iso=%s", iso)) begin
 			place_file(iso, 1, 23'h0, iso_len, iso_sum);
 			$display("tb_boot: ISO %s (%0d bytes, %0d sectors) placed", iso, iso_len, iso_len / 2048);
@@ -2227,7 +2375,7 @@ module tb_boot;
 			host_cmd(16'h0300, 0, 0, 0, r, e);
 			host_cmd(16'h0301, 0, iso_len, 0, r, e);
 		end
-		if (bin_fd != 0) begin
+		if (disc_fd != 0 && !$test$plusargs("disc_iso")) begin
 			// Table of contents (fork firmware DiscImage::toc). Default: one
 			// MODE1 track. +audio_tracks=<n> [+data_sectors=<k>]: the first k
 			// sectors are a data track (none with k = 0), the rest of the image
@@ -2259,9 +2407,10 @@ module tb_boot;
 				$display("tb_boot: track %0d %s, abs LBA %0d..%0d", t + 1, audio ? "audio" : "data", 150 + first, 150 + first + len - 1);
 				first += len;
 			end
-			host_cmd(16'h0300, 0, 0, 0, r, e);
-			for (int i = 0; i < 4 + 4 * ntr; i++) host_wr(32'h1000_0000 + 4 * i, toc[i]);
-			host_cmd(16'h0301, 0, 16 + 16 * ntr, 0, r, e);
+			// the fork's answer to DiscGetToc (stock firmware has none: the
+			// core then reads the image as one data track)
+			foreach (toc[i]) fw_toc.push_back(toc[i]);
+			if (fw_stock && ntr != 1) $fatal(1, "tb_boot: +fw_stock reads the image as one data track");
 		end
 		host_cmd(16'h0300, 1, 0, 0, r, e);
 		// The BIOS was placed in the SDRAM directly, not streamed through
@@ -2271,6 +2420,32 @@ module tb_boot;
 		dut.host.bios_sum_le = bios_sum;
 		dut.host.bios_sum_be = bios_sum;
 		host_cmd(16'h0301, 1, bios_len, 0, r, e);
+		// +nvram_in=<file>: a save (.sav) loaded as the firmware loads it:
+		// FILE_WRITE_START 3, the file's bytes as host words at 0x3000_0000
+		// (file byte o in bits 7:0, as the firmware's SPI writes put it),
+		// FILE_WRITE_END 3 with the length.
+		begin
+			string nv_in;
+			if ($value$plusargs("nvram_in=%s", nv_in)) begin
+				int fd, n, len;
+				bit [7:0] b [4];
+				fd = $fopen(nv_in, "rb");
+				if (fd == 0) $fatal(1, "tb_boot: cannot open %s", nv_in);
+				host_cmd(16'h0300, 3, 0, 0, r, e);
+				len = 0;
+				forever begin
+					n = $fread(b, fd);
+					if (n <= 0) break;
+					for (int i = n; i < 4; i++) b[i] = 8'h00;
+					host_wr(32'h3000_0000 + len, {b[3], b[2], b[1], b[0]});
+					len += 4;
+					if (n < 4) break;
+				end
+				$fclose(fd);
+				host_cmd(16'h0301, 3, len, 0, r, e);
+				$display("tb_boot: NVRAM %s (%0d bytes) loaded through the host port", nv_in, len);
+			end
+		end
 		host_cmd(16'h0102, 0, 0, 0, r, e);
 		do host_cmd(16'h0000, 0, 0, 0, r, e); while (r != 3);
 		host_wr(32'h0000_1010, 32'(sram_mode));   // "VRAM memory", taken while the 3DO is in reset
@@ -2278,6 +2453,14 @@ module tb_boot;
 		// the core's settings), taken while the 3DO is in reset
 		if (!$value$plusargs("region=%d", region)) region = 0;
 		host_wr(32'h0000_1008, 32'(region));
+		// "Controller" (+controller=<0 pad, 1 pad + light gun, 2 pad + mouse,
+		// 3 mouse + pad, 4 two mice + pad>, default 0)
+		begin
+			int controller;
+			if (!$value$plusargs("controller=%d", controller)) controller = 0;
+			host_wr(32'h0000_1014, 32'(controller));
+			$display("tb_boot: Controller setting %0d", controller);
+		end
 		$display("tb_boot: VRAM memory setting %0d (%s)", sram_mode,
 		         sram_mode == 0 ? "SRAM, 2 cycles per word" : sram_mode == 1 ? "SRAM, 3 cycles per word" : "SDRAM only");
 		host_cmd(16'h0200, 1, 0, 0, r, e);
@@ -2316,6 +2499,50 @@ module tb_boot;
 			else begin
 				errors++;
 				$display("[%0t] TB ERROR: the memory system did not go idle within 2 ms of stopping the 3DO", $realtime);
+			end
+		end
+		// +nvram_out=<file>: the save as the firmware writes it on exit:
+		// FILE_READ_START 3 (the size: always 32 KiB, as the firmware truncates
+		// the file and writes that many bytes), the host words from
+		// 0x3000_0000 (bits 7:0 first), then
+		// FILE_READ_END 3. Done with the 3DO stopped, as the firmware pauses it.
+		begin
+			string nv_out;
+			if ($value$plusargs("nvram_out=%s", nv_out)) begin
+				bit [31:0] size, q;
+				int fd;
+				host_cmd(16'h0302, 3, 0, 0, r, e);
+				size = r;
+				fd = $fopen(nv_out, "wb");
+				if (size != 32'h8000) begin
+					$display("tb_boot: TB ERROR: FILE_READ_START 3 gave %0d bytes, not the whole 32 KiB NVRAM", size);
+					errors++;
+					size = 32'h8000;
+				end
+				for (int o = 0; o < int'(size); o += 4) begin
+					host_rd(32'h3000_0000 + o, q);
+					$fwrite(fd, "%c%c%c%c", q[7:0], q[15:8], q[23:16], q[31:24]);
+				end
+				$fclose(fd);
+				host_cmd(16'h0303, 3, 0, 0, r, e);
+				$display("tb_boot: NVRAM (%0d bytes) saved to %s", size, nv_out);
+				begin
+					int lost = 0, known = 0;
+					for (int o = 0; o < 32768; o += 4) begin
+						host_rd(32'h3000_0000 + o, q);
+						for (int k = 0; k < 4; k++)
+							if (nv_known[o + k]) begin
+								known++;
+								if (q[8*k +: 8] != nv_sh[o + k]) begin
+									lost++;
+									if (lost <= 20) $display("tb_boot: NVRAM byte %04h saved as %02h, the 3DO last wrote %02h", o + k, q[8*k +: 8], nv_sh[o + k]);
+								end
+							end
+					end
+					$display("tb_boot: NVRAM check: %0d writes, %0d reads (%0d returned other than the 3DO wrote), %0d bytes written, %0d of them saved wrong; %0d strobe pulses with no bus cycle",
+					         nv_wr_n, nv_rd_n, nv_rd_bad, known, lost, nv_empty);
+					if (nv_rd_bad != 0 || lost != 0) errors++;
+				end
 			end
 		end
 		dump_vram_fb(32'h000000, 1638, {outdir, "/frames/vram_all.ppm"});

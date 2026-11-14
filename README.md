@@ -62,40 +62,38 @@ prepares the mirrored image. Kanji images belong in `kanji.rom`. M2 entries are 
 as unsupported: they require a different machine. Catalog recognition and loading do
 not mean every developer, prototype or arcade BIOS has been boot-tested on this core.
 
-**Discs.** Use the disc-streaming firmware from the
-[neutralinsomniac/gamebub](https://github.com/neutralinsomniac/gamebub/blob/psx/docs/psx.md)
-fork (the one its PlayStation core needs; release 0.1.3, whose firmware file is
-`gamebub-handheld-rev4-1.1.0-beta3.uf2`) and select a `.cue` (or a lone `.bin`). Discs of
-any size are read from the microSD card as the game needs them, and the disc can be
-changed from the pause menu; see [docs/disc_streaming.md](docs/disc_streaming.md).
+**Firmware.** The core is built on the Game Bub framework `v1.1.0-beta4` and needs handheld
+firmware `v1.1.0-beta4` or later (older firmware sends the controllers and the disc
+differently). Install the matching dock beta firmware too.
 
-That firmware reads raw 2352-byte CD sectors only. Most 3DO images come as an `.iso`,
-which it refuses ("not a raw image"). The release zip therefore includes that firmware with
-a patch that reads 2048-byte-sector ISOs as well (see [firmware/](firmware/README.md)). With
-the unpatched firmware, convert first: `tools/iso2bin.py image.iso` writes `image.bin` and
-`image.cue` (with the sector headers, EDC and ECC of a pressed disc); select the `.cue`.
+**Discs.** Discs of any size are read from the microSD card as the game needs them (the
+disc file is on demand; see [docs/disc_streaming.md](docs/disc_streaming.md)):
 
-The handheld firmware in the release zip also reads **CHD** images (`.chd`, version 5, as
-`chdman createcd` makes them, with its default codecs `cdlz`, `cdzl` and `cdfl`, the generic
-`lzma` and `zlib`, or none). A CHD made from a CUE/BIN or an ISO reads sector for sector as
-the image it was made from, CD audio tracks and pregaps included. CHDs compressed with zstd
-(`cdzs`, `zstd`), CHDs that need a parent CHD, and hunks larger than chdman's default 8
-frames are refused. See
-[firmware/](firmware/README.md#chd-images).
-
-Stock firmware cannot stream: it loads the selected file into SDRAM at startup, so only
-`.iso` images (2048-byte sectors) of up to 22 MiB work there. `tools/cue2iso.py
-image.cue` converts a CUE/BIN and tells you whether it fits. Commercial discs (100–650 MB)
-do not.
+* With **stock firmware**, select a single-file image: an `.iso` (2048-byte sectors) or a
+  raw `.bin` (2352-byte sectors) of one data track. Stock firmware does not read `.cue` or
+  `.chd` files; picked there, the core starts without a disc. `tools/cue2iso.py image.cue`
+  turns a data-only CUE/BIN into an ISO.
+* The **fork firmware** in the release zip (see [firmware/](firmware/README.md)) also reads
+  `.cue` files (with their `.bin` files, CD audio tracks included) and **CHD** images
+  (`.chd`, version 5, as `chdman createcd` makes them, with its default codecs `cdlz`,
+  `cdzl` and `cdfl`, the generic `lzma` and `zlib`, or none). A CHD made from a CUE/BIN
+  or an ISO reads sector for sector as the image it was made from, CD audio tracks and
+  pregaps included. CHDs compressed with zstd (`cdzs`, `zstd`), CHDs that need a parent
+  CHD, and hunks larger than chdman's default 8 frames are refused. It also drives the
+  3DO mouse and light gun from the dock (see *Controller*).
 
 **Saves.** The NVRAM is stored next to the disc image as `.sav`. If none exists, a blank
 3DO NVRAM is created. It is written back when you leave the core, and with the fork's
-firmware also when you pause.
+firmware also when you pause. The 3DO is held paused while the save is read (see
+*Saving while the game runs*). Builds before a29 could write a damaged save on pause
+(Mad Dog McCree then hung on a black screen after its logos): rename or delete a `.sav`
+written by those builds if its game no longer starts.
 
 ### Limitations
 
-* **Commercial discs need the disc-streaming firmware.** Stock firmware only runs `.iso`
-  images of up to 22 MiB (see *Discs* above).
+* With stock firmware, a disc with CD audio tracks (a `.cue` with several `.bin` files)
+  or a `.chd` needs the fork firmware (see *Discs* above); its data track alone runs as
+  an `.iso` or `.bin`.
 * CD audio tracks (from a `.cue` with its `.bin` files; an `.iso` has none) are read
   through the drive's data port and played on the DSP, as on the 3DO, which has no analog
   CD audio path. This is tested in simulation only, not yet on hardware.
@@ -127,10 +125,9 @@ firmware also when you pause.
   are not all gone: before the two fixes there, the Wolfenstein 3D boot had 247 in its
   first 12.5 s, 216 of them from the CPU's CLIO accesses; the remaining ones in its 3D
   intro, where the 3DO is paused for the SDRAM a lot, are being measured.
-* One controller (the handheld's buttons and the dock's gamepads all drive it). Buttons:
-  see the Buttons setting; Start = P (play), Select = X (stop), L/R = L/R. The firmware
-  has no button remapping of its own; its "Swap A/B and X/Y" setting swaps those of the
-  dock's gamepads before the core sees them.
+* Up to four pads: the handheld's buttons (or, docked, the first dock controller) are
+  pad 1, the other dock controllers pads 2-4. Buttons: see the Buttons setting; Start =
+  P (play), Select = X (stop), L1/R1 = L/R, a left stick more than half way = the D-pad.
 
 ### Settings
 
@@ -438,6 +435,30 @@ Two causes:
   ending on a shown line with different frame buffers next costs one late line per
   switch under heavy CPU VRAM traffic; the OS ends them in the vertical blanking.)
 
+### Saving while the game runs
+
+The firmware saves the NVRAM when you leave the core, and also when you pause
+(`save_on_pause` in `files.json`). Leaving halts the core first; pausing only takes the
+focus away, and the 3DO kept running. The firmware reads a save over SPI, and the
+framework's SPI receiver cannot wait for the core: it asks for each 32-bit word two words
+ahead (`SpiReceiverFifo`, the 8 dummy bytes) and sends `FFFFFFFF` for a word the core has
+not delivered in time, after which the rest of the save is shifted. Each host read of the
+NVRAM goes through the SDRAM's secondary port, which waits for the 3DO to pause and for the
+video transfers, so with the 3DO running most words came too late. The damaged saves had
+runs of `FF` spliced into the 3DO file system's directory: Mad Dog McCree's `maddog` entry
+moved 20 bytes, and the game hung on a black screen after its logos on the next boot.
+
+`gb_host` now holds the 3DO paused (`save_hold`, part of the pause condition) from
+`FILE_READ_START` for the NVRAM to `FILE_READ_END`. The 3DO also cannot change the NVRAM
+in the middle of the save. The fork firmware reads every chunk of a save twice and writes
+it only when both reads agree (four tries, then the save fails and the old file stays).
+
+`tb_top` checks every save against the SPI's schedule (a word of 800 ns at the default
+5000 KB/s, two words of lead, requests answered in order): the saves made before the 3DO
+runs, and a whole 32 KiB save with the 3DO running after the test ROM's verdict, which it
+now reads without a save. With the hold, 0 of 8,200 words are late (least slack 760 ns);
+without it, 8,156 of the 8,192 words of the running save are, up to 400 us late.
+
 ### Firmware statistics registers
 
 The Game Bub firmware (the disc-streaming fork) reads two counters from every core when
@@ -450,17 +471,55 @@ at `0x1004`, so every pause set CD Speed back to "2x (Original)". The settings a
 counter. `tb_top` checks that both count, clear on a write, and that CD Speed reads back
 at its new address.
 
+### The control port chain
+
+On the console the control port is one daisy chain: each device shifts out its ID and
+data, then passes on what the device plugged into it sends, and the chain ends in 1s from
+a pull-up. Portfolio's event broker (`EventBroker.c` in Portfolio's source) walks it every
+field and tells the devices apart by their IDs (a pad by its top three bits, 100; the
+mouse 0x49; the light gun 0x4D; a splitter 0x56; the end 0xFF). It gives each device a
+position in the chain and a number within its class: the first pad in the chain is
+control pad 1, the second control pad 2, and so on; the first mouse is mouse 1. A
+mouse's driver says it is a mouse only, so it is never a control pad. A device that
+appears logs in after 10 fields; a change at a position logs out that device and every
+one after it. So a game that asks for control pad 1 or mouse 1 finds it wherever it is,
+and a game that takes the devices in chain order needs them in the right order:
+American Laser Games' manuals (Mad Dog McCree, Mad Dog II) say "Player one's game
+pad/lightgun/mouse should be first in the daisy chain".
+
+The core chains its devices as they would be plugged into a console (`HPS2PAD`'s Game
+Bub chain: up to 7 devices, each with its own data, in any order, taken together at the
+port's latch and shifted out device by device, then 1s). The devices:
+
+* Pads: the framework's four input slots (`InputExtendedV0`, framework `v1.1.0-beta4`).
+  Slot 0 is pad 1: the handheld's buttons, or, docked, the first dock controller; slots
+  1-3 are pads 2-4 while a dock controller is in them (the firmware assigns the slots).
+  A controller's left stick held more than half way is its D-pad as well.
+* Mice: mouse 1 while the Controller setting takes the mouse (a dock mouse drives it,
+  else a dock pad's right stick); mouse 2 while a second dock mouse is connected
+  (`0x103C` bit 16). The first dock mouse (in the order the dock connected them) is
+  mouse 1, the second mouse 2.
+* The light gun, while the firmware selects it.
+
+The **Controller** setting (register `0x1014`) gives the order: 0 "Pad" (the pads), 2
+"Pad + mouse" (the pads, then the mice), 3 "Mouse + pad" (the mice, then the pads: the
+Mad Dog games take player one from the front of the chain and see a mouse after the pad
+as player 2), 1 the light gun, then the pads (set by the firmware; player one's gun
+first). 4, from a test build, is taken as 3.
+
 ### Mouse
 
-The 3DO mouse (ID 0x49, after the pad) is on the control port when the **Controller**
-setting is "Pad + mouse" (register `0x1014` = 2). The device is MiSTer's (`hps2pad.sv`);
+The mouse (ID 0x49) The device is MiSTer's (`hps2pad.sv`);
 `host_mouse.sv` turns the Game Bub registers into its PS/2 packets:
 
 * `0x1030` motion: `{dy, dx}`, signed 16-bit each, the movement since the previous write,
   right and down positive; each write is one packet, clamped to -256..255 per axis. The
   3DO mouse moves one count per unit written (MiSTer doubled them for the HPS's raw PS/2
   deltas, which moved the cursor in steps of two; the firmware scales here) and the game
-  reads at most 96 counts per control port read, the rest waits for the next reads.
+  reads at most 511 counts per control port read (the 10-bit field's range), the rest
+  (up to 1023) waits for the next reads. MiSTer took at most 96 counts per read: a fast
+  mouse could not move the cursor faster than that, and the rest of a fast movement
+  kept the cursor going after the mouse stopped.
 * `0x1034` buttons: bit 0 left, bit 1 right, bit 2 middle, read as they stand (the
   firmware writes them alone when a button changes with the mouse still; MiSTer's
   `HPS2PAD` took the buttons from the last packet, so such a click would have reached
@@ -473,16 +532,23 @@ Bluetooth mice (bluepad32) and sends each as a gamepad whose buttons word has bi
 with the movement since the previous packet in the left stick fields (the dock's queue
 adds a new movement into a packet still waiting, so none is lost); up to 8 HID
 interfaces, so two mice and two controllers through a hub work. The handheld firmware
-(branch `mouse-3do` of the fork) sums the movement of every mouse into one 3DO mouse (one
-mouse count is one 3DO count), ORs their buttons, writes a packet for every report of
+(branch `mouse-3do` of the fork) drives a 3DO mouse with each dock mouse (one mouse count
+is one 3DO count; the first and the second, in the order the dock connected them; any
+more do nothing), writes a packet for every report of
 the mouse as it arrives (paced to one per 8 ms at first, a 125 Hz mouse's reports fell
 into the 3DO's fields one or three at a time and the cursor stuttered; the stick's cursor
 is still paced to 8 ms), and keeps the mouse out of the merged pad; without a mouse a
 dock gamepad's right stick and buttons stand in. `tb_lightgun` checks
-the packets through `host_mouse` and `HPS2PAD` (a packet, the clamp and the 96-count
-reads, two packets adding, a button alone and one held from before the mouse was
-switched on, dy -32768 clamped up rather than wrapped, the device off); test ROM test 20
-reads the mouse through MADAM's player bus DMA. On hardware a USB mouse works in Lemmings
+the packets through `host_mouse` and `HPS2PAD` (a packet, the clamp, reads of up to 511
+counts and the 1023-count backlog, two packets adding, a button alone and one held from before the mouse was
+switched on, dy -32768 clamped up rather than wrapped, the device off) and the chain
+(each transfer bit for bit: a pad alone; the light gun, then a pad; two mice, then four
+pads, each with its own button; four pads, then two mice; pads in another order with a
+mouse between them; each mouse with only its own packets; a chain changed after the latch
+taken at the next transfer; the second mouse unplugged and back; no device, all 1s). Test
+ROM tests 20, 22, 23 and 24 read the port through MADAM's player bus DMA with the Controller
+setting at 2, 3 and 4 (two mice, the second connected) and with three dock gamepads (pads
+1-3, each with its own button). On hardware a USB mouse works in Lemmings
 with the v0.5 bitstream and both firmware builds (the dock firmware's bluepad32 submodule
 is at a public commit, with the dock's CMake giving bluepad32 the FreeRTOS CYW43 arch
 instead of its own).
@@ -490,7 +556,7 @@ instead of its own).
 ### Light gun (groundwork)
 
 The 3DO light gun (ID 0x4D: American Laser Games titles, Corpse Killer, Space Pirates
-and others) is in the core's control port, after the pad, for the GunCon 3 support that
+and others) is in the core's control port, before the pads, for the GunCon 3 support that
 is being added to the Game Bub firmware. The gun reports no position: a 20-bit count from
 the start of the field to the moment its sensor saw the beam, and the number of line
 pulses it saw. `HPS2PAD` turns an aim position into that count as Portfolio's light gun
@@ -499,18 +565,19 @@ PAL 12796 / 1051 / 388 / 58995, the SDK's defaults, not checked on a PAL gun). O
 rounds the division down, which put x = 0 at the end of the line above for the driver.
 Core registers (host memory interface):
 
-* `0x1014` Controller: 0 pad, 1 pad + light gun, 2 pad + mouse (the firmware sets 1 itself
-  when a GunCon 3 is connected).
+* `0x1014` Controller: the chain's order (see "The control port chain"): 0 pads, 1 light
+  gun then pads (the firmware sets 1 itself when a GunCon 3 is connected), 2 pads then
+  mice, 3 mice then pads.
 * `0x1018` aim: `{y, x}`, 0..65535 across the picture.
 * `0x101C` buttons: bit 0 trigger, bit 1 option, bit 2 off screen (no hit: count 0,
   trigger set, as for a reload).
 
 The light gun is not offered by the Controller setting in `settings.json`: without the
 firmware driving it the gun would only report "off screen"; the firmware selects it when a
-gun is connected. `tb_lightgun` checks 541 control port transfers
+gun is connected. `tb_lightgun` checks 542 control port transfers of the gun
 (NTSC and PAL, corners, edges, a grid, random aims, buttons, off screen) against the
-formula and Portfolio's decoding; test ROM test 19 reads the gun through MADAM's player
-bus DMA as Portfolio does (the first word is the port's leftover, as in Portfolio's
+formula and Portfolio's decoding; test ROM test 19 reads the gun, then the pad, through
+MADAM's player bus DMA as Portfolio does (the first word is the port's leftover, as in Portfolio's
 ControlPort.c).
 
 `tb_boot` places the BIOS in the SDRAM directly; it now also gives `gb_host` the BIOS
@@ -1066,7 +1133,7 @@ sim/run_tb.sh tb_gfx           # MADAM pixel processor, CLIO display control wor
 sim/run_tb.sh tb_viddma        # MADAM video DMA: line-start / mid-line acknowledges, mid-line register
                                # choice, field line across VDL entries, VDL entries with ListLen 0
 sim/run_tb.sh tb_lightgun      # the light gun (count, buttons, off screen; NTSC, PAL) and the mouse
-                               # (packets, clamp, 96-count reads) on the control port
+                               # (packets, clamp, 511-count reads) on the control port
 sim/run_tb.sh tb_dsp_kt +nmem=... +imem=... +fifo=... +cpu=... +ticks=N +log=...
                                # the CLIO DSP on a game's program and input from an instrumented Opera
                                # run (see the CLIO section), for a tick-by-tick comparison with Opera;
@@ -1103,8 +1170,9 @@ sim/build_testrom.sh           # assemble the test BIOS (sim/tb/testrom.S), sim/
                                # sim/tb/arm6_fiq.S
 sim/run_tb.sh tb_top           # whole core: boots the test BIOS (21 tests, among them an EZFlix-like
                                # in-place video decode into screens in the SDRAM); checks the Buttons setting
-sim/run_tb.sh tb_top +be       # same with a big-endian host
-sim/run_tb.sh tb_top +stream   # same, with the disc read through a model of the streaming firmware
+                               # (the disc on demand from a model of stock firmware: an ISO)
+sim/run_tb.sh tb_top +stream   # same, the disc from a model of the fork firmware (raw image, CD-DA track)
+sim/run_tb.sh tb_top +preload  # same, the ISO loaded at setup (+be: a big-endian host)
 ```
 
 Each testbench ends with `PASS` or `FAIL`; a failure (or a missing file or argument)
@@ -1115,14 +1183,21 @@ VARGS="+define+TB_TOP=tb_boot" BUILD=build/sim_boot sim/run_tb.sh tb_boot \
     +bios=/path/to/panafz10.bin "+disc_bin=/path/to/game.bin" +run_ms=16000 +frame_every=30
 ```
 
-`tb_boot` boots a real BIOS, with a disc either streamed from a raw `.bin`
-(`+disc_bin=`, served the way the streaming firmware does) or preloaded from an ISO
-(`+iso=`). It writes framework video frames to `build/sim/frames/` (PPM; `+out=<dir>`
+`tb_boot` boots a real BIOS, with a disc on demand from a raw `.bin` (`+disc_bin=`) or an
+ISO (`+disc_iso=`), served the way the fork firmware (default) or stock firmware
+(`+fw_stock`) does, or preloaded from an ISO (`+iso=`). It writes framework video frames to `build/sim/frames/` (PPM; `+out=<dir>`
 for another directory), logs every CD command and checks every streamed sector against
 the image, checks every random VRAM write that goes to the SDRAM and that every video
 line has had its VRAM transfers before it starts, dumps VRAM as an image
 at the end and measures stale serial reads during VRAM read transfers. If the CPU runs
-outside the memory map, the last CPU bus cycles are written to `cpu_trace.txt`. About
+outside the memory map, the last CPU bus cycles are written to `cpu_trace.txt`. Every
+3DO access to the NVRAM goes to `nvram_log.txt` (one line per byte, also within STM/LDM
+runs, where the strobe stays low and only the address moves; strobe pulses with no MCLK
+phase, which carry no access, are only counted), and a read of a byte the 3DO wrote that
+returns something else is an error. With the Game Bub controller chain, the first player bus
+word is checked against the chain's devices in their order. `+nvram_in=<file>` loads a `.sav` and
+`+nvram_out=<file>` writes one at the end, the way the firmware does (the bytes the 3DO
+wrote are then checked in it). About
 2.5 ms of 3DO time per second of wall time. It fails on any TB error (a video line that
 started late while the 3DO was paused is one, see *Limitations*) or SDRAM model error.
 
@@ -1165,7 +1240,8 @@ run a test at other timing corners; `tb_sdram` and `tb_top` pass at a slow corne
 
 `tb_top` runs the complete core against an SDRAM model that checks every SDRAM timing
 parameter and refresh. A host model follows the framework's MCU protocol: it loads the
-ISO and BIOS, formats NVRAM, then sends SetupComplete and CoreRun. The test BIOS
+BIOS (and, with `+preload`, the ISO), formats NVRAM, then sends SetupComplete and CoreRun,
+and answers the core's disc requests. The test BIOS
 (ARMv3 assembly) checks:
 
 * DRAM word and byte accesses

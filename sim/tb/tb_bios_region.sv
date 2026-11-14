@@ -27,7 +27,7 @@ module tb_bios_region;
     .core_halt(core_halt),.core_reset_pulse(core_reset_pulse),.focus(),.HOST_LE(HOST_LE),
     .disc_present(),.disc_bytes(),.bios_loaded(bios_loaded),.bios_512k(bios_512k),.kanji_loaded(),.cd_speed(),.region_sel(region_sel),
     .button_layout(),.vram_mem(),.bios_pal(bios_pal),.disc_stream(),.disc_change(),.toc_we(),.toc_wa(),.toc_wd(),
-    .sb_we(),.sb_wa(),.sb_wd(),.core_cmd_words('{default:'0}),.nvram_wr(1'b0),
+    .sb_we(),.sb_wa(),.sb_wd(),.core_cmd_words('{default:'0}),.core_res(),.od_enable(),
     .clk_mem(clk_mem),.rst_mem(reset),.sec_req(sec_req),.sec_we(sec_we),.sec_addr(sec_addr),.sec_len(sec_len),
     .sec_wdata(sec_wdata),.sec_wbe(sec_wbe),.sec_wnext(sec_wnext),.sec_rdata(16'hFFFF),.sec_rvalid(sec_rvalid),.sec_done(sec_done));
   // Complete the public secondary-port transactions. Memory contents are

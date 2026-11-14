@@ -14,6 +14,18 @@ module HPS2PAD (
 	input      [ 1: 0] ARCADE_SEL,
 	input              STICK_EN,
 	input              MOUSE_EN,
+	// Game Bub port: a second mouse (ps2_mouse2), for a second player.
+	input              MOUSE2_EN,
+	// Game Bub port: the control port as a daisy chain of devices in any
+	// order, as on the console (Portfolio EventBroker.c walks it every field:
+	// each device's ID and data, then the next device's, then 1s from the
+	// pull-up at the end of the chain). CHAIN holds up to 7 slots, slot 0 in
+	// bits 3:0, each {present, device}: 0-3 the pads of joystick_0..3, 4 the
+	// mouse, 5 the second mouse, 6 the light gun. Every device's data and the
+	// chain are taken at the latch; then each falling PBCLK shifts out the
+	// next bit. With GB_CHAIN 0 the MiSTer port selections below apply.
+	input              GB_CHAIN,
+	input      [27: 0] CHAIN,
 	input              ARCADE_SERVICE,
 	
 	input      [12: 0] joystick_0,
@@ -29,6 +41,7 @@ module HPS2PAD (
 	input      [7 : 0] joy1_x1,
 	input      [7 : 0] joy1_y1,
 	input      [24: 0] ps2_mouse,
+	input      [24: 0] ps2_mouse2,
 
 	// Game Bub port: light gun (ID 0x4D, 40 bits), after the first pad when
 	// LG_EN. Aim 0..65535 across the picture (left/top 0), trigger, option,
@@ -69,10 +82,16 @@ module HPS2PAD (
 		end
 	endfunction
 
+	// Game Bub port: a read takes up to the 10-bit field's range, -511..511
+	// (Opera passes the host's movement unclamped). MiSTer took at most 96
+	// counts per read, so a fast mouse could not move the cursor faster than
+	// 96 counts a field, and the rest of a fast movement queued up and
+	// drained over the next fields (the cursor went on after the mouse
+	// stopped).
 	function automatic signed [9:0] mouse_step(input signed [10:0] axis);
 		begin
-			if (axis > 11'sd96) mouse_step = 10'sd96;
-			else if (axis < -11'sd96) mouse_step = -10'sd96;
+			if (axis > 11'sd511) mouse_step = 10'sd511;
+			else if (axis < -11'sd511) mouse_step = -10'sd511;
 			else mouse_step = axis[9:0];
 		end
 	endfunction
@@ -180,6 +199,63 @@ module HPS2PAD (
 		1'b0,
 		mouse_y[9:0],
 		mouse_x[9:0]
+	};
+
+	// Game Bub port: the second mouse, the same as the first.
+	wire [7:0] mouse2_flags = ps2_mouse2[7:0];
+	wire signed [10:0] mouse2_dx = mouse_delta(mouse2_flags[6], mouse2_flags[4], ps2_mouse2[15:8]);
+	wire signed [10:0] mouse2_dy = mouse_delta(mouse2_flags[7], mouse2_flags[5], ps2_mouse2[23:16]);
+
+	reg mouse2_toggle = 0;
+	reg mouse2_left = 0;
+	reg mouse2_middle = 0;
+	reg mouse2_right = 0;
+	reg signed [10:0] mouse2_x_acc = '0;
+	reg signed [10:0] mouse2_y_acc = '0;
+	wire signed [9:0] mouse2_x = mouse_step(mouse2_x_acc);
+	wire signed [9:0] mouse2_y = mouse_step(mouse2_y_acc);
+	always @(posedge CLK) begin
+		reg signed [11:0] x;
+		reg signed [11:0] y;
+
+		if (RST || !MOUSE2_EN) begin
+			mouse2_toggle <= ps2_mouse2[24];
+			mouse2_left <= 1'b0;
+			mouse2_middle <= 1'b0;
+			mouse2_right <= 1'b0;
+			mouse2_x_acc <= '0;
+			mouse2_y_acc <= '0;
+		end else begin
+			x = {mouse2_x_acc[10],mouse2_x_acc};
+			y = {mouse2_y_acc[10],mouse2_y_acc};
+
+			if (LATCH) begin
+				x = x - $signed({{2{mouse2_x[9]}},mouse2_x});
+				y = y - $signed({{2{mouse2_y[9]}},mouse2_y});
+			end
+
+			mouse2_left <= ps2_mouse2[0];
+			mouse2_middle <= ps2_mouse2[2];
+			mouse2_right <= ps2_mouse2[1];
+			if (ps2_mouse2[24] != mouse2_toggle) begin
+				mouse2_toggle <= ps2_mouse2[24];
+				x = x + $signed({mouse2_dx[10],mouse2_dx});
+				y = y - $signed({mouse2_dy[10],mouse2_dy});
+			end
+
+			mouse2_x_acc <= mouse_limit(x);
+			mouse2_y_acc <= mouse_limit(y);
+		end
+	end
+
+	wire [31:0] mouse2_data = {
+		8'h49,
+		mouse2_left,
+		mouse2_middle,
+		mouse2_right,
+		1'b0,
+		mouse2_y[9:0],
+		mouse2_x[9:0]
 	};
 	
 	//light gun (Portfolio LightGunRom.c / lightgun.h; Opera opera_pbus.c)
@@ -294,6 +370,22 @@ module HPS2PAD (
 			endcase
 	end
 
+	// Game Bub chain: each device's data, left-aligned in 40 bits, and its length.
+	wire [39:0] dev_data [7] = '{
+		{joy0_data, 24'h0}, {joy1_data, 24'h0}, {joy2_data, 24'h0}, {joy3_data, 24'h0},
+		{mouse_data, 8'h0}, {mouse2_data, 8'h0}, lg_data
+	};
+	function automatic [5:0] dev_len(input [2:0] dev);
+		dev_len = dev < 3'd4 ? 6'd16 : dev < 3'd6 ? 6'd32 : 6'd40;
+	endfunction
+	reg  [39:0] snap [7];
+	reg  [31:0] snap_chain;   // slot 7 is never present
+	reg  [ 2:0] ch_slot;
+	reg  [ 5:0] ch_bit;
+	wire [ 3:0] ch_entry = snap_chain[ch_slot*4 +: 4];
+	wire        ch_valid = ch_entry[3] && ch_entry[2:0] != 3'd7;
+	wire        ch_out = ch_valid ? snap[ch_entry[2:0]][6'd39 - ch_bit] : 1'b1;
+
 	bit          LATCH;
 	always @(posedge CLK) begin
 		bit [  2: 0] STATE;
@@ -345,6 +437,10 @@ module HPS2PAD (
 							if (!PBCLK) begin
 								DOUT <= IN_DATA;
 								LATCH <= 1'b1;
+								snap <= dev_data;
+								snap_chain <= {4'h0, CHAIN};
+								ch_slot <= '0;
+								ch_bit <= '0;
 //								BIT_CNT <= '0;
 								STATE <= 3'd4;
 							end
@@ -366,6 +462,16 @@ module HPS2PAD (
 					5'd5: begin
 						if (!PBCLK && PBCLK_OLD) begin 
 							{PBDIN,DOUT} <= {DOUT,EXPBDIN}; 
+							if (GB_CHAIN) begin
+								PBDIN <= ch_out;
+								if (ch_valid) begin
+									if (ch_bit == dev_len(ch_entry[2:0]) - 6'd1) begin
+										ch_slot <= ch_slot + 3'd1;
+										ch_bit <= '0;
+									end else
+										ch_bit <= ch_bit + 6'd1;
+								end
+							end
 //							BIT_CNT <= BIT_CNT + 4'd1; 
 							WAIT_CNT <= '1;
 							/*if (BIT_CNT == 4'd15) STATE <= 5'd0; 

@@ -12,7 +12,8 @@
 //                                0x1020, reset at 0x1024); the light
 //                                gun's aim (0x1018) and buttons (0x101C)
 //                                and the mouse's motion (0x1030) and
-//                                buttons (0x1034), written by the firmware
+//                                buttons (0x1034), the second mouse's
+//                                (0x1038, 0x103C), written by the firmware
 //                                while running
 //      0x1000_0000 + o           CD image (ISO), o < 22 MiB          (file 0)
 //      0x2000_0000 + o           BIOS ROM, 1 MiB                     (file 1)
@@ -51,6 +52,8 @@ module gb_host (
 
 	// core control / status
 	output reg         core_halt,        // 1 = hold the 3DO in reset
+	output reg         save_hold,        // the host is reading the NVRAM (FILE_READ_START 3 to
+	                                     // FILE_READ_END): hold the 3DO paused meanwhile
 	output reg         core_reset_pulse, // "Reset" setting action
 	output reg         focus,
 	output reg         HOST_LE,
@@ -63,12 +66,16 @@ module gb_host (
 	output reg [ 1: 0] region_sel,       // 0 by BIOS, 1 NTSC, 2 PAL
 	output reg         button_layout,    // "Buttons": 0 Y B A = 3DO A B C, 1 A B X = 3DO A B C
 	output reg [ 1: 0] vram_mem,         // "VRAM memory": 0 SRAM, 1 SRAM slow timing, 2 SDRAM only (vram_sram.sv)
-	output reg [ 1: 0] controller,       // "Controller" (0x1014): 0 pad, 1 pad + light gun, 2 pad + mouse
+	output reg [ 2: 0] controller,       // "Controller" (0x1014): 0 pad, 1 pad + light gun, 2 pad + mouse, 3 mouse + pad, 4 2 mice + pad
 	output reg [31: 0] lg_aim,           // light gun aim (0x1018): {y, x}, 0..65535 across the picture
 	output reg [ 2: 0] lg_buttons,       // light gun buttons (0x101C): {off screen, option, trigger}
 	output reg         mouse_pkt,        // a mouse motion write (0x1030), one clock
 	output reg [31: 0] mouse_motion,     // {dy, dx}, signed 16-bit each, down / right positive
 	output reg [ 2: 0] mouse_buttons,    // (0x1034) {middle, right, left}
+	output reg         mouse2_pkt,       // the second mouse (Controller 4): motion 0x1038, buttons 0x103C
+	output reg [31: 0] mouse2_motion,
+	output reg [ 2: 0] mouse2_buttons,
+	output reg         mouse2_connected, // 0x103C bit 16: a second dock mouse is connected (it joins the chain)
 	output             bios_pal,         // the loaded BIOS is a PAL one (MiSTer checksums)
 
 	// disc streaming (fork firmware "disc" files, see docs/disc_streaming.md)
@@ -80,10 +87,9 @@ module gb_host (
 	output             sb_we,            // host writes to the sector ring (0x4000_0000..0x4000_7FFF)
 	output     [12: 0] sb_wa,
 	output     [31: 0] sb_wd,
-	input      [31: 0] core_cmd_words [4],  // core -> host request words (0xF000_1000)
-
-	// NVRAM written by the 3DO (save changed since loaded)
-	input              nvram_wr,
+	input      [31: 0] core_cmd_words [6],  // core -> host request: opcode, 5 parameters (0xF000_1000..0x1014)
+	output reg [31: 0] core_res [3],     // its results, written by the host at 0xF000_1000..0x1008
+	output             od_enable,        // set up without file 0: the disc is on demand (cdd_emu)
 
 	// SDRAM secondary port client (clk_mem)
 	input              clk_mem,
@@ -235,7 +241,9 @@ module gb_host (
 	reg         nvram_written;
 	reg         iso_first_seen;
 	reg  [31:0] cur_file;
-	reg         nvram_dirty;
+	// the disc file was not loaded at setup (files.json "on_demand"): the
+	// core reads it on request (cdd_emu)
+	assign od_enable = setup_done && !disc_present;
 	reg  [31:0] bios_sum_le, bios_sum_be;
 
 	// European BIOSes in metadata/bios_catalog.json, identified by the sum
@@ -292,12 +300,13 @@ module gb_host (
 		core_reset_pulse <= 0;
 		stat_clr <= '0;
 		mouse_pkt <= 0;
+		mouse2_pkt <= 0;
 		disc_change <= 0;
-		if (nvram_wr) nvram_dirty <= 1;
 
 		if (reset) begin
 			cmd_state     <= 2'd0;
 			core_halt     <= 1;
+			save_hold     <= 0;
 			setup_done    <= 0;
 			finalize_busy <= 0;
 			focus         <= 0;
@@ -313,13 +322,15 @@ module gb_host (
 			region_sel    <= 2'd0;
 			button_layout <= 0;
 			vram_mem      <= 2'd0;
-			controller    <= 2'd0;
+			controller    <= 3'd0;
 			mouse_motion  <= '0;
 			mouse_buttons <= '0;
+			mouse2_motion  <= '0;
+			mouse2_buttons <= '0;
+			mouse2_connected <= 0;
 			lg_aim        <= 32'h8000_8000;
 			lg_buttons    <= 3'b100;
 			disc_stream   <= 0;
-			nvram_dirty   <= 0;
 			bios_sum_le   <= '0;
 			bios_sum_be   <= '0;
 			mem_pend      <= 0;
@@ -345,8 +356,11 @@ module gb_host (
 					if (mem_address[27:4] == 24'h0) begin
 						if (mem_write) cmd_reg[mem_address[3:2]] <= mem_dataWrite;
 						else           mem_dataRead <= cmd_reg[mem_address[3:2]];
-					end else if (mem_address[27:4] == 24'h000100) begin
-						mem_dataRead <= mem_write ? 32'h0 : core_cmd_words[mem_address[3:2]];
+					end else if (mem_address[27:5] == 23'h000080) begin
+						// core -> host request: the host reads the opcode and
+						// parameters and writes its results over them
+						if (mem_write && mem_address[4:2] < 3'd3) core_res[mem_address[3:2]] <= mem_dataWrite;
+						mem_dataRead <= (mem_write || mem_address[4:2] > 3'd5) ? 32'h0 : core_cmd_words[mem_address[4:2]];
 					end else begin
 						mem_dataRead <= 32'h0;
 					end
@@ -367,11 +381,13 @@ module gb_host (
 							8'h08: region_sel <= mem_dataWrite[1:0];
 							8'h0C: button_layout <= mem_dataWrite[0];
 							8'h10: vram_mem <= mem_dataWrite[1:0];
-							8'h14: controller <= mem_dataWrite[1:0];
+							8'h14: controller <= mem_dataWrite[2:0];
 							8'h18: lg_aim <= mem_dataWrite;
 							8'h1C: lg_buttons <= mem_dataWrite[2:0];
 							8'h30: begin mouse_motion <= mem_dataWrite; mouse_pkt <= 1; end
 							8'h34: mouse_buttons <= mem_dataWrite[2:0];
+							8'h38: begin mouse2_motion <= mem_dataWrite; mouse2_pkt <= 1; end
+							8'h3C: begin mouse2_buttons <= mem_dataWrite[2:0]; mouse2_connected <= mem_dataWrite[16]; end
 							default: ;
 						endcase
 						mem_dataRead <= 32'h0;
@@ -383,11 +399,13 @@ module gb_host (
 							8'h08: mem_dataRead <= {30'd0, region_sel};
 							8'h0C: mem_dataRead <= {31'd0, button_layout};
 							8'h10: mem_dataRead <= {30'd0, vram_mem};
-							8'h14: mem_dataRead <= {30'd0, controller};
+							8'h14: mem_dataRead <= {29'd0, controller};
 							8'h18: mem_dataRead <= lg_aim;
 							8'h1C: mem_dataRead <= {29'd0, lg_buttons};
 							8'h30: mem_dataRead <= mouse_motion;
 							8'h34: mem_dataRead <= {29'd0, mouse_buttons};
+							8'h38: mem_dataRead <= mouse2_motion;
+							8'h3C: mem_dataRead <= {15'd0, mouse2_connected, 13'd0, mouse2_buttons};
 							default: mem_dataRead <= 32'h0;
 						endcase
 					end
@@ -449,7 +467,6 @@ module gb_host (
 					fst <= F_WRITE_WAIT;
 				end
 				F_WRITE_WAIT: if (x_finished) begin
-					nvram_dirty <= 1;
 					x_row <= x_row + 1'd1;
 					fst <= (x_row == 5'd31) ? F_DONE : F_WRITE;
 				end
@@ -502,20 +519,34 @@ module gb_host (
 									bios_512k <= (cmd_reg[2] == 32'h80000);
 								end
 								FILE_KANJI: kanji_loaded <= 1;
-								FILE_NVRAM: begin nvram_written <= 1; nvram_dirty <= 0; end
+								FILE_NVRAM: nvram_written <= 1;
 								default: ;
 							endcase
 							cur_file <= '1;
 						end
 						CMD_FILE_READ_START: begin
 							case (cmd_reg[1])
-								// 0 = unchanged since loaded/saved (the fork firmware
-								// then leaves the file alone, e.g. for save_on_pause)
-								FILE_NVRAM: cmd_reg[0] <= nvram_dirty ? NVRAM_BYTES : 32'd0;
+								// Always the whole NVRAM: the firmware (v1.1.0-beta4)
+								// truncates the save file and writes what this says,
+								// so a 0 for "unchanged" (taken by the beta3 fork as
+								// nothing to save) would leave an empty .sav.
+								// The 3DO is held paused until FILE_READ_END: the
+								// firmware also saves while the game runs (on pause,
+								// save_on_pause, when the core only loses focus), and
+								// the host's NVRAM reads then waited for the SDRAM
+								// behind the running 3DO longer than the SPI read
+								// allows (the framework sends FFFFFFFF for a word not
+								// there in time, and the save came out shifted and
+								// FF-filled). Paused, the 3DO cannot change the NVRAM
+								// in the middle of the save either.
+								FILE_NVRAM: begin
+									cmd_reg[0] <= NVRAM_BYTES;
+									save_hold  <= 1;
+								end
 								default:    cmd_state <= 2'd3;
 							endcase
 						end
-						CMD_FILE_READ_END: if (cmd_reg[1] == FILE_NVRAM) nvram_dirty <= 0;
+						CMD_FILE_READ_END: save_hold <= 0;
 						default: cmd_state <= 2'd3;
 					endcase
 				end

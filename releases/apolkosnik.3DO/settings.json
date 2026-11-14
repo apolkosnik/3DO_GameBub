@@ -93,6 +93,10 @@
 				{
 					"label": "Pad + mouse",
 					"value": "0x2"
+				},
+				{
+					"label": "Mouse + pad",
+					"value": "0x3"
 				}
 			],
 			"default": "0x0"

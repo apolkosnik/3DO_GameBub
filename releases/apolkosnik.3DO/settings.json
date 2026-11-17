@@ -102,6 +102,27 @@
 			"default": "0x0"
 		},
 		{
+			"id": 7,
+			"label": "Crosshair",
+			"address": "0x00001028",
+			"type": "list",
+			"items": [
+				{
+					"label": "Small",
+					"value": "0x0"
+				},
+				{
+					"label": "Large",
+					"value": "0x1"
+				},
+				{
+					"label": "Off",
+					"value": "0x2"
+				}
+			],
+			"default": "0x0"
+		},
+		{
 			"id": 2,
 			"label": "Reset",
 			"address": "0x00001024",

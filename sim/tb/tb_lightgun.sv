@@ -8,13 +8,17 @@
 // (Portfolio LightGunRom.c / Opera opera_pbus.c):
 //   0x4D | trigger 0 0 0 option 0 0 count[19] | count[18:11] | count[10:3] |
 //   count[2:0] hits[4:0]
-// with count = ceil((y * YSCANTIME + x * XSCANTIME * 10 / WIDTH) / 10) - TIMEOFFSET
-// for the pixel (x, y) aimed at (NTSC 1030 / 12707 / -12835 / 320 x 240, PAL
-// 1051 / 12796 / -58995 / 388 x 288), hits 0x1F; off screen: count 0, hits 0,
-// trigger set. After them the bus reads 1s (no more devices).
+// with count = ceil((y * YSCANTIME + ceil(x * XSCANTIME * 10 / WIDTH)) / 10) - TIMEOFFSET
+// for the pixel (x, y) aimed at (NTSC 1030 / 12707 / -12835 / 320 wide, PAL
+// 1051 / 12796 / -58995 / 388 wide), hits 0x1F; off screen: count 0, hits 0,
+// trigger set. After them the bus reads 1s (no more devices). The aim
+// (0..65535) is across the 320 x 240 picture in both standards: pixel
+// (aim * 320) >> 16, (aim * 240) >> 16, also on GUN_X / GUN_Y (the crosshair).
 // For every aim (corners, edges, a grid, random) and both standards the
 // count must match, and Portfolio's lightgun.c decoding of it must give the
-// pixel back (within one pixel: the integer divisions).
+// pixel back exactly. Then every pixel of the picture, both standards: the
+// first aim of the pixel gives it on GUN_X / GUN_Y, and its count (taken
+// from HPS2PAD once the computation has gone round) decodes to it exactly.
 // Then the mouse (ID 0x49, 32 bits after the pad): host_mouse turns the Game
 // Bub's motion packets ({dy, dx} signed, down / right positive) and buttons
 // into HPS2PAD's PS/2 packets; HPS2PAD moves one count per unit, at most 511
@@ -51,6 +55,7 @@ module tb_lightgun;
 	reg  [15:0] ax = 0, ay = 0;
 	reg  mouse_en = 0, mouse2_en = 0, m_pkt = 0, m2_pkt = 0, gb_chain = 0;
 	reg  [27:0] chain = '0;
+	wire [ 8:0] gun_x, gun_y;
 	reg  [12:0] joy1 = '0, joy2 = '0, joy3 = '0;
 	reg  [15:0] m_dx = 0, m_dy = 0;
 	reg  [ 2:0] m_btn = 0;
@@ -69,7 +74,8 @@ module tb_lightgun;
 		.joy0_x0('0), .joy0_y0('0), .joy0_x1('0), .joy0_y1('0),
 		.joy1_x0('0), .joy1_y0('0), .joy1_x1('0), .joy1_y1('0), .ps2_mouse(ps2), .ps2_mouse2(ps2b),
 		.LG_EN(lg_en), .LG_PAL(lg_pal), .lg_x(ax), .lg_y(ay),
-		.lg_trigger(trig), .lg_option(opt), .lg_offscreen(off)
+		.lg_trigger(trig), .lg_option(opt), .lg_offscreen(off),
+		.GUN_X(gun_x), .GUN_Y(gun_y)
 	);
 
 	int errors = 0, checks = 0;
@@ -91,27 +97,35 @@ module tb_lightgun;
 		pbclk = 0; repeat (20000) @(posedge clk);   // the pad side goes idle
 	endtask
 
-	// the expected count (Opera's formula with the division by 10 rounded up,
-	// so that the driver's decoding gives the pixel back; plain integers)
+	// the expected count (Opera's formula with both divisions rounded up, so
+	// that the driver's decoding gives the pixel back; plain integers)
 	function automatic int exp_count(input int px, input int py, input bit pal);
 		int xs, ys, toff, w, c;
 		xs = pal ? 1051 : 1030; ys = pal ? 12796 : 12707; toff = pal ? -58995 : -12835; w = pal ? 388 : 320;
-		c = (py * ys + (px * xs * 10) / w + 9) / 10;
+		c = (py * ys + (px * xs * 10 + w - 1) / w + 9) / 10;
 		return (c - toff) & 32'hFFFFF;
 	endfunction
+
+	// Portfolio's decoding (lightgun.c, with the same standard's constants)
+	task automatic decode(input int c, input bit pal, output int rx, output int ry);
+		int cp, xs, ys, toff, w;
+		xs = pal ? 1051 : 1030; ys = pal ? 12796 : 12707; toff = pal ? -58995 : -12835; w = pal ? 388 : 320;
+		cp = c + toff;
+		ry = (10 * cp) / ys;
+		rx = (((10 * cp) % ys) * w) / (xs * 10);
+	endtask
 
 	task automatic check(input bit [15:0] x, input bit [15:0] y, input bit pal, input bit t, input bit o, input bit offs);
 		bit [255:0] q;
 		bit [15:0] pad;
 		bit [39:0] g;
 		bit [7:0] rest;
-		int px, py, w, h, ec, c, dx, dy;
+		int px, py, ec, c;
 		ax = x; ay = y; lg_pal = pal; trig = t; opt = o; off = offs;
 		repeat (200) @(posedge clk);                // a whole count computation
 		pbus_read(16 + 40 + 8, q);
 		pad = q[63:48]; g = q[47:8]; rest = q[7:0];
-		w = pal ? 388 : 320; h = pal ? 288 : 240;
-		px = (int'(x) * w) >> 16; py = (int'(y) * h) >> 16;
+		px = (int'(x) * 320) >> 16; py = (int'(y) * 240) >> 16;
 		ec = offs ? 0 : exp_count(px, py, pal);
 		checks++;
 		if (pad !== 16'h8000) fail($sformatf("pad word %04h, expected 8000", pad));
@@ -123,15 +137,12 @@ module tb_lightgun;
 		if (c !== ec) fail($sformatf("%s aim %04h,%04h (pixel %0d,%0d): count %05h, expected %05h",
 		                             pal ? "PAL" : "NTSC", x, y, px, py, c, ec));
 		if (g[4:0] !== (offs ? 5'd0 : 5'h1F)) fail($sformatf("hit count %0d", g[4:0]));
-		// Portfolio's decoding (lightgun.c, with the same standard's constants)
+		if (gun_x !== 9'(px) || gun_y !== 9'(py))
+			fail($sformatf("aim %04h,%04h: GUN_X/Y %0d,%0d, expected %0d,%0d", x, y, gun_x, gun_y, px, py));
 		if (!offs) begin
-			int cp, rx, ry, xs, ys, toff;
-			xs = pal ? 1051 : 1030; ys = pal ? 12796 : 12707; toff = pal ? -58995 : -12835;
-			cp = c + toff;
-			ry = (10 * cp) / ys;
-			rx = (((10 * cp) % ys) * w) / (xs * 10);
-			dx = rx - px; dy = ry - py;
-			if (dx < -1 || dx > 1 || dy != 0)
+			int rx, ry;
+			decode(c, pal, rx, ry);
+			if (rx != px || ry != py)
 				fail($sformatf("%s pixel %0d,%0d: the driver decodes the count as %0d,%0d", pal ? "PAL" : "NTSC", px, py, rx, ry));
 		end
 	endtask
@@ -221,6 +232,27 @@ module tb_lightgun;
 		check(16'h4000, 16'h4000, 0, 1, 1, 0);
 		check(16'h4000, 16'h4000, 0, 0, 0, 1);   // off screen: reload
 		check(16'h4000, 16'h4000, 1, 0, 1, 1);
+		// every pixel, both standards: GUN_X / GUN_Y and the count's decoding
+		begin
+			int bad = 0;
+			for (int pal = 0; pal < 2; pal++) begin
+				lg_pal = 1'(pal);
+				for (int py = 0; py < 240; py++) for (int px = 0; px < 320; px++) begin
+					int rx, ry;
+					ax = 16'((px * 65536 + 319) / 320); ay = 16'((py * 65536 + 239) / 240);
+					repeat (130) @(posedge clk);       // two whole count computations
+					decode(int'(dut.lg_count), 1'(pal), rx, ry);
+					if (gun_x !== 9'(px) || gun_y !== 9'(py) || rx != px || ry != py ||
+					    int'(dut.lg_count) != exp_count(px, py, 1'(pal))) begin
+						bad++;
+						fail($sformatf("%s pixel %0d,%0d: GUN_X/Y %0d,%0d, count %05h (expected %05h) decodes as %0d,%0d",
+						               pal ? "PAL" : "NTSC", px, py, gun_x, gun_y, dut.lg_count, exp_count(px, py, 1'(pal)), rx, ry));
+					end
+				end
+			end
+			checks++;
+			$display("tb_lightgun: every pixel of 320 x 240, NTSC and PAL: %0d wrong", bad);
+		end
 		// the mouse
 		lg_en = 0; mouse_en = 1;
 		repeat (20) @(posedge clk);

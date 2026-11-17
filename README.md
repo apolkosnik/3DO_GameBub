@@ -560,9 +560,20 @@ and others) is in the core's control port, before the pads, for the GunCon 3 sup
 is being added to the Game Bub firmware. The gun reports no position: a 20-bit count from
 the start of the field to the moment its sensor saw the beam, and the number of line
 pulses it saw. `HPS2PAD` turns an aim position into that count as Portfolio's light gun
-driver decodes it (`count = ceil((y * 12707 + x * 10300 / 320) / 10) + 12835` for NTSC;
-PAL 12796 / 1051 / 388 / 58995, the SDK's defaults, not checked on a PAL gun). Opera
-rounds the division down, which put x = 0 at the end of the line above for the driver.
+driver decodes it (`count = ceil((y * 12707 + ceil(x * 10300 / 320)) / 10) + 12835` for
+NTSC; PAL 12796 / 1051 / 388 / 58995, the SDK's defaults, not checked on a PAL gun). Opera
+rounds the division by 10 down, which put x = 0 at the end of the line above for the
+driver; the core rounded the x term down, which decoded about one pixel in ten one to the
+left. With both divisions rounded up every pixel decodes to itself (as the MiSTer core's
+`split/lightgun` branch does). The aim is across the picture the core shows, the 320 x 240
+framebuffer, in PAL as well (it was mapped to 388 x 288 in PAL, so a PAL game saw the gun
+further right and down than it pointed).
+
+**Crosshair.** While the gun is in use and sees the screen, `gun_cross` draws a white
+plus with a black border at the pixel it aims at, on the stream to the framework (so on
+the TV and the handheld's screen). The Crosshair setting (`0x1028`): Small (arms of 4
+pixels, the default), Large (8) or Off. The aim and the setting are taken at the vertical
+blanking, so a frame shows one whole plus. It helps calibrating (C1 + C2) and aiming.
 Core registers (host memory interface):
 
 * `0x1014` Controller: the chain's order (see "The control port chain"): 0 pads, 1 light
@@ -576,7 +587,12 @@ The light gun is not offered by the Controller setting in `settings.json`: witho
 firmware driving it the gun would only report "off screen"; the firmware selects it when a
 gun is connected. `tb_lightgun` checks 542 control port transfers of the gun
 (NTSC and PAL, corners, edges, a grid, random aims, buttons, off screen) against the
-formula and Portfolio's decoding; test ROM test 19 reads the gun, then the pad, through
+formula and Portfolio's decoding exactly, and every pixel of the picture in both standards
+(its count decodes to it, and it is the crosshair's pixel); `tb_gun_cross` runs the real
+`HPS2PAD`, VE, `video_capture` and `gun_cross` on a picture with a colour of its own for
+every pixel and checks whole frames pixel by pixel (NTSC and PAL, corners, edges, small
+and large, off, an aim changed mid-frame); `tb_top` checks the plus in the core's own
+video at the test's aim (Small, Large, Off, off screen, back); test ROM test 19 reads the gun, then the pad, through
 MADAM's player bus DMA as Portfolio does (the first word is the port's leftover, as in Portfolio's
 ControlPort.c).
 
@@ -1132,8 +1148,9 @@ sim/run_tb.sh tb_gfx           # MADAM pixel processor, CLIO display control wor
                                # vs. the 3DO documentation
 sim/run_tb.sh tb_viddma        # MADAM video DMA: line-start / mid-line acknowledges, mid-line register
                                # choice, field line across VDL entries, VDL entries with ListLen 0
-sim/run_tb.sh tb_lightgun      # the light gun (count, buttons, off screen; NTSC, PAL) and the mouse
-                               # (packets, clamp, 511-count reads) on the control port
+sim/run_tb.sh tb_lightgun      # the light gun (count, buttons, off screen; NTSC, PAL; every pixel) and
+                               # the mouse (packets, clamp, 511-count reads) on the control port
+sim/run_tb.sh tb_gun_cross     # the light gun crosshair on the video stream, whole frames pixel by pixel
 sim/run_tb.sh tb_dsp_kt +nmem=... +imem=... +fifo=... +cpu=... +ticks=N +log=...
                                # the CLIO DSP on a game's program and input from an instrumented Opera
                                # run (see the CLIO section), for a tick-by-tick comparison with Opera;

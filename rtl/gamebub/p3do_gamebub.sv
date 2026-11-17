@@ -225,6 +225,8 @@ module p3do_gamebub #(
 	wire [24:0] ps2_mouse2;
 	wire [31:0] lg_aim;          // {y, x}, 0..65535 (0x1018)
 	wire [ 2:0] lg_buttons;      // {off screen, option, trigger} (0x101C)
+	wire [ 1:0] crosshair;       // "Crosshair" (0x1028): 0 small, 1 large, 2 off
+	wire [ 8:0] gun_x, gun_y;    // the pixel the light gun aims at (HPS2PAD)
 	wire [ 1:0] vram_mem;
 	wire        disc_stream, disc_change;
 	wire        toc_we, sb_we;
@@ -282,6 +284,7 @@ module p3do_gamebub #(
 		.mouse2_connected(mouse2_connected),
 		.lg_aim          (lg_aim),
 		.lg_buttons      (lg_buttons),
+		.crosshair       (crosshair),
 		.disc_stream     (disc_stream),
 		.disc_change     (disc_change),
 		.toc_we          (toc_we),
@@ -723,6 +726,8 @@ module p3do_gamebub #(
 		.lg_trigger(lg_buttons[0]),
 		.lg_option(lg_buttons[1]),
 		.lg_offscreen(lg_buttons[2]),
+		.GUN_X(gun_x),
+		.GUN_Y(gun_y),
 		.joystick_0(joy0),
 		.joystick_1(joy1),
 		.joystick_2(joy2),
@@ -1096,6 +1101,8 @@ module p3do_gamebub #(
 	);
 
 	/////////////////////////  VIDEO / AUDIO  ////////////////////////////////
+	wire [5:0] cap_r, cap_g, cap_b;
+	wire       cap_de, cap_hblank, cap_vblank;
 	video_capture #(.CDEPTH(6)) vcap (
 		.vclk        (clk_vid),
 		.vrst        (rst_vid),
@@ -1105,6 +1112,30 @@ module p3do_gamebub #(
 		.VBLK_N      (VBL_N),
 		.clk         (clk_sys),
 		.rst         (reset),
+		.video_r     (cap_r),
+		.video_g     (cap_g),
+		.video_b     (cap_b),
+		.video_de    (cap_de),
+		.video_hblank(cap_hblank),
+		.video_vblank(cap_vblank)
+	);
+
+	// The light gun's crosshair: while the gun is in use (the firmware sets
+	// Controller to 1 while a gun is on the dock) and sees the screen, unless
+	// the Crosshair setting is Off.
+	gun_cross #(.CDEPTH(6)) gcross (
+		.clk         (clk_sys),
+		.rst         (reset),
+		.en          (controller == 3'd1 && !lg_buttons[2] && crosshair < 2'd2),
+		.big_en      (crosshair == 2'd1),
+		.gun_x       (gun_x),
+		.gun_y       (gun_y),
+		.in_r        (cap_r),
+		.in_g        (cap_g),
+		.in_b        (cap_b),
+		.in_de       (cap_de),
+		.in_hblank   (cap_hblank),
+		.in_vblank   (cap_vblank),
 		.video_r     (video_data_r),
 		.video_g     (video_data_g),
 		.video_b     (video_data_b),

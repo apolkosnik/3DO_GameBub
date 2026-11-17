@@ -69,6 +69,7 @@ module gb_host (
 	output reg [ 2: 0] controller,       // "Controller" (0x1014): 0 pad, 1 pad + light gun, 2 pad + mouse, 3 mouse + pad, 4 2 mice + pad
 	output reg [31: 0] lg_aim,           // light gun aim (0x1018): {y, x}, 0..65535 across the picture
 	output reg [ 2: 0] lg_buttons,       // light gun buttons (0x101C): {off screen, option, trigger}
+	output reg [ 1: 0] crosshair,        // "Crosshair" (0x1028): 0 small, 1 large, 2 off
 	output reg         mouse_pkt,        // a mouse motion write (0x1030), one clock
 	output reg [31: 0] mouse_motion,     // {dy, dx}, signed 16-bit each, down / right positive
 	output reg [ 2: 0] mouse_buttons,    // (0x1034) {middle, right, left}
@@ -323,6 +324,7 @@ module gb_host (
 			button_layout <= 0;
 			vram_mem      <= 2'd0;
 			controller    <= 3'd0;
+			crosshair     <= 2'd0;
 			mouse_motion  <= '0;
 			mouse_buttons <= '0;
 			mouse2_motion  <= '0;
@@ -384,6 +386,7 @@ module gb_host (
 							8'h14: controller <= mem_dataWrite[2:0];
 							8'h18: lg_aim <= mem_dataWrite;
 							8'h1C: lg_buttons <= mem_dataWrite[2:0];
+							8'h28: crosshair <= mem_dataWrite[1:0];
 							8'h30: begin mouse_motion <= mem_dataWrite; mouse_pkt <= 1; end
 							8'h34: mouse_buttons <= mem_dataWrite[2:0];
 							8'h38: begin mouse2_motion <= mem_dataWrite; mouse2_pkt <= 1; end
@@ -402,6 +405,7 @@ module gb_host (
 							8'h14: mem_dataRead <= {29'd0, controller};
 							8'h18: mem_dataRead <= lg_aim;
 							8'h1C: mem_dataRead <= {29'd0, lg_buttons};
+							8'h28: mem_dataRead <= {30'd0, crosshair};
 							8'h30: mem_dataRead <= mouse_motion;
 							8'h34: mem_dataRead <= {29'd0, mouse_buttons};
 							8'h38: mem_dataRead <= mouse2_motion;

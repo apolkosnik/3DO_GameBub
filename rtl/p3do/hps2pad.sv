@@ -53,7 +53,10 @@ module HPS2PAD (
 	input      [15: 0] lg_y,
 	input              lg_trigger,
 	input              lg_option,
-	input              lg_offscreen
+	input              lg_offscreen,
+	// the framebuffer pixel aimed at, 0..319 x 0..239 (the crosshair)
+	output     [ 8: 0] GUN_X,
+	output     [ 8: 0] GUN_Y
 );
 	
 	function automatic [7:0] stick_axis(input signed [7:0] axis);
@@ -265,17 +268,20 @@ module HPS2PAD (
 	//   c' = count + TIMEOFFSET, y = 10 c' / YSCANTIME,
 	//   x = ((10 c') % YSCANTIME) * WIDTH / (XSCANTIME * 10).
 	// Here, for a pixel (x, y):
-	//   count = ceil((y * YSCANTIME + x * XSCANTIME * 10 / WIDTH) / 10) - TIMEOFFSET
+	//   count = ceil((y * YSCANTIME + ceil(x * XSCANTIME * 10 / WIDTH)) / 10) - TIMEOFFSET
 	// Opera rounds the division by 10 down; then 10 c' can fall before the
 	// line's start, and the driver decodes x = 0 as the end of the line
-	// above (tb_lightgun). Rounded up, every pixel decodes to itself (x
-	// within one: x * XSCANTIME * 10 / WIDTH is rounded down). NTSC 1030 / 12707 / -12835 / 320 x 240, PAL
-	// 1051 / 12796 / -58995 / 388 x 288 (lightgun.h: the PAL values are the
-	// SDK's defaults, not verified on a PAL gun). The divisions run in a
-	// small serial divider that repeats all the time (about 60 clocks); the
-	// result changes only between whole computations.
+	// above (tb_lightgun). With both divisions rounded up every pixel
+	// decodes to itself: a pixel is XSCANTIME * 10 / WIDTH (32.2 NTSC, 27.1
+	// PAL) units of 10 c' wide, and the two roundings add at most 10. NTSC
+	// 1030 / 12707 / -12835 / 320 wide, PAL 1051 / 12796 / -58995 / 388 wide
+	// (lightgun.h: the PAL values are the SDK's defaults, not verified on a
+	// PAL gun). The aim is across the picture the core shows, the
+	// framebuffer's 320 x 240 pixels in NTSC and in PAL (VE's 640 dot, 240
+	// line window), so it maps to pixels 0..319 x 0..239 in both. The
+	// divisions run in a small serial divider that repeats all the time
+	// (about 60 clocks); the result changes only between whole computations.
 	wire [ 8:0] LG_W   = LG_PAL ? 9'd388 : 9'd320;
-	wire [ 8:0] LG_H   = LG_PAL ? 9'd288 : 9'd240;
 	wire [10:0] LG_XS  = LG_PAL ? 11'd1051 : 11'd1030;
 	wire [13:0] LG_YS  = LG_PAL ? 14'd12796 : 14'd12707;
 	wire [15:0] LG_OFF = LG_PAL ? 16'd58995 : 16'd12835;
@@ -285,20 +291,19 @@ module HPS2PAD (
 	reg  [23:0] lg_num, lg_q, lg_rem;
 	reg  [ 8:0] lg_den;
 	reg  [ 4:0] lg_bit;
-	reg  [23:0] lg_t;
 	always @(posedge CLK) begin
 		if (RST) begin
 			lg_st <= '0;
 			lg_count <= '0;
 		end else begin
 			case (lg_st)
-				3'd0: begin   // pixel position from the aim
-					lg_px <= 9'((32'(lg_x) * LG_W) >> 16);
-					lg_py <= 9'((32'(lg_y) * LG_H) >> 16);
+				3'd0: begin   // pixel position from the aim, 0..319 x 0..239
+					lg_px <= 9'((32'(lg_x) * 32'd320) >> 16);
+					lg_py <= 9'((32'(lg_y) * 32'd240) >> 16);
 					lg_st <= 3'd1;
 				end
-				3'd1: begin   // x * XSCANTIME * 10 / WIDTH
-					lg_num <= 24'(lg_px * LG_XS * 10);
+				3'd1: begin   // x * XSCANTIME * 10 / WIDTH, rounded up
+					lg_num <= 24'(lg_px * LG_XS * 10) + 24'(LG_W) - 24'd1;
 					lg_den <= LG_W;
 					lg_q <= '0; lg_rem <= '0; lg_bit <= 5'd23;
 					lg_st <= 3'd2;
@@ -325,6 +330,8 @@ module HPS2PAD (
 			endcase
 		end
 	end
+	assign GUN_X = lg_px;
+	assign GUN_Y = lg_py;
 	wire [19:0] lg_cnt  = lg_offscreen ? 20'd0 : lg_count;
 	wire [ 4:0] lg_hits = lg_offscreen ? 5'd0 : 5'h1F;
 	wire [39:0] lg_data = {

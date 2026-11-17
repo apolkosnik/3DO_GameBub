@@ -616,6 +616,80 @@ module tb_top;
 	end
 
 	// ------------------------------------------------------------------
+	// Light gun crosshair (gun_cross) in the core's video
+	// ------------------------------------------------------------------
+	// The frames the framework stores, addressed as it addresses its
+	// framebuffer (HandheldTop: vblank clears x and y, the rising edge of
+	// hblank starts the next line, each dataEnable outside them is the next
+	// pixel). From the core's start the Controller setting is 1 (the light
+	// gun, test ROM test 19) with the aim 0x4000, 0x8000: pixel 80, 120. The
+	// sequence, each step taken at a vblank and checked on the frame after
+	// the next one: the plus there with the Crosshair setting's default
+	// (Small: arms of 4, white, with a black border), Large (arms of 8), Off
+	// (no plus), Small with the gun off screen (no plus), on screen again
+	// (the plus back). The picture under the plus is the test ROM's, so off
+	// means: not every pixel of the plus's white part is white. All before
+	// test 19's transfer reads the gun (the Controller setting then goes to
+	// the mouse).
+	bit [17:0] xh_cap [240][320];
+	bit [17:0] xh_done [240][320];
+	int  xh_x = 0, xh_y = 0, xh_checked = 0;
+	bit  xh_finished = 0;
+	reg  xh_hb_d = 0, xh_vb_d = 0;
+	event xh_frame_end;
+	always @(posedge clk_sys) begin
+		if (vvbl) begin
+			if (!xh_vb_d) begin xh_done = xh_cap; -> xh_frame_end; end
+			xh_x = 0; xh_y = 0;
+		end else if (vhbl) begin
+			if (!xh_hb_d) begin xh_x = 0; xh_y++; end
+		end else if (vde) begin
+			if (xh_y < 240 && xh_x < 320) xh_cap[xh_y][xh_x] = {vr, vg, vb};
+			xh_x++;
+		end
+		xh_hb_d = vhbl; xh_vb_d = vvbl;
+	end
+	task automatic xh_check(input bit shown, input int arm, input string what);
+		int bad = 0, white = 0, whites = 0;
+		@(xh_frame_end); @(xh_frame_end);
+		@(xh_frame_end);
+		if (pb_mouse_set) begin
+			fail($sformatf("crosshair, %s: test 19 read the gun before the check (Controller is no longer 1)", what));
+			return;
+		end
+		for (int j = 120 - arm - 1; j <= 120 + arm + 1; j++) for (int i = 80 - arm - 1; i <= 80 + arm + 1; i++) begin
+			int dx, dy;
+			dx = i > 80 ? i - 80 : 80 - i;
+			dy = j > 120 ? j - 120 : 120 - j;
+			if ((dy == 0 && dx <= arm) || (dx == 0 && dy <= arm)) begin
+				whites++;
+				if (xh_done[j][i] == 18'h3FFFF) white++;
+				else if (shown) bad++;
+			end else if ((dy <= 1 && dx <= arm + 1) || (dx <= 1 && dy <= arm + 1)) begin
+				if (shown && xh_done[j][i] != 18'h0) bad++;
+			end
+		end
+		xh_checked++;
+		if (shown && bad) fail($sformatf("crosshair, %s: %0d pixels of the plus at 80,120 wrong (centre %05h, left arm end %05h)",
+		                                 what, bad, xh_done[120][80], xh_done[120][80 - arm]));
+		if (!shown && white == whites) fail($sformatf("crosshair, %s: the plus is still drawn at 80,120", what));
+		$display("[%0t] crosshair, %s: %s (%0d of %0d white)", $realtime, what, shown ? (bad ? "WRONG" : "the plus at 80,120") : "none", white, whites);
+	endtask
+	task automatic xh_sequence();
+		xh_check(1, 4, "Small (default)");
+		host_wr(32'h0000_1028, 32'h1);
+		xh_check(1, 8, "Large");
+		host_wr(32'h0000_1028, 32'h2);
+		xh_check(0, 8, "Off");
+		host_wr(32'h0000_1028, 32'h0);
+		host_wr(32'h0000_101C, 32'h5);   // the gun off screen (with the trigger, as the firmware sends it)
+		xh_check(0, 4, "Small, the gun off screen");
+		host_wr(32'h0000_101C, 32'h1);   // on screen again, trigger held (test 19)
+		xh_check(1, 4, "Small, on screen again");
+		xh_finished = 1;
+	endtask
+
+	// ------------------------------------------------------------------
 	// Debug trace (+trace): CPU bus activity and pause state
 	// ------------------------------------------------------------------
 	bit trace;
@@ -722,6 +796,15 @@ module tb_top;
 			if (q0 != 32'h1 || q1 != 32'h8000_4000 || q2 != 32'h1)
 				fail($sformatf("light gun registers read %08h %08h %08h", q0, q1, q2));
 		end
+		// Crosshair setting (0x1028): Small after reset, reads back what is written
+		begin
+			bit [31:0] q0, q1;
+			host_rd(32'h0000_1028, q0);
+			host_wr(32'h0000_1028, 32'h2);
+			host_rd(32'h0000_1028, q1);
+			host_wr(32'h0000_1028, 32'h0);
+			if (q0 != 32'h0 || q1 != 32'h2) fail($sformatf("Crosshair setting read %08h after reset, %08h after writing 2", q0, q1));
+		end
 		begin
 			bit [31:0] q;
 			host_rd(32'h0000_1010, q);
@@ -732,6 +815,7 @@ module tb_top;
 		host_cmd(16'h0200, 1, 0, 0, r, e);   // NotifyFocus(1)
 		host_cmd(16'h0100, 0, 0, 0, r, e);   // CoreRun
 		$display("[%0t] core running", $realtime);
+		fork xh_sequence(); join_none
 		if ($test$plusargs("short")) begin #300us; $display("tb_top: +short: stopped at 300 us, nothing checked (no PASS/FAIL)"); $finish; end
 
 		// Poll the verdict in NVRAM bytes 0x100..0x10F
@@ -815,6 +899,7 @@ module tb_top;
 		$display("[%0t] video: %0d frames, bad lines %0d, bad frames %0d; at the %0d software reset(s): %0d lines, %0d frames",
 		         $realtime, frames, bad_lines, bad_frames, soft_resets, srst_lines, srst_frames);
 		if (bad_lines || bad_frames) fail("video timing");
+		if (!xh_finished) fail($sformatf("crosshair: only %0d of the 5 steps checked", xh_checked));
 		// test ROM test 15: lines shown during the page copies
 		$display("tb_top: video DMA lines %0d, %0d of them late (started before a read transfer; shown lines), %0d late in the vertical blanking (not shown); CPU write transfers while it was on %0d",
 		         vl_lines, vl_late, vl_late_blank, vl_copies);

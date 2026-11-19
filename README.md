@@ -553,11 +553,12 @@ with the v0.5 bitstream and both firmware builds (the dock firmware's bluepad32 
 is at a public commit, with the dock's CMake giving bluepad32 the FreeRTOS CYW43 arch
 instead of its own).
 
-### Light gun (groundwork)
+### Light gun
 
 The 3DO light gun (ID 0x4D: American Laser Games titles, Corpse Killer, Space Pirates
-and others) is in the core's control port, before the pads, for the GunCon 3 support that
-is being added to the Game Bub firmware. The gun reports no position: a 20-bit count from
+and others) is in the core's control port, before the pads, driven by a GunCon 3 on the
+dock (dock firmware with the GunCon 3 driver, handheld firmware branch `3do-beta4`).
+Tested on hardware in Mad Dog II. The gun reports no position: a 20-bit count from
 the start of the field to the moment its sensor saw the beam, and the number of line
 pulses it saw. `HPS2PAD` turns an aim position into that count as Portfolio's light gun
 driver decodes it (`count = ceil((y * 12707 + ceil(x * 10300 / 320)) / 10) + 12835` for
@@ -572,8 +573,10 @@ further right and down than it pointed).
 **Crosshair.** While the gun is in use and sees the screen, `gun_cross` draws a white
 plus with a black border at the pixel it aims at, on the stream to the framework (so on
 the TV and the handheld's screen). The Crosshair setting (`0x1028`): Small (arms of 4
-pixels, the default), Large (8) or Off. The aim and the setting are taken at the vertical
-blanking, so a frame shows one whole plus. It helps calibrating (C1 + C2) and aiming.
+pixels), Large (8) or Off (the default: games like Mad Dog II draw their own cursor; the
+register itself resets to Small, the firmware writes the setting). The aim and the
+setting are taken at the vertical blanking, so a frame shows one whole plus. It helps
+calibrating (C1 + C2) and aiming in games that show nothing where the gun points.
 Core registers (host memory interface):
 
 * `0x1014` Controller: the chain's order (see "The control port chain"): 0 pads, 1 light

@@ -50,8 +50,13 @@ and `cdrom.cpp` as the reference).
   logo when the LZMA decoder asked for 32 KiB with 40 KB free in blocks of at most 7.5 KB.
   Everything a CHD needs is now allocated when it is opened. The decoders write straight
   into the hunk (which is also the LZ window) and keep their tables on the stack or in the
-  disc-read scratch buffer, which also holds the sector, its read-back and the compressed
-  hunk (62.7 of its 64 KiB). zstd is refused because a zstd decoder needs more than that.
+  CHD's work space. The work space (up to 57 KB) is in pieces, each its own allocation and
+  only those the CHD's codecs need: the compressed hunk (19 KB, also an uncompressed hunk),
+  the whole hunk for the generic codecs zlib and lzma (19 KB), and the decoders' tables
+  (18 KB) for lzma, cdlz and cdfl. A `chdman createcd` disc takes 19 + 18 KB. An on-demand
+  CHD disc is opened when the core loads, before it runs: even then the heap had only 35 KB
+  in one piece, and once the core runs only a few KB. zstd is refused because a zstd
+  decoder needs more than that.
 * **Refused:** CHD versions before 5 (convert them with a newer chdman), zstd compression
   (`cdzs`, `zstd`: recreate the CHD with chdman's default codecs), CHDs that need a parent,
   GD-ROM images, hunks of more than 8 frames, and track types other than `MODE1`,
@@ -61,7 +66,11 @@ Tested on a PC with the firmware's `chd.rs` and `disc.rs`. Each CHD made by chdm
 as the CUE/BIN or ISO it was made from, compared sector by sector: every sector in order plus
 4,000 in a scrambled order, and the TOC words the core gets. The test also counts the heap
 allocations made by the CHD's reads, which must be none, and its work buffer is misaligned
-on purpose. The test CHDs:
+on purpose. Since the work space is in pieces, a second test reads through `DiscImage`
+with the pieces it allocates (each CHD gets the pieces its codecs need, checked) against
+the source image: the made-up disc and the homebrew `.iso`, each as default, `cdzl`,
+`cdlz`, `cdfl`, `lzma,zlib` and uncompressed, and Alone in the Dark (default codecs, every
+sector against chdman's extraction). The test CHDs:
 
 * Killing Time and Microcosm (one raw data track; Killing Time with the default codecs,
   `cdzl` and `lzma,zlib`).
